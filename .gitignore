@@ -1,0 +1,13 @@
+.env
+.env.local
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.db
+*.sqlite
+node_modules/
+.next/
+.vercel/
+data/models/*.joblib
+data/models/*.json

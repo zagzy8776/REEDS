@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background: #060913;
+  color: #f8fafc;
+}
+
+.card {
+  @apply rounded-2xl border border-slate-800 bg-slate-900/70 p-5 shadow-xl;
+}
+
+.badge {
+  @apply rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300;
+}
