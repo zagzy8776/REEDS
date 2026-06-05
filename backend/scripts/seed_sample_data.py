@@ -10,6 +10,12 @@ from app.db.session import SessionLocal, init_db
 
 init_db()
 db = SessionLocal()
+
+# Keep this script idempotent for local and Render Shell usage.
+# It removes only sample-generated rows, then recreates them.
+db.query(Fixture).filter(Fixture.source == "sample").delete(synchronize_session=False)
+db.commit()
+
 base_played = [
     ("EPL", "2024", -30, "Arsenal", "Chelsea", 2, 1),
     ("EPL", "2024", -25, "Liverpool", "Tottenham", 3, 2),
