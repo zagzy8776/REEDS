@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata = {
   title: "LOYAL EDGE",
-  description: "Professional match analysis and value picks",
+  description: "Premium football and basketball prediction intelligence",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -18,7 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/predictions">Predictions</Link>
             <Link href="/combo">3-Combo</Link>
             <Link href="/stats">Stats</Link>
-            <Link href="/admin">Admin</Link>
+            <Link href="/admin">Control Room</Link>
           </div>
         </nav>
         {children}

@@ -45,7 +45,24 @@ Supported through loaders/adapters:
 Load football CSV:
 
 ```bash
-python backend/scripts/load_csv_data.py --path data/raw/E0.csv --league EPL --season 2024
+python backend/scripts/load_csv_data.py --sport soccer --path data/raw/E0.csv --league EPL --season 2024
+```
+
+Load basketball/NBA CSV:
+
+```bash
+python backend/scripts/load_csv_data.py --sport basketball --path data/raw/nba_2010_2024.csv --league NBA --season 2010-2024
+```
+
+Recommended model feeding order:
+
+```text
+1. Put football-data.co.uk CSVs in data/raw/football/
+2. Put footballcsv/Kaggle football exports in data/raw/football/
+3. Put NBA/Kaggle/GitHub basketball CSVs in data/raw/basketball/
+4. Load each CSV with backend/scripts/load_csv_data.py
+5. Run python backend/scripts/train_models.py
+6. Run POST /api/admin/predict to refresh customer picks
 ```
 
 ## Render backend
