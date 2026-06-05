@@ -2,6 +2,8 @@ import Link from "next/link";
 import { PredictionCard } from "../components/PredictionCard";
 import { getTodayPredictions } from "../lib/api";
 
+export const dynamic = "force-dynamic";
+
 export default async function Home() {
   const picks = (await getTodayPredictions()).slice(0, 3);
   return (
@@ -18,7 +20,7 @@ export default async function Home() {
         </div>
         <div className="card">
           <h2 className="text-xl font-bold">Today’s Top EDGE</h2>
-          <div className="mt-4 space-y-3">{picks.map((p: any) => <PredictionCard key={p.id} p={p} />)}</div>
+          <div className="mt-4 space-y-3">{picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <p className="text-sm text-slate-400">Predictions will appear after backend seed/train is complete.</p>}</div>
         </div>
       </section>
     </main>
