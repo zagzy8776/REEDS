@@ -34,6 +34,37 @@ BASKETBALL_DATA_MAP = {
 }
 
 
+def upsert_fixture(db: Session, fixture: Fixture) -> None:
+    """Insert or update a fixture using the natural uniqueness key.
+
+    SQLAlchemy merge only works by primary key. Our downloaded CSV rows do not know
+    primary keys, so we manually find existing rows to avoid duplicate-key errors.
+    """
+
+    existing = (
+        db.query(Fixture)
+        .filter(
+            Fixture.sport == fixture.sport,
+            Fixture.league == fixture.league,
+            Fixture.match_date == fixture.match_date,
+            Fixture.home_team == fixture.home_team,
+            Fixture.away_team == fixture.away_team,
+        )
+        .first()
+    )
+    if existing:
+        existing.season = fixture.season
+        existing.home_score = fixture.home_score
+        existing.away_score = fixture.away_score
+        existing.home_odds = fixture.home_odds
+        existing.draw_odds = fixture.draw_odds
+        existing.away_odds = fixture.away_odds
+        existing.source = fixture.source
+        existing.extra = fixture.extra
+    else:
+        db.add(fixture)
+
+
 def load_football_csv(db: Session, path: str, league: str = "Unknown", season: str = "Unknown") -> int:
     df = pd.read_csv(path).rename(columns={k: v for k, v in FOOTBALL_DATA_MAP.items() if k in pd.read_csv(path, nrows=0).columns})
     count = 0
@@ -57,7 +88,7 @@ def load_football_csv(db: Session, path: str, league: str = "Unknown", season: s
             away_odds=None if pd.isna(r.get("away_odds")) else float(r.get("away_odds")),
             source=Path(path).name,
         )
-        db.merge(fx)
+        upsert_fixture(db, fx)
         count += 1
     db.commit()
     return count
@@ -90,7 +121,7 @@ def load_basketball_csv(db: Session, path: str, league: str = "NBA", season: str
             away_score=None if pd.isna(r.get("away_score")) else int(r.get("away_score")),
             source=Path(path).name,
         )
-        db.merge(fx)
+        upsert_fixture(db, fx)
         count += 1
     db.commit()
     return count

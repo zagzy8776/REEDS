@@ -54,6 +54,29 @@ Load basketball/NBA CSV:
 python backend/scripts/load_csv_data.py --sport basketball --path data/raw/nba_2010_2024.csv --league NBA --season 2010-2024
 ```
 
+Download football-data.co.uk history from 2000 through 2024/25:
+
+```bash
+python backend/scripts/download_historical_data.py --start-year 2000 --end-year 2025 --leagues EPL,LA_LIGA,SERIE_A,BUNDESLIGA,LIGUE_1
+```
+
+Download extra GitHub raw CSVs with a manifest:
+
+```csv
+sport,league,season,url,filename
+basketball,NBA,2010-2024,https://raw.githubusercontent.com/example/nba.csv,nba_2010_2024.csv
+```
+
+```bash
+python backend/scripts/download_historical_data.py --manifest data/raw/manifest.csv
+```
+
+Bulk feed everything under `data/raw`:
+
+```bash
+python backend/scripts/bulk_feed_data.py --root data/raw --sport auto --season Historical
+```
+
 Recommended model feeding order:
 
 ```text
@@ -61,9 +84,18 @@ Recommended model feeding order:
 2. Put footballcsv/Kaggle football exports in data/raw/football/
 3. Put NBA/Kaggle/GitHub basketball CSVs in data/raw/basketball/
 4. Load each CSV with backend/scripts/load_csv_data.py
-5. Run python backend/scripts/train_models.py
-6. Run POST /api/admin/predict to refresh customer picks
+5. Or bulk-load folders with backend/scripts/bulk_feed_data.py
+6. Run python backend/scripts/train_models.py
+7. Run POST /api/admin/predict to refresh customer picks
 ```
+
+Important model-feeding rules:
+
+- Keep football and basketball data separate by sport.
+- Do not mix future results into training rows used to predict earlier matches.
+- Normalize team names before serious training, otherwise one club may appear as multiple teams.
+- Bigger history helps, but clean history matters more than messy volume.
+- The prediction model and chatbot-style wording are separate systems: match data trains picks; curated writing templates control customer-facing explanations.
 
 ## Render backend
 
