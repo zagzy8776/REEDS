@@ -5,6 +5,8 @@ import pandas as pd
 
 from app.ml.features import features_for_fixture
 from app.ml.poisson import soccer_probabilities
+from app.services.customer_copy import high_variance_warning, soccer_reasoning
+from app.utils.team_names import normalize_team_name
 
 
 class LoyalEdgeEngine:
@@ -14,7 +16,9 @@ class LoyalEdgeEngine:
         self.bundle = joblib.load(model_path) if model_path and Path(model_path).exists() else None
 
     def predict_soccer(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
-        f = features_for_fixture(history, fixture["home_team"], fixture["away_team"])
+        home_team = normalize_team_name(fixture["home_team"], "soccer")
+        away_team = normalize_team_name(fixture["away_team"], "soccer")
+        f = features_for_fixture(history, home_team, away_team)
         home_lam = max((f["home_goals_for"] + f["away_goals_against"]) / 2, 0.2)
         away_lam = max((f["away_goals_for"] + f["home_goals_against"]) / 2, 0.2)
         p = soccer_probabilities(home_lam, away_lam)
@@ -39,10 +43,10 @@ class LoyalEdgeEngine:
         def risk(c: float) -> str:
             return "Low" if c >= 0.72 else "Medium" if c >= 0.58 else "High"
 
-        reason = f"Form profile, matchup goal trend, and value filters passed. Projected score band: {p['score']} with total-goal estimate {home_lam + away_lam:.2f}."
+        reason = soccer_reasoning(p["score"], home_lam + away_lam)
         return [
             {"market": "1X2", "pick": pick_1x2, "confidence": round(conf_1x2 * 100, 1), "edge_score": round(conf_1x2 * 100, 1), "risk_level": risk(conf_1x2), "reasoning": reason, "engine_meta": {"private": p}},
             {"market": "Goals", "pick": "Over 2.5 Goals" if over_conf >= 0.5 else "Under 2.5 Goals", "confidence": round(max(over_conf, 1 - over_conf) * 100, 1), "edge_score": round(max(over_conf, 1 - over_conf) * 100, 1), "risk_level": risk(max(over_conf, 1 - over_conf)), "reasoning": reason, "engine_meta": {"private": p}},
             {"market": "BTTS", "pick": "BTTS Yes" if btts_conf >= 0.5 else "BTTS No", "confidence": round(max(btts_conf, 1 - btts_conf) * 100, 1), "edge_score": round(max(btts_conf, 1 - btts_conf) * 100, 1), "risk_level": risk(max(btts_conf, 1 - btts_conf)), "reasoning": reason, "engine_meta": {"private": p}},
-            {"market": "Correct Score", "pick": p["score"], "confidence": 42.0, "edge_score": 42.0, "risk_level": "High", "reasoning": "Correct scores are high-variance; this is a projected score band, not a guarantee.", "engine_meta": {"private": p}},
+            {"market": "Correct Score", "pick": p["score"], "confidence": 42.0, "edge_score": 42.0, "risk_level": "High", "reasoning": high_variance_warning(), "engine_meta": {"private": p}},
         ]

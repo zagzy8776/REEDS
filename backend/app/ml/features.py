@@ -1,5 +1,7 @@
 import pandas as pd
 
+from app.utils.team_names import normalize_team_name
+
 
 def normalize_result(home_score: int, away_score: int) -> int:
     if home_score > away_score:
@@ -10,13 +12,14 @@ def normalize_result(home_score: int, away_score: int) -> int:
 
 
 def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    df = fixtures.sort_values("match_date").copy()
+    df = fixtures[fixtures.get("sport", "soccer") == "soccer"].sort_values("match_date").copy()
     rows, y = [], []
     team_hist: dict[str, list[dict]] = {}
     for _, r in df.iterrows():
         if pd.isna(r.get("home_score")) or pd.isna(r.get("away_score")):
             continue
-        home, away = r["home_team"], r["away_team"]
+        home = normalize_team_name(r["home_team"], "soccer")
+        away = normalize_team_name(r["away_team"], "soccer")
         hh, ah = team_hist.get(home, [])[-10:], team_hist.get(away, [])[-10:]
 
         def avg(hist, key, default):
@@ -41,7 +44,9 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
 
 
 def features_for_fixture(history: pd.DataFrame, home_team: str, away_team: str) -> dict:
-    hist = history.sort_values("match_date") if not history.empty else history
+    home_team = normalize_team_name(home_team, "soccer")
+    away_team = normalize_team_name(away_team, "soccer")
+    hist = history[history.get("sport", "soccer") == "soccer"].sort_values("match_date") if not history.empty else history
 
     def recent(team):
         if hist.empty:
