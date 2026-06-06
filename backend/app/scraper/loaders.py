@@ -18,20 +18,51 @@ FOOTBALL_DATA_MAP = {
     "B365A": "away_odds",
 }
 
+
+def read_csv_flexible(path: str, **kwargs) -> pd.DataFrame:
+    """Read public sports CSVs that may use UTF-8 or legacy European encodings."""
+
+    last_error: Exception | None = None
+    for encoding in ("utf-8", "latin1", "cp1252"):
+        try:
+            return pd.read_csv(path, encoding=encoding, **kwargs)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return pd.read_csv(path, **kwargs)
+
 BASKETBALL_DATA_MAP = {
     "Date": "match_date",
     "GAME_DATE": "match_date",
+    "game_date": "match_date",
+    "GAME_DATE_EST": "match_date",
+    "date": "match_date",
     "HomeTeam": "home_team",
     "HOME_TEAM": "home_team",
+    "HOME_TEAM_NAME": "home_team",
+    "TEAM_NAME_home": "home_team",
+    "home_team_name": "home_team",
+    "home_team": "home_team",
     "VisitorTeam": "away_team",
     "AwayTeam": "away_team",
     "AWAY_TEAM": "away_team",
+    "VISITOR_TEAM_NAME": "away_team",
+    "TEAM_NAME_away": "away_team",
+    "away_team_name": "away_team",
+    "away_team": "away_team",
     "HomePTS": "home_score",
     "PTS_home": "home_score",
     "HOME_PTS": "home_score",
+    "PTS_HOME": "home_score",
+    "home_score": "home_score",
+    "home_points": "home_score",
     "AwayPTS": "away_score",
     "PTS_away": "away_score",
     "AWAY_PTS": "away_score",
+    "PTS_AWAY": "away_score",
+    "away_score": "away_score",
+    "away_points": "away_score",
 }
 
 
@@ -67,7 +98,8 @@ def upsert_fixture(db: Session, fixture: Fixture) -> None:
 
 
 def load_football_csv(db: Session, path: str, league: str = "Unknown", season: str = "Unknown") -> int:
-    df = pd.read_csv(path).rename(columns={k: v for k, v in FOOTBALL_DATA_MAP.items() if k in pd.read_csv(path, nrows=0).columns})
+    header = read_csv_flexible(path, nrows=0).columns
+    df = read_csv_flexible(path).rename(columns={k: v for k, v in FOOTBALL_DATA_MAP.items() if k in header})
     count = 0
     for _, r in df.iterrows():
         if not {"match_date", "home_team", "away_team"}.issubset(df.columns):
@@ -102,8 +134,38 @@ def load_basketball_csv(db: Session, path: str, league: str = "NBA", season: str
     Rows are normalized into the same fixtures table with sport='basketball'.
     """
 
-    header = pd.read_csv(path, nrows=0).columns
-    df = pd.read_csv(path).rename(columns={k: v for k, v in BASKETBALL_DATA_MAP.items() if k in header})
+    header = read_csv_flexible(path, nrows=0).columns
+    df = read_csv_flexible(path).rename(columns={k: v for k, v in BASKETBALL_DATA_MAP.items() if k in header})
+
+    # Kaggle/GitHub NBA files often store one row per team, not one row per game.
+    # If a file has matchup strings like "LAL vs. BOS" / "BOS @ LAL", normalize
+    # those rows into home/away fixtures before using the generic loader path.
+    matchup_col = next((c for c in ["MATCHUP", "matchup"] if c in df.columns), None)
+    points_col = next((c for c in ["PTS", "points", "TEAM_PTS"] if c in df.columns), None)
+    team_col = next((c for c in ["TEAM_NAME", "team_name", "TEAM_ABBREVIATION"] if c in df.columns), None)
+    game_col = next((c for c in ["GAME_ID", "game_id"] if c in df.columns), None)
+    if matchup_col and points_col and team_col and game_col and "home_team" not in df.columns:
+        rows = []
+        for _, g in df.groupby(game_col):
+            if len(g) < 2:
+                continue
+            home = away = None
+            for _, r in g.iterrows():
+                matchup = str(r.get(matchup_col, ""))
+                if " vs. " in matchup or " vs " in matchup:
+                    home = r
+                elif " @ " in matchup:
+                    away = r
+            if home is None or away is None:
+                continue
+            rows.append({
+                "match_date": home.get("match_date"),
+                "home_team": home.get(team_col),
+                "away_team": away.get(team_col),
+                "home_score": home.get(points_col),
+                "away_score": away.get(points_col),
+            })
+        df = pd.DataFrame(rows)
     count = 0
     for _, r in df.iterrows():
         if not {"match_date", "home_team", "away_team"}.issubset(df.columns):

@@ -24,4 +24,4 @@ def soccer_probabilities(home_lambda: float, away_lambda: float, max_goals: int 
                 btts += p
             if p > best[2]:
                 best = (h, a, p)
-    return {"home": home, "draw": draw, "away": away, "over25": over25, "btts": btts, "score": f"{best[0]}-{best[1]}"}
+    return {"home": home, "draw": draw, "away": away, "over25": over25, "btts": btts, "score": f"{best[0]}-{best[1]}", "score_prob": best[2]}
