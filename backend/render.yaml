@@ -33,7 +33,7 @@ services:
       - key: THE_ODDS_API_KEY
         sync: false
       - key: THE_ODDS_API_SPORT_KEYS
-        value: soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league
+        value: soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league,soccer_fifa_world_cup_qualifier,soccer_uefa_european_championship_qualifier,soccer_conmebol_world_cup_qualifier,soccer_concacaf_world_cup_qualifier,soccer_afc_asian_cup_qualifier,soccer_caf_africa_cup_of_nations_qualifier,soccer_international_friendly
       - key: LIVE_INGEST_DAYS
         value: 7
       - key: MIN_TRAINING_ROWS
