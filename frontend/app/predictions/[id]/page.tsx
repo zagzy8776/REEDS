@@ -93,6 +93,33 @@ export default async function PredictionDetail({ params }: { params: Promise<{ i
         </div>
       </section>
 
+      <section className="mt-6 grid gap-6 lg:grid-cols-2">
+        <div className="card">
+          <h2 className="text-xl font-bold">Community consensus</h2>
+          <p className="mt-2 text-sm text-slate-400">Crowdsourced picks are kept separate from LOYAL EDGE AI so user opinions never contaminate model training or backtests.</p>
+          <div className="mt-4 space-y-3">
+            {(prediction.community?.consensus || []).length ? prediction.community.consensus.map((c: any) => (
+              <div key={c.pick} className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+                <div className="flex items-center justify-between"><b>{c.pick}</b><span className="text-emerald-300">{c.percent}%</span></div>
+                <p className="mt-1 text-xs text-slate-500">{c.count} community pick{c.count === 1 ? "" : "s"}</p>
+              </div>
+            )) : <p className="text-sm text-slate-400">No community picks for this fixture yet.</p>}
+          </div>
+        </div>
+
+        <div className="card">
+          <h2 className="text-xl font-bold">Tipster notes</h2>
+          <div className="mt-4 max-h-80 space-y-3 overflow-y-auto">
+            {(prediction.community?.entries || []).length ? prediction.community.entries.map((entry: any) => (
+              <div key={entry.id} className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+                <div className="flex items-center justify-between gap-3"><b>{entry.username}</b><span className="text-xs text-slate-500">{entry.market}: {entry.pick}</span></div>
+                <p className="mt-2 text-sm text-slate-300">{entry.analysis_text || "No written analysis provided."}</p>
+              </div>
+            )) : <p className="text-sm text-slate-400">Be the first to publish a community view on this match.</p>}
+          </div>
+        </div>
+      </section>
+
       <section className="responsible-note mt-6">
         <b>Responsible play:</b> {prediction.responsible_note || "Predictions are probabilistic, not guarantees. Never stake more than you can afford to lose."}
       </section>

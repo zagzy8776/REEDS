@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     min_training_rows: int = 20
     model_dir: str = "data/models"
     public_brand_name: str = "LOYAL EDGE"
+    api_football_key: str = ""
+    api_basketball_key: str = ""
+    api_sports_key: str = ""
+    live_ingest_days: int = 7
 
     @property
     def allowed_cors_origins(self) -> list[str]:

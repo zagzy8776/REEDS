@@ -32,3 +32,11 @@ export async function getCombo() {
 export async function getStats() {
   return safeFetchJson(`${API_URL}/api/stats/backtest`, { models: [], note: "Backend stats are not available yet." });
 }
+
+export async function getUpcomingFixtures() {
+  return safeFetchJson(`${API_URL}/api/fixtures/upcoming?limit=100`, []);
+}
+
+export async function getCommunityLeaderboard() {
+  return safeFetchJson(`${API_URL}/api/community/leaderboard?limit=50`, []);
+}

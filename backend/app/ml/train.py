@@ -52,6 +52,7 @@ FEATURES = [
     "home_implied",
     "draw_implied",
     "away_implied",
+    "odds_margin",
 ]
 BASKETBALL_FEATURES = [
     "home_recent_points_for",

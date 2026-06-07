@@ -48,6 +48,7 @@ FEATURES = [
     "home_implied",
     "draw_implied",
     "away_implied",
+    "odds_margin",
 ]
 
 

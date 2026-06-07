@@ -16,6 +16,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </Link>
           <div className="flex gap-4 text-sm text-slate-300">
             <Link href="/predictions">Predictions</Link>
+            <Link href="/predictions/submit">Submit Pick</Link>
+            <Link href="/community-leaderboard">Community</Link>
             <Link href="/combo">3-Combo</Link>
             <Link href="/stats">Stats</Link>
           </div>

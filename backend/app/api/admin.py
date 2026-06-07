@@ -9,6 +9,7 @@ from app.ml.train import train_basketball_model, train_soccer_model
 from app.services.data_quality import upsert_team_alias
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
+from app.services.community import settle_user_predictions
 
 
 router = APIRouter()
@@ -65,6 +66,11 @@ def backtest(db: Session = Depends(get_db)):
         except ValueError as exc:
             skipped.append({"sport": sport, "reason": str(exc)})
     return {"status": "backtested", "completed": completed, "skipped": skipped}
+
+
+@router.post("/community/settle", dependencies=[Depends(require_admin)])
+def settle_community_predictions(db: Session = Depends(get_db)):
+    return settle_user_predictions(db)
 
 
 @router.post("/team-aliases", dependencies=[Depends(require_admin)])

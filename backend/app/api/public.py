@@ -1,10 +1,11 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.db.models import BacktestRun, Fixture, ModelVersion, OddsSnapshot, Prediction
+from app.db.models import BacktestRun, Fixture, ModelVersion, OddsSnapshot, Prediction, UserPrediction
 from app.db.session import get_db
+from app.services.community import community_leaderboard, fixture_consensus
 from app.services.market_metrics import roi_clv_summary
 from app.services.predictions import build_combo, compound_combo_probability
 
@@ -83,6 +84,15 @@ def today(league: str | None = None, market: str | None = None, risk: str | None
     return [serialize_prediction(p, f) for p, f in rows]
 
 
+@router.get("/predictions/combo")
+def combo_endpoint(legs: int = 3, min_confidence: float = 60, db: Session = Depends(get_db)):
+    rows = build_combo(db, legs, min_confidence)
+    out = [serialize_prediction(p, f) for p, f in rows]
+    true_probability = compound_combo_probability([p for p, _ in rows])
+    avg_edge = round(sum(x["edge_score"] for x in out) / len(out), 1) if out else 0
+    return {"label": "LOYAL EDGE 3-Leg Combo", "combined_confidence": true_probability, "avg_edge_score": avg_edge, "risk_level": "High" if true_probability < 45 else "Medium" if true_probability < 65 else "Low", "legs": out}
+
+
 @router.get("/predictions/{prediction_id}")
 def prediction_detail(prediction_id: int, db: Session = Depends(get_db)):
     row = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.id == prediction_id, Prediction.is_published == True).first()
@@ -96,16 +106,49 @@ def prediction_detail(prediction_id: int, db: Session = Depends(get_db)):
         "engine_summary": "Model output is calibrated where available and filtered by market-specific publish thresholds.",
         "odds_snapshots": [{"phase": o.phase, "market": o.market, "home_odds": o.home_odds, "draw_odds": o.draw_odds, "away_odds": o.away_odds, "bookmaker": o.bookmaker, "captured_at": o.captured_at} for o in snapshots],
         "responsible_note": "Predictions are probabilistic, not guaranteed. Use responsible staking.",
+        "community": fixture_consensus(db, f.id),
     }
 
 
-@router.get("/predictions/combo")
-def combo_endpoint(legs: int = 3, min_confidence: float = 60, db: Session = Depends(get_db)):
-    rows = build_combo(db, legs, min_confidence)
-    out = [serialize_prediction(p, f) for p, f in rows]
-    true_probability = compound_combo_probability([p for p, _ in rows])
-    avg_edge = round(sum(x["edge_score"] for x in out) / len(out), 1) if out else 0
-    return {"label": "LOYAL EDGE 3-Leg Combo", "combined_confidence": true_probability, "avg_edge_score": avg_edge, "risk_level": "High" if true_probability < 45 else "Medium" if true_probability < 65 else "Low", "legs": out}
+@router.get("/fixtures/upcoming")
+def upcoming_fixtures(limit: int = 50, db: Session = Depends(get_db)):
+    rows = db.query(Fixture).filter(Fixture.match_date >= date.today(), Fixture.sport.in_(["soccer", "basketball"])).order_by(Fixture.match_date.asc()).limit(min(limit, 100)).all()
+    return [{"id": f.id, "sport": f.sport, "league": f.league, "match_date": f.match_date, "home_team": f.home_team, "away_team": f.away_team} for f in rows]
+
+
+@router.post("/community/predictions")
+async def submit_user_prediction(request: Request, db: Session = Depends(get_db)):
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+    else:
+        form = await request.form()
+        payload = dict(form)
+    fixture_id = payload.get("fixture_id")
+    username = str(payload.get("username", "")).strip()[:80]
+    market = str(payload.get("market", "")).strip()[:50]
+    pick = str(payload.get("pick", "")).strip()[:120]
+    analysis = str(payload.get("analysis_text", "")).strip()[:1000]
+    if not fixture_id or not username or not market or not pick:
+        raise HTTPException(status_code=400, detail="fixture_id, username, market, and pick are required")
+    fixture = db.query(Fixture).filter(Fixture.id == int(fixture_id), Fixture.match_date >= date.today()).first()
+    if not fixture:
+        raise HTTPException(status_code=404, detail="Upcoming fixture not found")
+    row = UserPrediction(fixture_id=fixture.id, username=username, market=market, pick=pick, analysis_text=analysis or None)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "status": "submitted"}
+
+
+@router.get("/community/fixtures/{fixture_id}")
+def community_for_fixture(fixture_id: int, db: Session = Depends(get_db)):
+    return fixture_consensus(db, fixture_id)
+
+
+@router.get("/community/leaderboard")
+def leaderboard(limit: int = 50, db: Session = Depends(get_db)):
+    return community_leaderboard(db, min(limit, 100))
 
 
 @router.get("/stats/backtest")

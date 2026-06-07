@@ -74,6 +74,23 @@ class Prediction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
+class UserPrediction(Base):
+    __tablename__ = "user_predictions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fixture_id: Mapped[int] = mapped_column(Integer, index=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    market: Mapped[str] = mapped_column(String(50), index=True)
+    pick: Mapped[str] = mapped_column(String(120))
+    analysis_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stake_units: Mapped[float] = mapped_column(Float, default=10.0)
+    is_settled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    was_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    profit_units: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class OddsSnapshot(Base):
     __tablename__ = "odds_snapshots"
 

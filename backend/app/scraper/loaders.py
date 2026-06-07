@@ -4,6 +4,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture
+from app.scraper.api_clients import ApiBasketballClient, ApiFootballClient
 from app.services.data_quality import resolve_team_name
 from app.utils.team_names import normalize_team_name
 
@@ -96,6 +97,125 @@ def upsert_fixture(db: Session, fixture: Fixture) -> None:
         existing.extra = fixture.extra
     else:
         db.add(fixture)
+
+
+def _to_int_or_none(value) -> int | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float_or_none(value) -> float | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_api_football_1x2_odds(payload: dict) -> dict[int, dict[str, float | None]]:
+    odds_by_fixture: dict[int, dict[str, float | None]] = {}
+    for item in payload.get("response", []) or []:
+        fixture_id = item.get("fixture", {}).get("id")
+        if not fixture_id:
+            continue
+        for bookmaker in item.get("bookmakers", []) or []:
+            for bet in bookmaker.get("bets", []) or []:
+                name = str(bet.get("name", "")).lower()
+                if name not in {"match winner", "1x2", "winner"}:
+                    continue
+                row = {"home_odds": None, "draw_odds": None, "away_odds": None}
+                for value in bet.get("values", []) or []:
+                    label = str(value.get("value", "")).lower()
+                    odd = _to_float_or_none(value.get("odd"))
+                    if label in {"home", "1"}:
+                        row["home_odds"] = odd
+                    elif label in {"draw", "x"}:
+                        row["draw_odds"] = odd
+                    elif label in {"away", "2"}:
+                        row["away_odds"] = odd
+                odds_by_fixture[int(fixture_id)] = row
+                break
+            if int(fixture_id) in odds_by_fixture:
+                break
+    return odds_by_fixture
+
+
+def ingest_api_football_fixtures(db: Session, api_key: str, target_dates: list[str], include_odds: bool = True) -> int:
+    client = ApiFootballClient(api_key)
+    count = 0
+    for target_date in target_dates:
+        fixture_payload = client.fixtures_by_date(target_date)
+        odds_by_fixture = _parse_api_football_1x2_odds(client.odds_by_date(target_date)) if include_odds else {}
+        for item in fixture_payload.get("response", []) or []:
+            fixture_data = item.get("fixture", {})
+            league_data = item.get("league", {})
+            teams = item.get("teams", {})
+            goals = item.get("goals", {})
+            home = teams.get("home", {})
+            away = teams.get("away", {})
+            fixture_id = fixture_data.get("id")
+            match_date = pd.to_datetime(fixture_data.get("date"), errors="coerce")
+            if pd.isna(match_date) or not home.get("name") or not away.get("name"):
+                continue
+            odds = odds_by_fixture.get(int(fixture_id or 0), {})
+            fx = Fixture(
+                sport="soccer",
+                league=league_data.get("name") or "Football",
+                season=str(league_data.get("season") or match_date.year),
+                match_date=match_date.date(),
+                home_team=resolve_team_name(db, str(home.get("name")), "soccer", "api_football"),
+                away_team=resolve_team_name(db, str(away.get("name")), "soccer", "api_football"),
+                home_score=_to_int_or_none(goals.get("home")),
+                away_score=_to_int_or_none(goals.get("away")),
+                home_odds=odds.get("home_odds"),
+                draw_odds=odds.get("draw_odds"),
+                away_odds=odds.get("away_odds"),
+                source="api_football",
+                extra={"api_fixture_id": fixture_id, "status": fixture_data.get("status"), "country": league_data.get("country")},
+            )
+            upsert_fixture(db, fx)
+            count += 1
+        db.commit()
+    return count
+
+
+def ingest_api_basketball_games(db: Session, api_key: str, target_dates: list[str]) -> int:
+    client = ApiBasketballClient(api_key)
+    count = 0
+    for target_date in target_dates:
+        payload = client.games_by_date(target_date)
+        for item in payload.get("response", []) or []:
+            teams = item.get("teams", {})
+            scores = item.get("scores", {})
+            league = item.get("league", {})
+            home = teams.get("home", {})
+            away = teams.get("away", {})
+            home_scores = scores.get("home", {}) if isinstance(scores.get("home"), dict) else {}
+            away_scores = scores.get("away", {}) if isinstance(scores.get("away"), dict) else {}
+            match_date = pd.to_datetime(item.get("date"), errors="coerce")
+            if pd.isna(match_date) or not home.get("name") or not away.get("name"):
+                continue
+            fx = Fixture(
+                sport="basketball",
+                league=league.get("name") or "Basketball",
+                season=str(item.get("season") or match_date.year),
+                match_date=match_date.date(),
+                home_team=resolve_team_name(db, str(home.get("name")), "basketball", "api_basketball"),
+                away_team=resolve_team_name(db, str(away.get("name")), "basketball", "api_basketball"),
+                home_score=_to_int_or_none(home_scores.get("total")),
+                away_score=_to_int_or_none(away_scores.get("total")),
+                source="api_basketball",
+                extra={"api_game_id": item.get("id"), "status": item.get("status"), "country": league.get("country")},
+            )
+            upsert_fixture(db, fx)
+            count += 1
+        db.commit()
+    return count
 
 
 def load_football_csv(db: Session, path: str, league: str = "Unknown", season: str = "Unknown") -> int:

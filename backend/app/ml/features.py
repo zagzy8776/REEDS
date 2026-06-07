@@ -49,6 +49,22 @@ def _soccer_league_difficulty(league) -> float:
     return SOCCER_LEAGUE_DIFFICULTY.get(str(league), 0.75)
 
 
+def _odds_margin(home_odds, draw_odds, away_odds) -> float:
+    """Bookmaker overround/juice for 1X2 prices.
+
+    Fair decimal odds sum to roughly 1.0 implied probability. Anything above that
+    is margin. Missing/incomplete odds return 0 so historical rows without odds
+    remain usable.
+    """
+
+    try:
+        if not home_odds or not draw_odds or not away_odds:
+            return 0.0
+        return max((1 / float(home_odds)) + (1 / float(draw_odds)) + (1 / float(away_odds)) - 1, 0.0)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
 def normalize_result(home_score: int, away_score: int) -> int:
     if home_score > away_score:
         return 2
@@ -114,6 +130,7 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
             "home_implied": 1 / r["home_odds"] if r.get("home_odds") else 0.0,
             "draw_implied": 1 / r["draw_odds"] if r.get("draw_odds") else 0.0,
             "away_implied": 1 / r["away_odds"] if r.get("away_odds") else 0.0,
+            "odds_margin": _odds_margin(r.get("home_odds"), r.get("draw_odds"), r.get("away_odds")),
         })
         y.append(normalize_result(hs, aas))
         home_entry = {"gf": hs, "ga": aas, "gd": hs - aas, "points": 3 if hs > aas else 1 if hs == aas else 0, "result": "W" if hs > aas else "D" if hs == aas else "L"}
@@ -235,6 +252,7 @@ def features_for_fixture(
         "home_implied": 1 / home_odds if home_odds else 0.0,
         "draw_implied": 1 / draw_odds if draw_odds else 0.0,
         "away_implied": 1 / away_odds if away_odds else 0.0,
+        "odds_margin": _odds_margin(home_odds, draw_odds, away_odds),
     }
 
 

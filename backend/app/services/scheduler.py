@@ -1,17 +1,25 @@
 import logging
+from datetime import date, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from app.core.config import get_settings
 from app.db.models import BacktestRun
 from app.db.session import SessionLocal
 from app.ml.backtest import walk_forward_backtest
 from app.ml.calibration import fit_soccer_platt_calibrator
 from app.ml.train import train_basketball_model, train_soccer_model
+from app.scraper.loaders import ingest_api_basketball_games, ingest_api_football_fixtures
+from app.services.community import settle_user_predictions
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
 
 
 log = logging.getLogger(__name__)
+
+
+def _date_window(days: int) -> list[str]:
+    return [(date.today() + timedelta(days=offset)).isoformat() for offset in range(max(days, 1))]
 
 
 def run_daily_learning_pipeline() -> dict:
@@ -28,8 +36,37 @@ def run_daily_learning_pipeline() -> dict:
     """
 
     db = SessionLocal()
-    report: dict = {"trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
+    settings = get_settings()
+    report: dict = {"ingested": {"soccer": 0, "basketball": 0}, "community_settled": 0, "trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
     try:
+        dates = _date_window(settings.live_ingest_days)
+        football_key = settings.api_football_key or settings.api_sports_key
+        basketball_key = settings.api_basketball_key or settings.api_sports_key
+
+        if football_key:
+            try:
+                report["ingested"]["soccer"] = ingest_api_football_fixtures(db, football_key, dates, include_odds=True)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Daily API-Football ingestion failed")
+                report["skipped"].append({"stage": "ingest", "sport": "soccer", "reason": str(exc)})
+        else:
+            report["skipped"].append({"stage": "ingest", "sport": "soccer", "reason": "API_FOOTBALL_KEY/API_SPORTS_KEY not configured"})
+
+        if basketball_key:
+            try:
+                report["ingested"]["basketball"] = ingest_api_basketball_games(db, basketball_key, dates)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Daily API-Basketball ingestion failed")
+                report["skipped"].append({"stage": "ingest", "sport": "basketball", "reason": str(exc)})
+        else:
+            report["skipped"].append({"stage": "ingest", "sport": "basketball", "reason": "API_BASKETBALL_KEY/API_SPORTS_KEY not configured"})
+
+        try:
+            report["community_settled"] = settle_user_predictions(db)["settled"]
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Daily community prediction settlement failed")
+            report["skipped"].append({"stage": "community_settle", "reason": str(exc)})
+
         data = dataframe_from_db(db)
 
         for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
