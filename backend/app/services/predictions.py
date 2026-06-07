@@ -31,6 +31,22 @@ def should_publish_pick(item: dict) -> bool:
     return float(item.get("confidence", 0)) >= threshold and item.get("risk_level") != "High"
 
 
+def choose_provisional_public_pick(items: list[dict]) -> dict | None:
+    """Keep the board populated when live fixtures exist but strict filters reject all picks.
+
+    The normal publish filter remains conservative. For brand-new live feeds with no
+    trained model/odds yet, every generated market can fall just below threshold,
+    leaving customers with fixtures but no AI reads. In that case publish one
+    clearly-labelled non-correct-score read per fixture so the product is useful
+    while still preserving the original confidence and risk level.
+    """
+
+    candidates = [item for item in items if item.get("market") != "Correct Score" and float(item.get("confidence", 0)) >= 50]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: float(item.get("confidence", 0)))
+
+
 def dataframe_from_db(db: Session) -> pd.DataFrame:
     rows = db.query(Fixture).all()
     return pd.DataFrame([{
@@ -97,8 +113,11 @@ def generate_today_predictions(db: Session) -> int:
         else:
             model_version_id = soccer_model.id if soccer_model else None
             items = soccer_engine.predict_soccer(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
+        publish_fallback = choose_provisional_public_pick(items) if not any(should_publish_pick(item) for item in items) else None
         for item in items:
-            is_published = should_publish_pick(item)
+            is_published = should_publish_pick(item) or item is publish_fallback
+            if item is publish_fallback:
+                item = {**item, "reasoning": f"Provisional public read while live data/model history is still warming up. {item.get('reasoning', '')}"}
             _supersede_active_prediction(db, fx.id, item["market"])
             version = _next_prediction_version(db, fx.id, item["market"])
             pred = Prediction(
