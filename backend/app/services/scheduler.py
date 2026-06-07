@@ -22,6 +22,36 @@ def _date_window(days: int) -> list[str]:
     return [(date.today() + timedelta(days=offset)).isoformat() for offset in range(max(days, 1))]
 
 
+def seed_local_csv_history(db: Session) -> int:
+    """Load 30+ historical CSV files sitting in data/raw into the database for model training."""
+    from pathlib import Path
+    from app.scraper.loaders import load_basketball_csv, load_football_csv
+    root = Path("data/raw")
+    files = sorted(root.rglob("*.csv"))
+    count = 0
+    for path in files:
+        lowered = str(path).lower()
+        sport = "basketball" if "basket" in lowered or "nba" in lowered else "soccer"
+        parts = [p.upper() for p in path.parts]
+        known = ["EPL", "LA_LIGA", "SERIE_A", "BUNDESLIGA", "LIGUE_1", "CHAMPIONSHIP",
+                 "EREDIVISIE", "PORTUGAL", "BELGIUM", "SCOTLAND", "TURKEY"]
+        league = "Football"
+        for item in known:
+            if item in parts or item.lower() in str(path).lower():
+                league = item.replace("_", " ")
+                break
+        try:
+            if sport == "basketball":
+                loaded = load_basketball_csv(db, str(path), league=league, season="Historical")
+            else:
+                loaded = load_football_csv(db, str(path), league=league, season="Historical")
+            count += loaded
+        except Exception:
+            continue
+    db.commit()
+    return count
+
+
 def run_daily_learning_pipeline() -> dict:
     """Run the full unattended daily model refresh pipeline.
 
@@ -39,6 +69,11 @@ def run_daily_learning_pipeline() -> dict:
     settings = get_settings()
     report: dict = {"ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0}, "community_settled": 0, "trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
     try:
+        # Seed historical CSV data if not already loaded
+        csv_count = seed_local_csv_history(db)
+        if csv_count:
+            log.info("Seeded %d historical CSV rows into database", csv_count)
+
         dates = _date_window(settings.live_ingest_days)
         football_key = settings.api_football_key or settings.api_sports_key
         basketball_key = settings.api_basketball_key or settings.api_sports_key
