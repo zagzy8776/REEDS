@@ -33,3 +33,20 @@ def on_startup():
 @app.get("/health")
 def health():
     return {"ok": True, "brand": settings.public_brand_name}
+
+
+@app.get("/api/health")
+def api_health():
+    return health()
+
+
+@app.get("/api/feed-health")
+def api_feed_health():
+    from app.api.public import fixtures_status
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        return fixtures_status(db=db)
+    finally:
+        db.close()

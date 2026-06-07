@@ -79,3 +79,55 @@ class TheOddsApiClient:
         if bookmakers:
             params["bookmakers"] = bookmakers
         return self.http.get(f"{self.base_url}/sports/{sport_key}/odds", params=params).json()
+
+
+class ApiFootballComClient:
+    """apifootball.com adapter. This is different from API-SPORTS API-Football."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://apiv3.apifootball.com"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def fixtures_by_date(self, target_date: str) -> dict | list:
+        if not self.api_key:
+            return []
+        return self.http.get(
+            self.base_url,
+            params={"action": "get_events", "from": target_date, "to": target_date, "APIkey": self.api_key},
+        ).json()
+
+
+class SportMonksFootballClient:
+    """SportMonks Football v3 adapter."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://api.sportmonks.com/v3/football"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def fixtures_by_date(self, target_date: str) -> dict:
+        if not self.api_key:
+            return {"data": []}
+        return self.http.get(
+            f"{self.base_url}/fixtures/date/{target_date}",
+            params={"api_token": self.api_key, "include": "participants;scores;league"},
+        ).json()
+
+
+class FootballDataOrgClient:
+    """football-data.org v4 adapter."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://api.football-data.org/v4"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def matches_by_date(self, target_date: str) -> dict:
+        if not self.api_key:
+            return {"matches": []}
+        return self.http.get(
+            f"{self.base_url}/matches",
+            params={"dateFrom": target_date, "dateTo": target_date},
+            headers={"X-Auth-Token": self.api_key},
+        ).json()

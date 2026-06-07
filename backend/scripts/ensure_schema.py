@@ -5,7 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import inspect, text
 
-from app.db.session import engine, init_db
+from app.db.session import engine, init_db, repair_runtime_schema
 
 
 def add_column_if_missing(table: str, column: str, ddl: str) -> None:
@@ -36,5 +36,6 @@ def repair_existing_sqlite_schema() -> None:
 
 if __name__ == "__main__":
     init_db()
+    repair_runtime_schema()
     repair_existing_sqlite_schema()
     print({"schema": "ensured", "note": "SQLAlchemy create_all completed for configured DATABASE_URL"})

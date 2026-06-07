@@ -22,6 +22,12 @@ services:
         sync: false
       - key: API_FOOTBALL_KEY
         sync: false
+      - key: API_FOOTBALL_COM_KEY
+        sync: false
+      - key: SPORTMONKS_API_KEY
+        sync: false
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
       - key: API_BASKETBALL_KEY
         sync: false
       - key: THE_ODDS_API_KEY

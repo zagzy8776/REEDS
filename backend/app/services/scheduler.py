@@ -1,5 +1,5 @@
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -9,7 +9,7 @@ from app.db.session import SessionLocal
 from app.ml.backtest import walk_forward_backtest
 from app.ml.calibration import fit_soccer_platt_calibrator
 from app.ml.train import train_basketball_model, train_soccer_model
-from app.scraper.loaders import ingest_api_basketball_games, ingest_api_football_fixtures
+from app.scraper.loaders import ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures
 from app.services.community import settle_user_predictions
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
@@ -37,7 +37,7 @@ def run_daily_learning_pipeline() -> dict:
 
     db = SessionLocal()
     settings = get_settings()
-    report: dict = {"ingested": {"soccer": 0, "basketball": 0}, "community_settled": 0, "trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
+    report: dict = {"ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0}, "community_settled": 0, "trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
     try:
         dates = _date_window(settings.live_ingest_days)
         football_key = settings.api_football_key or settings.api_sports_key
@@ -45,7 +45,7 @@ def run_daily_learning_pipeline() -> dict:
 
         if football_key:
             try:
-                report["ingested"]["soccer"] = ingest_api_football_fixtures(
+                report["ingested"]["api_sports_football"] = ingest_api_football_fixtures(
                     db,
                     football_key,
                     dates,
@@ -53,11 +53,26 @@ def run_daily_learning_pipeline() -> dict:
                     the_odds_api_key=settings.the_odds_api_key,
                     the_odds_api_sport_keys=settings.odds_api_sport_keys,
                 )
+                report["ingested"]["soccer"] += report["ingested"]["api_sports_football"]
             except Exception as exc:  # noqa: BLE001
                 log.exception("Daily API-Football ingestion failed")
-                report["skipped"].append({"stage": "ingest", "sport": "soccer", "reason": str(exc)})
+                report["skipped"].append({"stage": "ingest", "provider": "api_sports_football", "sport": "soccer", "reason": str(exc)})
         else:
-            report["skipped"].append({"stage": "ingest", "sport": "soccer", "reason": "API_FOOTBALL_KEY/API_SPORTS_KEY not configured"})
+            report["skipped"].append({"stage": "ingest", "provider": "api_sports_football", "sport": "soccer", "reason": "API_FOOTBALL_KEY/API_SPORTS_KEY not configured"})
+
+        for provider, key, ingester in (
+            ("apifootball_com", settings.api_football_com_key, ingest_apifootball_com_events),
+            ("sportmonks", settings.sportmonks_api_key, ingest_sportmonks_football_fixtures),
+            ("football_data_org", settings.football_data_api_key, ingest_football_data_org_matches),
+        ):
+            if not key:
+                continue
+            try:
+                report["ingested"][provider] = ingester(db, key, dates)
+                report["ingested"]["soccer"] += report["ingested"][provider]
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Daily %s ingestion failed", provider)
+                report["skipped"].append({"stage": "ingest", "provider": provider, "sport": "soccer", "reason": str(exc)})
 
         if basketball_key:
             try:
@@ -139,6 +154,14 @@ def start_scheduler() -> BackgroundScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+    )
+    scheduler.add_job(
+        daily_job,
+        "date",
+        run_date=datetime.utcnow() + timedelta(seconds=30),
+        id="startup_learning_pipeline",
+        replace_existing=True,
+        max_instances=1,
     )
     scheduler.start()
     return scheduler

@@ -4,7 +4,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture
-from app.scraper.api_clients import ApiBasketballClient, ApiFootballClient, TheOddsApiClient
+from app.scraper.api_clients import ApiBasketballClient, ApiFootballClient, ApiFootballComClient, FootballDataOrgClient, SportMonksFootballClient, TheOddsApiClient
 from app.services.data_quality import resolve_team_name
 from app.utils.team_names import normalize_team_name
 
@@ -245,6 +245,105 @@ def ingest_api_football_fixtures(
                 away_odds=odds.get("away_odds"),
                 source="api_football",
                 extra={"api_fixture_id": fixture_id, "status": fixture_data.get("status"), "country": league_data.get("country"), "odds_source": "the_odds_api" if odds_key in external_odds_by_match else "api_football" if odds else None},
+            )
+            upsert_fixture(db, fx)
+            count += 1
+        db.commit()
+    return count
+
+
+def _score_from_sportmonks_scores(scores: list, participant_id: int | None) -> int | None:
+    for score in scores or []:
+        if score.get("participant_id") == participant_id and str(score.get("description", "")).upper() in {"CURRENT", "FT", "FULLTIME"}:
+            return _to_int_or_none((score.get("score") or {}).get("goals"))
+    return None
+
+
+def ingest_sportmonks_football_fixtures(db: Session, api_key: str, target_dates: list[str]) -> int:
+    client = SportMonksFootballClient(api_key)
+    count = 0
+    for target_date in target_dates:
+        payload = client.fixtures_by_date(target_date)
+        for item in payload.get("data", []) or []:
+            participants = item.get("participants", []) or []
+            home = next((p for p in participants if (p.get("meta") or {}).get("location") == "home"), None)
+            away = next((p for p in participants if (p.get("meta") or {}).get("location") == "away"), None)
+            match_date = pd.to_datetime(item.get("starting_at"), errors="coerce")
+            if pd.isna(match_date) or not home or not away:
+                continue
+            fx = Fixture(
+                sport="soccer",
+                league=(item.get("league") or {}).get("name") or "Football",
+                season=str(item.get("season_id") or match_date.year),
+                match_date=match_date.date(),
+                home_team=resolve_team_name(db, str(home.get("name")), "soccer", "sportmonks"),
+                away_team=resolve_team_name(db, str(away.get("name")), "soccer", "sportmonks"),
+                home_score=_score_from_sportmonks_scores(item.get("scores") or [], home.get("id")),
+                away_score=_score_from_sportmonks_scores(item.get("scores") or [], away.get("id")),
+                source="sportmonks",
+                extra={"sportmonks_fixture_id": item.get("id"), "state_id": item.get("state_id")},
+            )
+            upsert_fixture(db, fx)
+            count += 1
+        db.commit()
+    return count
+
+
+def ingest_football_data_org_matches(db: Session, api_key: str, target_dates: list[str]) -> int:
+    client = FootballDataOrgClient(api_key)
+    count = 0
+    for target_date in target_dates:
+        payload = client.matches_by_date(target_date)
+        for item in payload.get("matches", []) or []:
+            match_date = pd.to_datetime(item.get("utcDate"), errors="coerce")
+            home = item.get("homeTeam") or {}
+            away = item.get("awayTeam") or {}
+            score = item.get("score") or {}
+            full_time = score.get("fullTime") or {}
+            if pd.isna(match_date) or not home.get("name") or not away.get("name"):
+                continue
+            comp = item.get("competition") or {}
+            fx = Fixture(
+                sport="soccer",
+                league=comp.get("name") or "Football",
+                season=str((item.get("season") or {}).get("startDate") or match_date.year)[:4],
+                match_date=match_date.date(),
+                home_team=resolve_team_name(db, str(home.get("name")), "soccer", "football_data_org"),
+                away_team=resolve_team_name(db, str(away.get("name")), "soccer", "football_data_org"),
+                home_score=_to_int_or_none(full_time.get("home")),
+                away_score=_to_int_or_none(full_time.get("away")),
+                source="football_data_org",
+                extra={"football_data_match_id": item.get("id"), "status": item.get("status")},
+            )
+            upsert_fixture(db, fx)
+            count += 1
+        db.commit()
+    return count
+
+
+def ingest_apifootball_com_events(db: Session, api_key: str, target_dates: list[str]) -> int:
+    client = ApiFootballComClient(api_key)
+    count = 0
+    for target_date in target_dates:
+        payload = client.fixtures_by_date(target_date)
+        events = payload if isinstance(payload, list) else payload.get("response", []) or payload.get("data", []) or []
+        for item in events:
+            match_date = pd.to_datetime(item.get("match_date") or item.get("event_date"), errors="coerce")
+            home = item.get("match_hometeam_name") or item.get("home_team")
+            away = item.get("match_awayteam_name") or item.get("away_team")
+            if pd.isna(match_date) or not home or not away:
+                continue
+            fx = Fixture(
+                sport="soccer",
+                league=item.get("league_name") or item.get("country_name") or "Football",
+                season=str(match_date.year),
+                match_date=match_date.date(),
+                home_team=resolve_team_name(db, str(home), "soccer", "apifootball_com"),
+                away_team=resolve_team_name(db, str(away), "soccer", "apifootball_com"),
+                home_score=_to_int_or_none(item.get("match_hometeam_score")),
+                away_score=_to_int_or_none(item.get("match_awayteam_score")),
+                source="apifootball_com",
+                extra={"apifootball_match_id": item.get("match_id"), "status": item.get("match_status")},
             )
             upsert_fixture(db, fx)
             count += 1

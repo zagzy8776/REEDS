@@ -13,8 +13,11 @@ class Settings(BaseSettings):
     model_dir: str = "data/models"
     public_brand_name: str = "LOYAL EDGE"
     api_football_key: str = ""
+    api_football_com_key: str = ""
     api_basketball_key: str = ""
     api_sports_key: str = ""
+    sportmonks_api_key: str = ""
+    football_data_api_key: str = ""
     the_odds_api_key: str = ""
     the_odds_api_sport_keys: str = "soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league"
     live_ingest_days: int = 7

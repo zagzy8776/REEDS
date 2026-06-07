@@ -8,7 +8,7 @@ from app.db.models import BacktestRun, Fixture, OddsSnapshot, Team, TeamAlias
 from app.db.session import get_db
 from app.ml.backtest import walk_forward_backtest
 from app.ml.train import train_basketball_model, train_soccer_model
-from app.scraper.loaders import ingest_api_basketball_games, ingest_api_football_fixtures
+from app.scraper.loaders import ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures
 from app.services.data_quality import upsert_team_alias
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
@@ -36,7 +36,10 @@ def feed_config():
     return {
         "database_configured": bool(settings.database_url),
         "api_football_key_configured": bool(settings.api_football_key),
+        "api_football_com_key_configured": bool(settings.api_football_com_key),
         "api_sports_key_configured": bool(settings.api_sports_key),
+        "sportmonks_api_key_configured": bool(settings.sportmonks_api_key),
+        "football_data_api_key_configured": bool(settings.football_data_api_key),
         "api_basketball_key_configured": bool(settings.api_basketball_key),
         "the_odds_api_key_configured": bool(settings.the_odds_api_key),
         "scheduler_enabled": settings.enable_scheduler,
@@ -57,10 +60,13 @@ def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = F
         "requested_sport": sport,
         "env": {
             "api_football_or_sports_configured": bool(football_key),
+            "api_football_com_configured": bool(settings.api_football_com_key),
+            "sportmonks_configured": bool(settings.sportmonks_api_key),
+            "football_data_org_configured": bool(settings.football_data_api_key),
             "api_basketball_or_sports_configured": bool(basketball_key),
             "the_odds_api_configured": bool(settings.the_odds_api_key),
         },
-        "ingested": {"soccer": 0, "basketball": 0},
+        "ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0},
         "skipped": [],
     }
     if sport not in {"all", "soccer", "basketball"}:
@@ -68,7 +74,7 @@ def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = F
     if sport in {"all", "soccer"}:
         if football_key:
             try:
-                result["ingested"]["soccer"] = ingest_api_football_fixtures(
+                result["ingested"]["api_sports_football"] = ingest_api_football_fixtures(
                     db,
                     football_key,
                     dates,
@@ -76,10 +82,29 @@ def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = F
                     the_odds_api_key=settings.the_odds_api_key,
                     the_odds_api_sport_keys=settings.odds_api_sport_keys,
                 )
+                result["ingested"]["soccer"] += result["ingested"]["api_sports_football"]
             except Exception as exc:  # noqa: BLE001
-                result["skipped"].append({"sport": "soccer", "reason": str(exc)})
+                result["skipped"].append({"provider": "api_sports_football", "sport": "soccer", "reason": str(exc)})
         else:
-            result["skipped"].append({"sport": "soccer", "reason": "API_FOOTBALL_KEY or API_SPORTS_KEY not configured"})
+            result["skipped"].append({"provider": "api_sports_football", "sport": "soccer", "reason": "API_FOOTBALL_KEY or API_SPORTS_KEY not configured"})
+        if settings.api_football_com_key:
+            try:
+                result["ingested"]["apifootball_com"] = ingest_apifootball_com_events(db, settings.api_football_com_key, dates)
+                result["ingested"]["soccer"] += result["ingested"]["apifootball_com"]
+            except Exception as exc:  # noqa: BLE001
+                result["skipped"].append({"provider": "apifootball_com", "sport": "soccer", "reason": str(exc)})
+        if settings.sportmonks_api_key:
+            try:
+                result["ingested"]["sportmonks"] = ingest_sportmonks_football_fixtures(db, settings.sportmonks_api_key, dates)
+                result["ingested"]["soccer"] += result["ingested"]["sportmonks"]
+            except Exception as exc:  # noqa: BLE001
+                result["skipped"].append({"provider": "sportmonks", "sport": "soccer", "reason": str(exc)})
+        if settings.football_data_api_key:
+            try:
+                result["ingested"]["football_data_org"] = ingest_football_data_org_matches(db, settings.football_data_api_key, dates)
+                result["ingested"]["soccer"] += result["ingested"]["football_data_org"]
+            except Exception as exc:  # noqa: BLE001
+                result["skipped"].append({"provider": "football_data_org", "sport": "soccer", "reason": str(exc)})
     if sport in {"all", "basketball"}:
         if basketball_key:
             try:
