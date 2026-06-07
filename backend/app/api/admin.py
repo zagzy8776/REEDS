@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
@@ -6,6 +8,7 @@ from app.db.models import BacktestRun, Fixture, OddsSnapshot, Team, TeamAlias
 from app.db.session import get_db
 from app.ml.backtest import walk_forward_backtest
 from app.ml.train import train_basketball_model, train_soccer_model
+from app.scraper.loaders import ingest_api_basketball_games, ingest_api_football_fixtures
 from app.services.data_quality import upsert_team_alias
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
@@ -21,6 +24,72 @@ def require_admin(x_admin_key: str = Header(default="")):
         raise HTTPException(status_code=500, detail="Admin API key is not safely configured")
     if not x_admin_key or x_admin_key != settings.admin_api_key:
         raise HTTPException(status_code=401, detail="Invalid admin key")
+
+
+def _date_window(days: int) -> list[str]:
+    return [(date.today() + timedelta(days=offset)).isoformat() for offset in range(max(days, 1))]
+
+
+@router.get("/feed-config", dependencies=[Depends(require_admin)])
+def feed_config():
+    settings = get_settings()
+    return {
+        "database_configured": bool(settings.database_url),
+        "api_football_key_configured": bool(settings.api_football_key),
+        "api_sports_key_configured": bool(settings.api_sports_key),
+        "api_basketball_key_configured": bool(settings.api_basketball_key),
+        "the_odds_api_key_configured": bool(settings.the_odds_api_key),
+        "scheduler_enabled": settings.enable_scheduler,
+        "live_ingest_days": settings.live_ingest_days,
+        "odds_sport_keys": settings.odds_api_sport_keys,
+        "note": "This endpoint intentionally shows only presence/booleans, never secret values.",
+    }
+
+
+@router.post("/ingest-live", dependencies=[Depends(require_admin)])
+def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = False, db: Session = Depends(get_db)):
+    settings = get_settings()
+    dates = _date_window(days or settings.live_ingest_days)
+    football_key = settings.api_football_key or settings.api_sports_key
+    basketball_key = settings.api_basketball_key or settings.api_sports_key
+    result: dict = {
+        "dates": dates,
+        "requested_sport": sport,
+        "env": {
+            "api_football_or_sports_configured": bool(football_key),
+            "api_basketball_or_sports_configured": bool(basketball_key),
+            "the_odds_api_configured": bool(settings.the_odds_api_key),
+        },
+        "ingested": {"soccer": 0, "basketball": 0},
+        "skipped": [],
+    }
+    if sport not in {"all", "soccer", "basketball"}:
+        raise HTTPException(status_code=400, detail="sport must be all, soccer, or basketball")
+    if sport in {"all", "soccer"}:
+        if football_key:
+            try:
+                result["ingested"]["soccer"] = ingest_api_football_fixtures(
+                    db,
+                    football_key,
+                    dates,
+                    include_odds=not skip_odds,
+                    the_odds_api_key=settings.the_odds_api_key,
+                    the_odds_api_sport_keys=settings.odds_api_sport_keys,
+                )
+            except Exception as exc:  # noqa: BLE001
+                result["skipped"].append({"sport": "soccer", "reason": str(exc)})
+        else:
+            result["skipped"].append({"sport": "soccer", "reason": "API_FOOTBALL_KEY or API_SPORTS_KEY not configured"})
+    if sport in {"all", "basketball"}:
+        if basketball_key:
+            try:
+                result["ingested"]["basketball"] = ingest_api_basketball_games(db, basketball_key, dates)
+            except Exception as exc:  # noqa: BLE001
+                result["skipped"].append({"sport": "basketball", "reason": str(exc)})
+        else:
+            result["skipped"].append({"sport": "basketball", "reason": "API_BASKETBALL_KEY or API_SPORTS_KEY not configured"})
+    result["fixture_count"] = db.query(Fixture).count()
+    return result
 
 
 @router.post("/train", dependencies=[Depends(require_admin)])
