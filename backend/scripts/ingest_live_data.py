@@ -18,7 +18,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest real upcoming football/basketball fixtures and odds from configured APIs.")
     parser.add_argument("--days", type=int, default=7, help="Number of calendar days to ingest starting today. Default: 7")
     parser.add_argument("--sport", choices=["all", "soccer", "basketball"], default="all")
-    parser.add_argument("--skip-odds", action="store_true", help="Skip API-Football odds ingestion.")
+    parser.add_argument("--skip-odds", action="store_true", help="Skip odds ingestion from The Odds API/API-Football fallback.")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -32,7 +32,14 @@ def main() -> None:
         result = {"dates": dates, "soccer": 0, "basketball": 0, "skipped": []}
         if args.sport in {"all", "soccer"}:
             if football_key:
-                result["soccer"] = ingest_api_football_fixtures(db, football_key, dates, include_odds=not args.skip_odds)
+                result["soccer"] = ingest_api_football_fixtures(
+                    db,
+                    football_key,
+                    dates,
+                    include_odds=not args.skip_odds,
+                    the_odds_api_key=settings.the_odds_api_key,
+                    the_odds_api_sport_keys=settings.odds_api_sport_keys,
+                )
             else:
                 result["skipped"].append({"sport": "soccer", "reason": "API_FOOTBALL_KEY or API_SPORTS_KEY not configured"})
         if args.sport in {"all", "basketball"}:

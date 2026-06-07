@@ -9,12 +9,12 @@ export default async function Predictions({ searchParams }: { searchParams: Prom
   const leagues = Array.from(new Set(picks.map((p: any) => p.league))).filter(Boolean);
   const markets = Array.from(new Set(picks.map((p: any) => p.market))).filter(Boolean);
   return (
-    <main className="mx-auto max-w-6xl px-6 py-10">
-      <div className="flex flex-wrap items-end justify-between gap-4">
+    <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="badge inline-block">Live board</p>
-          <h1 className="mt-4 text-4xl font-black">Today’s EDGE Picks</h1>
-          <p className="mt-2 max-w-3xl text-slate-400">Football and basketball selections published after model refresh. Filter by league, market, risk, and minimum confidence to focus the card.</p>
+          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Today’s AI EDGE Picks</h1>
+          <p className="mt-2 max-w-3xl text-slate-400">A cleaner live board for daily action. Filter the card, open full analysis, then compare what the community is saying.</p>
         </div>
         <p className="text-sm text-slate-500">{picks.length} public pick{picks.length === 1 ? "" : "s"}</p>
       </div>
@@ -38,7 +38,7 @@ export default async function Predictions({ searchParams }: { searchParams: Prom
       </section>
 
       <div className="mt-8 grid gap-5 md:grid-cols-2">
-        {picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="card text-slate-400">No public picks match these filters.</div>}
+        {picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="card text-slate-400"><b className="text-white">No AI picks showing yet.</b><p className="mt-2">Try clearing filters, check back after refresh, or keep the site lively by posting a community pick.</p><a className="mt-4 inline-flex rounded-xl bg-emerald-400 px-4 py-2 text-sm font-black text-slate-950" href="/predictions/submit">+ Post community pick</a></div>}
       </div>
     </main>
   );

@@ -16,3 +16,21 @@ services:
         sync: false
       - key: ADMIN_API_KEY
         sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: API_SPORTS_KEY
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: API_BASKETBALL_KEY
+        sync: false
+      - key: THE_ODDS_API_KEY
+        sync: false
+      - key: THE_ODDS_API_SPORT_KEYS
+        value: soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league
+      - key: LIVE_INGEST_DAYS
+        value: 7
+      - key: MIN_TRAINING_ROWS
+        value: 20
+      - key: MODEL_DIR
+        value: data/models

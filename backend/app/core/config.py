@@ -15,11 +15,17 @@ class Settings(BaseSettings):
     api_football_key: str = ""
     api_basketball_key: str = ""
     api_sports_key: str = ""
+    the_odds_api_key: str = ""
+    the_odds_api_sport_keys: str = "soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league"
     live_ingest_days: int = 7
 
     @property
     def allowed_cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def odds_api_sport_keys(self) -> list[str]:
+        return [sport.strip() for sport in self.the_odds_api_sport_keys.split(",") if sport.strip()]
 
     model_config = SettingsConfigDict(
         env_file=".env",

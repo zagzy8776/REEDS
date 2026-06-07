@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getPrediction } from "../../../lib/api";
+import { CommunityActions } from "../../../components/CommunityActions";
 
 export const dynamic = "force-dynamic";
 
@@ -32,14 +33,14 @@ export default async function PredictionDetail({ params }: { params: Promise<{ i
   const snapshots = prediction.odds_snapshots || [];
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-10">
+    <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
       <Link className="text-sm font-bold text-emerald-300" href="/predictions">← Back to all picks</Link>
 
       <section className={`card mt-6 overflow-hidden ${premiumLocked ? "premium-card" : ""}`}>
-        <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <p className="text-xs uppercase tracking-wide text-slate-500">{prediction.sport} • {prediction.league} • {formatDate(prediction.match_date)}</p>
-            <h1 className="mt-3 text-4xl font-black">{prediction.home_team} vs {prediction.away_team}</h1>
+             <h1 className="mt-3 text-3xl font-black sm:text-4xl">{prediction.home_team} vs {prediction.away_team}</h1>
             <p className="mt-2 text-slate-400">Market: {prediction.market} • Risk: {prediction.risk_level} • Version {prediction.version || 1}</p>
           </div>
           <div className="text-right">
@@ -67,9 +68,9 @@ export default async function PredictionDetail({ params }: { params: Promise<{ i
         <div className="card">
           <h2 className="text-xl font-bold">Model analysis</h2>
           <p className="mt-3 text-slate-300">{prediction.engine_summary || "This prediction is generated from current fixture context, historical performance, team form, and calibrated market thresholds."}</p>
-          <div className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
-            <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Fixture ID</span><br /><b>{prediction.fixture_id}</b></div>
-            <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Model version</span><br /><b>{prediction.model_version_id || "Fallback engine"}</b></div>
+            <div className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
+             <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Match status</span><br /><b>{prediction.status || "Active"}</b></div>
+             <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Signal type</span><br /><b>AI market read</b></div>
             <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Published</span><br /><b>{prediction.published_at ? new Date(prediction.published_at).toLocaleString() : "Pending"}</b></div>
             <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Result</span><br /><b className="capitalize">{prediction.result}</b></div>
           </div>
@@ -96,7 +97,7 @@ export default async function PredictionDetail({ params }: { params: Promise<{ i
       <section className="mt-6 grid gap-6 lg:grid-cols-2">
         <div className="card">
           <h2 className="text-xl font-bold">Community consensus</h2>
-          <p className="mt-2 text-sm text-slate-400">Crowdsourced picks are kept separate from LOYAL EDGE AI so user opinions never contaminate model training or backtests.</p>
+          <p className="mt-2 text-sm text-slate-400">See how the room is leaning. Community posts are separate from AI picks, but visible side-by-side for comparison.</p>
           <div className="mt-4 space-y-3">
             {(prediction.community?.consensus || []).length ? prediction.community.consensus.map((c: any) => (
               <div key={c.pick} className="rounded-xl border border-slate-800 bg-slate-950 p-4">
@@ -114,9 +115,11 @@ export default async function PredictionDetail({ params }: { params: Promise<{ i
               <div key={entry.id} className="rounded-xl border border-slate-800 bg-slate-950 p-4">
                 <div className="flex items-center justify-between gap-3"><b>{entry.username}</b><span className="text-xs text-slate-500">{entry.market}: {entry.pick}</span></div>
                 <p className="mt-2 text-sm text-slate-300">{entry.analysis_text || "No written analysis provided."}</p>
+                <CommunityActions seed={entry.id % 7} />
               </div>
             )) : <p className="text-sm text-slate-400">Be the first to publish a community view on this match.</p>}
           </div>
+          <Link href="/predictions/submit" className="mt-4 inline-flex rounded-xl bg-emerald-400 px-4 py-2 text-sm font-black text-slate-950">+ Add your take</Link>
         </div>
       </section>
 

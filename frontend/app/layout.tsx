@@ -10,16 +10,18 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body>
-        <nav className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
-          <Link href="/" className="text-2xl font-black tracking-tight">
+        <nav className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/75 backdrop-blur-xl">
+          <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-4 sm:px-6 md:flex-row md:items-center md:justify-between">
+          <Link href="/" className="text-xl font-black tracking-tight sm:text-2xl">
             LOYAL <span className="text-emerald-400">EDGE</span>
           </Link>
-          <div className="flex gap-4 text-sm text-slate-300">
-            <Link href="/predictions">Predictions</Link>
-            <Link href="/predictions/submit">Submit Pick</Link>
-            <Link href="/community-leaderboard">Community</Link>
-            <Link href="/combo">3-Combo</Link>
-            <Link href="/stats">Stats</Link>
+          <div className="flex gap-2 overflow-x-auto pb-1 md:pb-0">
+            <Link className="glass-nav-link" href="/predictions">AI Picks</Link>
+            <Link className="glass-nav-link" href="/community-leaderboard">Community</Link>
+            <Link className="glass-nav-link" href="/predictions/submit">+ Post</Link>
+            <Link className="glass-nav-link" href="/combo">Combo</Link>
+            <Link className="glass-nav-link" href="/stats">Stats</Link>
+          </div>
           </div>
         </nav>
         {children}

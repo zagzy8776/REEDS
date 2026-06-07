@@ -3,12 +3,16 @@
 @tailwind utilities;
 
 body {
-  background: #060913;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(16, 185, 129, 0.16), transparent 30rem),
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 28rem),
+    #060913;
   color: #f8fafc;
 }
 
 .card {
-  @apply rounded-2xl border border-slate-800 bg-slate-900/70 p-5 shadow-xl;
+  @apply rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-xl backdrop-blur;
 }
 
 .badge {
@@ -25,4 +29,12 @@ body {
 
 .responsible-note {
   @apply rounded-2xl border border-sky-400/20 bg-sky-400/10 p-4 text-sm text-sky-100;
+}
+
+.glass-nav-link {
+  @apply rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-slate-200 backdrop-blur transition hover:border-emerald-300/50 hover:text-emerald-200;
+}
+
+.mobile-safe-grid {
+  @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-3;
 }

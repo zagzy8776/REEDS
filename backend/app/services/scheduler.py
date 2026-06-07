@@ -45,7 +45,14 @@ def run_daily_learning_pipeline() -> dict:
 
         if football_key:
             try:
-                report["ingested"]["soccer"] = ingest_api_football_fixtures(db, football_key, dates, include_odds=True)
+                report["ingested"]["soccer"] = ingest_api_football_fixtures(
+                    db,
+                    football_key,
+                    dates,
+                    include_odds=True,
+                    the_odds_api_key=settings.the_odds_api_key,
+                    the_odds_api_sport_keys=settings.odds_api_sport_keys,
+                )
             except Exception as exc:  # noqa: BLE001
                 log.exception("Daily API-Football ingestion failed")
                 report["skipped"].append({"stage": "ingest", "sport": "soccer", "reason": str(exc)})

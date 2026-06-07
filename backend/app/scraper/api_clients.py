@@ -56,3 +56,26 @@ class ApiBasketballClient:
             params={"date": target_date},
             headers={"x-apisports-key": self.api_key},
         ).json()
+
+
+class TheOddsApiClient:
+    """The Odds API adapter. Keys come from https://dash.the-odds-api.com/."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://api.the-odds-api.com/v4"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def h2h_odds(self, sport_key: str, regions: str = "uk,eu,us", bookmakers: str | None = None) -> dict | list:
+        if not self.api_key:
+            return {"response": [], "note": "THE_ODDS_API_KEY not configured"}
+        params = {
+            "apiKey": self.api_key,
+            "regions": regions,
+            "markets": "h2h",
+            "oddsFormat": "decimal",
+            "dateFormat": "iso",
+        }
+        if bookmakers:
+            params["bookmakers"] = bookmakers
+        return self.http.get(f"{self.base_url}/sports/{sport_key}/odds", params=params).json()

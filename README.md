@@ -127,7 +127,61 @@ Important model-feeding rules:
 - Build Command: `pip install -r requirements.txt`
 - Start Command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 - Runtime: Python 3.11.9. The file `backend/runtime.txt` pins this because Python 3.14 can force pandas/xgboost source builds.
-- Env Vars: `PYTHON_VERSION=3.11.9`, `DATABASE_URL`, `ADMIN_API_KEY`, `APP_ENV=production`, `ENABLE_SCHEDULER=true`
+- Required Env Vars: `PYTHON_VERSION=3.11.9`, `DATABASE_URL`, `ADMIN_API_KEY`, `APP_ENV=production`, `ENABLE_SCHEDULER=true`, `CORS_ORIGINS`
+- Live API Env Vars: for your current setup, use `API_FOOTBALL_KEY` from API-SPORTS for fixtures and `THE_ODDS_API_KEY` from The Odds API for betting odds. Basketball is optional.
+  - `API_SPORTS_KEY`: one API-SPORTS key used for both football and basketball ingestion.
+  - `API_FOOTBALL_KEY`: football-only API-SPORTS/API-Football key. Used before `API_SPORTS_KEY` for soccer.
+  - `API_BASKETBALL_KEY`: basketball-only API-SPORTS/API-Basketball key. Used before `API_SPORTS_KEY` for basketball.
+  - `THE_ODDS_API_KEY`: odds key from `https://dash.the-odds-api.com`; used for football 1X2 odds.
+  - `THE_ODDS_API_SPORT_KEYS`: comma-separated The Odds API soccer sport keys to pull odds for.
+  - `LIVE_INGEST_DAYS=7`: number of upcoming days ingested by the scheduler.
+
+### Where to get the live sports API keys
+
+The current live ingestion uses two providers:
+
+- Football fixtures: API-SPORTS/API-Football at `https://v3.football.api-sports.io`
+- Football odds: The Odds API at `https://api.the-odds-api.com/v4/sports/{sport_key}/odds`
+- Basketball games: API-SPORTS/API-Basketball at `https://v1.basketball.api-sports.io`
+- API-SPORTS auth header used by the code: `x-apisports-key`
+- The Odds API auth is passed as query param: `apiKey`
+
+Get fixture keys from API-SPORTS:
+
+1. Go to `https://dashboard.api-football.com/` or `https://api-sports.io/`.
+2. Create/login to your API-SPORTS account.
+3. Subscribe to **API-Football** for football fixtures.
+4. Subscribe to **API-Basketball** if you want basketball ingestion.
+5. Copy the API key from the dashboard.
+6. In Render, open your backend service → **Environment** → add either:
+   - `API_FOOTBALL_KEY=your_api_football_key` for football fixtures, or
+   - `API_SPORTS_KEY=your_api_sports_key` if the same key has access to both products, or
+   - `API_FOOTBALL_KEY=your_football_key` and `API_BASKETBALL_KEY=your_basketball_key` if you manage them separately.
+
+Get odds keys from The Odds API:
+
+1. Go to `https://dash.the-odds-api.com`.
+2. Copy your API key.
+3. In Render, add `THE_ODDS_API_KEY=your_the_odds_api_key`.
+4. Confirm your plan supports soccer `h2h` odds for the leagues you want.
+
+For a football-only Render deployment, use:
+
+```text
+API_FOOTBALL_KEY=your_api_football_key
+THE_ODDS_API_KEY=your_the_odds_api_key
+THE_ODDS_API_SPORT_KEYS=soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league
+LIVE_INGEST_DAYS=7
+```
+
+With `ENABLE_SCHEDULER=true`, the daily scheduler calls `backend/app/scraper/loaders.py::ingest_api_football_fixtures(..., include_odds=True)`, which fetches fixtures from API-SPORTS and then fetches football `h2h` odds from The Odds API. Those 1X2 odds are matched to fixtures by date/home/away team and saved as `home_odds`, `draw_odds`, and `away_odds`, then used by the soccer model features: `home_implied`, `draw_implied`, `away_implied`, and `odds_margin`.
+
+For production frontend access, also set:
+
+- Backend Render `CORS_ORIGINS=https://your-vercel-domain.vercel.app,http://localhost:3000`
+- Vercel frontend `NEXT_PUBLIC_API_URL=https://your-render-service.onrender.com`
+
+Do not put API keys in the frontend or commit them to Git. Keep sports API keys only in Render backend environment variables.
 
 ## Vercel frontend
 

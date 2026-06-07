@@ -4,7 +4,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture
-from app.scraper.api_clients import ApiBasketballClient, ApiFootballClient
+from app.scraper.api_clients import ApiBasketballClient, ApiFootballClient, TheOddsApiClient
 from app.services.data_quality import resolve_team_name
 from app.utils.team_names import normalize_team_name
 
@@ -145,12 +145,77 @@ def _parse_api_football_1x2_odds(payload: dict) -> dict[int, dict[str, float | N
     return odds_by_fixture
 
 
-def ingest_api_football_fixtures(db: Session, api_key: str, target_dates: list[str], include_odds: bool = True) -> int:
+def _parse_the_odds_api_soccer_h2h(payloads: list[dict | list], target_dates: list[str]) -> dict[tuple[str, str, str], dict[str, float | None]]:
+    odds_by_match: dict[tuple[str, str, str], dict[str, float | None]] = {}
+    wanted_dates = set(target_dates)
+    for payload in payloads:
+        if isinstance(payload, dict):
+            events = payload.get("response", []) or []
+        else:
+            events = payload or []
+        for event in events:
+            match_date = pd.to_datetime(event.get("commence_time"), errors="coerce")
+            if pd.isna(match_date) or match_date.date().isoformat() not in wanted_dates:
+                continue
+            home = str(event.get("home_team") or "")
+            away = str(event.get("away_team") or "")
+            if not home or not away:
+                continue
+            row = {"home_odds": None, "draw_odds": None, "away_odds": None}
+            for bookmaker in event.get("bookmakers", []) or []:
+                for market in bookmaker.get("markets", []) or []:
+                    if str(market.get("key", "")).lower() != "h2h":
+                        continue
+                    for outcome in market.get("outcomes", []) or []:
+                        name = str(outcome.get("name") or "")
+                        price = _to_float_or_none(outcome.get("price"))
+                        if normalize_team_name(name, "soccer") == normalize_team_name(home, "soccer"):
+                            row["home_odds"] = price
+                        elif normalize_team_name(name, "soccer") == normalize_team_name(away, "soccer"):
+                            row["away_odds"] = price
+                        elif name.lower() == "draw":
+                            row["draw_odds"] = price
+                    if row["home_odds"] or row["draw_odds"] or row["away_odds"]:
+                        key = (match_date.date().isoformat(), normalize_team_name(home, "soccer"), normalize_team_name(away, "soccer"))
+                        odds_by_match[key] = row
+                        break
+                if row["home_odds"] or row["draw_odds"] or row["away_odds"]:
+                    break
+    return odds_by_match
+
+
+def _fetch_the_odds_api_soccer_odds(api_key: str | None, sport_keys: list[str], target_dates: list[str]) -> dict[tuple[str, str, str], dict[str, float | None]]:
+    if not api_key or not sport_keys:
+        return {}
+    client = TheOddsApiClient(api_key)
+    payloads = []
+    for sport_key in sport_keys:
+        try:
+            payloads.append(client.h2h_odds(sport_key))
+        except Exception:  # noqa: BLE001 - odds are optional; fixtures should still ingest
+            continue
+    return _parse_the_odds_api_soccer_h2h(payloads, target_dates)
+
+
+def ingest_api_football_fixtures(
+    db: Session,
+    api_key: str,
+    target_dates: list[str],
+    include_odds: bool = True,
+    the_odds_api_key: str | None = None,
+    the_odds_api_sport_keys: list[str] | None = None,
+) -> int:
     client = ApiFootballClient(api_key)
+    external_odds_by_match = _fetch_the_odds_api_soccer_odds(the_odds_api_key, the_odds_api_sport_keys or [], target_dates) if include_odds else {}
     count = 0
     for target_date in target_dates:
         fixture_payload = client.fixtures_by_date(target_date)
-        odds_by_fixture = _parse_api_football_1x2_odds(client.odds_by_date(target_date)) if include_odds else {}
+        odds_by_fixture = {}
+        if include_odds and not external_odds_by_match:
+            try:
+                odds_by_fixture = _parse_api_football_1x2_odds(client.odds_by_date(target_date))
+            except Exception:  # noqa: BLE001 - odds are optional; fixtures should still ingest
+                odds_by_fixture = {}
         for item in fixture_payload.get("response", []) or []:
             fixture_data = item.get("fixture", {})
             league_data = item.get("league", {})
@@ -162,21 +227,24 @@ def ingest_api_football_fixtures(db: Session, api_key: str, target_dates: list[s
             match_date = pd.to_datetime(fixture_data.get("date"), errors="coerce")
             if pd.isna(match_date) or not home.get("name") or not away.get("name"):
                 continue
-            odds = odds_by_fixture.get(int(fixture_id or 0), {})
+            home_name = resolve_team_name(db, str(home.get("name")), "soccer", "api_football")
+            away_name = resolve_team_name(db, str(away.get("name")), "soccer", "api_football")
+            odds_key = (match_date.date().isoformat(), normalize_team_name(home_name, "soccer"), normalize_team_name(away_name, "soccer"))
+            odds = external_odds_by_match.get(odds_key) or odds_by_fixture.get(int(fixture_id or 0), {})
             fx = Fixture(
                 sport="soccer",
                 league=league_data.get("name") or "Football",
                 season=str(league_data.get("season") or match_date.year),
                 match_date=match_date.date(),
-                home_team=resolve_team_name(db, str(home.get("name")), "soccer", "api_football"),
-                away_team=resolve_team_name(db, str(away.get("name")), "soccer", "api_football"),
+                home_team=home_name,
+                away_team=away_name,
                 home_score=_to_int_or_none(goals.get("home")),
                 away_score=_to_int_or_none(goals.get("away")),
                 home_odds=odds.get("home_odds"),
                 draw_odds=odds.get("draw_odds"),
                 away_odds=odds.get("away_odds"),
                 source="api_football",
-                extra={"api_fixture_id": fixture_id, "status": fixture_data.get("status"), "country": league_data.get("country")},
+                extra={"api_fixture_id": fixture_id, "status": fixture_data.get("status"), "country": league_data.get("country"), "odds_source": "the_odds_api" if odds_key in external_odds_by_match else "api_football" if odds else None},
             )
             upsert_fixture(db, fx)
             count += 1
