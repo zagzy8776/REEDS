@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -153,6 +153,33 @@ def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league:
         }
         for f in rows
     ]
+
+
+@router.get("/fixtures/status")
+def fixtures_status(db: Session = Depends(get_db)):
+    total = db.query(Fixture).count()
+    upcoming = db.query(Fixture).filter(Fixture.match_date >= date.today()).count()
+    today = db.query(Fixture).filter(Fixture.match_date == date.today()).count()
+    results = db.query(Fixture).filter(Fixture.match_date < date.today()).count()
+    with_scores = db.query(Fixture).filter(Fixture.home_score != None, Fixture.away_score != None).count()
+    with_odds = db.query(Fixture).filter((Fixture.home_odds != None) | (Fixture.draw_odds != None) | (Fixture.away_odds != None)).count()
+    latest = db.query(Fixture).order_by(Fixture.match_date.desc()).first()
+    api_rows = db.query(Fixture).filter(Fixture.source.in_(["api_football", "api_basketball"])).count()
+    sample_rows = db.query(Fixture).filter(Fixture.source == "sample").count()
+    return {
+        "checked_at": datetime.utcnow(),
+        "total": total,
+        "upcoming": upcoming,
+        "today": today,
+        "results": results,
+        "with_scores": with_scores,
+        "with_odds": with_odds,
+        "api_rows": api_rows,
+        "sample_rows": sample_rows,
+        "latest_match_date": latest.match_date if latest else None,
+        "feed_health": "empty" if total == 0 else "needs_live_api" if api_rows == 0 else "active",
+        "public_note": "If this says empty or needs_live_api, add API keys on Render and run live ingestion/scheduler. No secret values are exposed here.",
+    }
 
 
 @router.post("/community/predictions")

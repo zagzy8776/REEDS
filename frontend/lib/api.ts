@@ -43,6 +43,10 @@ export async function getFixtures(params: Record<string, string> = {}) {
   return safeFetchJson(`${API_URL}/api/fixtures/upcoming${qs ? `?${qs}` : "?limit=300"}`, []);
 }
 
+export async function getFixtureStatus() {
+  return safeFetchJson(`${API_URL}/api/fixtures/status`, null);
+}
+
 export async function getCommunityLeaderboard() {
   return safeFetchJson(`${API_URL}/api/community/leaderboard?limit=50`, []);
 }

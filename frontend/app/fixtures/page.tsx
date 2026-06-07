@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getFixtures } from "../../lib/api";
+import { getFixtureStatus, getFixtures } from "../../lib/api";
 
 export const dynamic = "force-dynamic";
 
@@ -14,7 +14,10 @@ function formatOdds(value?: number | null) {
 
 export default async function Fixtures({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams;
-  const fixtures = await getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "300" });
+  const [fixtures, status] = await Promise.all([
+    getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "300" }),
+    getFixtureStatus(),
+  ]);
   const sports = Array.from(new Set(fixtures.map((f: any) => f.sport))).filter(Boolean);
   const leagues = Array.from(new Set(fixtures.map((f: any) => f.league))).filter(Boolean);
   const withOdds = fixtures.filter((f: any) => f.has_odds).length;
@@ -66,6 +69,18 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
         <input name="limit" type="number" min="25" max="500" defaultValue={params.limit || "300"} className="rounded-xl border border-slate-800 bg-slate-950 p-3" />
         <button className="rounded-xl bg-emerald-400 px-4 py-3 font-bold text-slate-950">Refresh board</button>
       </form>
+
+      {status ? (
+        <section className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <b className="text-white">Feed status:</b> <span className={status.feed_health === "active" ? "text-emerald-300" : "text-amber-300"}>{String(status.feed_health).replaceAll("_", " ")}</span>
+              <p className="mt-1 text-slate-400">API rows: {status.api_rows} • Sample rows: {status.sample_rows} • Scores: {status.with_scores} • Odds: {status.with_odds}</p>
+            </div>
+            <p className="max-w-xl text-xs text-slate-500">{status.public_note}</p>
+          </div>
+        </section>
+      ) : null}
 
       <section className="mt-8 space-y-6">
         {fixtures.length ? Object.entries(grouped).map(([day, rows]: [string, any[]]) => (
