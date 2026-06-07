@@ -111,13 +111,25 @@ def prediction_detail(prediction_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/fixtures/upcoming")
-def upcoming_fixtures(sport: str | None = None, league: str | None = None, limit: int = 300, db: Session = Depends(get_db)):
-    query = db.query(Fixture).filter(Fixture.match_date >= date.today(), Fixture.sport.in_(["soccer", "basketball"]))
+def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league: str | None = None, limit: int = 300, db: Session = Depends(get_db)):
+    query = db.query(Fixture).filter(Fixture.sport.in_(["soccer", "basketball"]))
+    normalized_scope = scope.lower().strip()
+    if normalized_scope == "upcoming":
+        query = query.filter(Fixture.match_date >= date.today())
+    elif normalized_scope in {"live", "today"}:
+        query = query.filter(Fixture.match_date == date.today())
+    elif normalized_scope in {"results", "old", "past"}:
+        query = query.filter(Fixture.match_date < date.today())
+    elif normalized_scope == "all":
+        pass
+    else:
+        raise HTTPException(status_code=400, detail="scope must be upcoming, live, results, or all")
     if sport:
         query = query.filter(Fixture.sport == sport)
     if league:
         query = query.filter(Fixture.league == league)
-    rows = query.order_by(Fixture.match_date.asc(), Fixture.league.asc()).limit(min(limit, 500)).all()
+    order_date = Fixture.match_date.desc() if normalized_scope in {"results", "old", "past", "all"} else Fixture.match_date.asc()
+    rows = query.order_by(order_date, Fixture.league.asc()).limit(min(limit, 500)).all()
     return [
         {
             "id": f.id,
@@ -127,11 +139,16 @@ def upcoming_fixtures(sport: str | None = None, league: str | None = None, limit
             "match_date": f.match_date,
             "home_team": f.home_team,
             "away_team": f.away_team,
+            "home_score": f.home_score,
+            "away_score": f.away_score,
+            "total_goals": (f.home_score + f.away_score) if f.home_score is not None and f.away_score is not None else None,
+            "result_label": "pending" if f.home_score is None or f.away_score is None else "home_win" if f.home_score > f.away_score else "away_win" if f.away_score > f.home_score else "draw",
             "home_odds": f.home_odds,
             "draw_odds": f.draw_odds,
             "away_odds": f.away_odds,
             "source": f.source,
             "has_odds": any([f.home_odds, f.draw_odds, f.away_odds]),
+            "api_status": (f.extra or {}).get("status") if isinstance(f.extra, dict) else None,
             "odds_source": (f.extra or {}).get("odds_source") if isinstance(f.extra, dict) else None,
         }
         for f in rows

@@ -14,10 +14,12 @@ function formatOdds(value?: number | null) {
 
 export default async function Fixtures({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams;
-  const fixtures = await getFixtures({ ...params, limit: params.limit || "300" });
+  const fixtures = await getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "300" });
   const sports = Array.from(new Set(fixtures.map((f: any) => f.sport))).filter(Boolean);
   const leagues = Array.from(new Set(fixtures.map((f: any) => f.league))).filter(Boolean);
   const withOdds = fixtures.filter((f: any) => f.has_odds).length;
+  const completed = fixtures.filter((f: any) => f.home_score !== null && f.away_score !== null).length;
+  const todayCount = fixtures.filter((f: any) => f.match_date === new Date().toISOString().slice(0, 10)).length;
   const grouped = fixtures.reduce((acc: Record<string, any[]>, f: any) => {
     const key = String(f.match_date || "TBA");
     acc[key] = acc[key] || [];
@@ -30,8 +32,8 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
       <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] lg:items-end">
         <div>
           <p className="badge inline-block">Fixture center</p>
-          <h1 className="mt-4 text-4xl font-black sm:text-5xl">All upcoming fixtures from the live feed.</h1>
-          <p className="mt-3 max-w-3xl text-slate-300">Browse the matches coming into LOYAL EDGE, check which games already have market prices, then open the AI board or post your own community read.</p>
+          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Match center: upcoming, live board, and old results.</h1>
+          <p className="mt-3 max-w-3xl text-slate-300">Track fixtures from the live feed, see finished scores and goals, check odds availability, then open AI reads or post your community angle.</p>
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
             <Link href="/predictions" className="rounded-xl bg-emerald-400 px-5 py-3 text-center font-black text-slate-950">View AI picks</Link>
             <Link href="/predictions/submit" className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-center font-bold">+ Post community pick</Link>
@@ -39,15 +41,22 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
         </div>
         <div className="card">
           <p className="text-sm text-slate-400">Live feed status</p>
-          <div className="mt-4 grid grid-cols-3 gap-3 text-center">
+          <div className="mt-4 grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
             <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{fixtures.length}</b><br /><span className="text-xs text-slate-500">Fixtures</span></div>
             <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{leagues.length}</b><br /><span className="text-xs text-slate-500">Leagues</span></div>
             <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{withOdds}</b><br /><span className="text-xs text-slate-500">With odds</span></div>
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{completed || todayCount}</b><br /><span className="text-xs text-slate-500">Tracked</span></div>
           </div>
         </div>
       </section>
 
-      <form className="mt-6 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/50 p-4 md:grid-cols-4">
+      <form className="mt-6 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/50 p-4 md:grid-cols-5">
+        <select name="scope" defaultValue={params.scope || "all"} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+          <option value="all">All matches</option>
+          <option value="live">Today / Live</option>
+          <option value="upcoming">Upcoming</option>
+          <option value="results">Old results</option>
+        </select>
         <select name="sport" defaultValue={params.sport || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
           <option value="">All sports</option>{sports.map((x: any) => <option key={x} value={x}>{x}</option>)}
         </select>
@@ -73,9 +82,17 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
                       <p className="text-xs uppercase tracking-wide text-slate-500">{f.sport} • {f.league}</p>
                       <h3 className="mt-1 text-lg font-black">{f.home_team} vs {f.away_team}</h3>
                     </div>
-                    <span className={f.has_odds ? "badge w-fit" : "rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400"}>{f.has_odds ? "Odds live" : "Odds pending"}</span>
+                    <div className="flex flex-wrap gap-2">
+                      <span className={f.home_score !== null && f.away_score !== null ? "rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs text-emerald-200" : "rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-1 text-xs text-sky-200"}>{f.home_score !== null && f.away_score !== null ? "Result" : f.match_date === new Date().toISOString().slice(0, 10) ? "Today" : "Upcoming"}</span>
+                      <span className={f.has_odds ? "badge w-fit" : "rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400"}>{f.has_odds ? "Odds live" : "Odds pending"}</span>
+                    </div>
                   </div>
                   <div className="mt-4 grid grid-cols-3 gap-2 text-center text-sm">
+                    <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Score</span><br /><b>{f.home_score ?? "—"} - {f.away_score ?? "—"}</b></div>
+                    <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Goals</span><br /><b>{f.total_goals ?? "—"}</b></div>
+                    <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Status</span><br /><b className="capitalize">{String(f.api_status || f.result_label || "pending").replaceAll("_", " ")}</b></div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm">
                     <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Home</span><br /><b>{formatOdds(f.home_odds)}</b></div>
                     <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Draw</span><br /><b>{formatOdds(f.draw_odds)}</b></div>
                     <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Away</span><br /><b>{formatOdds(f.away_odds)}</b></div>
@@ -91,7 +108,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
         )) : (
           <div className="card border-dashed border-emerald-400/30 bg-emerald-400/5 text-slate-300">
             <h2 className="text-2xl font-black text-white">No fixtures are showing yet.</h2>
-            <p className="mt-2">Once the backend live ingestion runs with your API keys on Render, upcoming fixtures will appear here automatically.</p>
+            <p className="mt-2">Once the backend live ingestion runs with your API keys on Render, upcoming fixtures, today’s board, and old results will appear here automatically.</p>
           </div>
         )}
       </section>
