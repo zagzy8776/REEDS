@@ -41,7 +41,7 @@ def choose_provisional_public_pick(items: list[dict]) -> dict | None:
     while still preserving the original confidence and risk level.
     """
 
-    candidates = [item for item in items if item.get("market") != "Correct Score" and float(item.get("confidence", 0)) >= 50]
+    candidates = [item for item in items if item.get("market") != "Correct Score"]
     if not candidates:
         return None
     return max(candidates, key=lambda item: float(item.get("confidence", 0)))
