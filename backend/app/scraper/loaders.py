@@ -292,9 +292,10 @@ def ingest_sportmonks_football_fixtures(db: Session, api_key: str, target_dates:
 def ingest_football_data_org_matches(db: Session, api_key: str, target_dates: list[str]) -> int:
     client = FootballDataOrgClient(api_key)
     count = 0
-    for target_date in target_dates:
-        payload = client.matches_by_date(target_date)
-        for item in payload.get("matches", []) or []:
+    if not target_dates:
+        return count
+    payload = client.matches_by_range(target_dates[0], target_dates[-1])
+    for item in payload.get("matches", []) or []:
             match_date = pd.to_datetime(item.get("utcDate"), errors="coerce")
             home = item.get("homeTeam") or {}
             away = item.get("awayTeam") or {}
@@ -317,17 +318,18 @@ def ingest_football_data_org_matches(db: Session, api_key: str, target_dates: li
             )
             upsert_fixture(db, fx)
             count += 1
-        db.commit()
+    db.commit()
     return count
 
 
 def ingest_apifootball_com_events(db: Session, api_key: str, target_dates: list[str]) -> int:
     client = ApiFootballComClient(api_key)
     count = 0
-    for target_date in target_dates:
-        payload = client.fixtures_by_date(target_date)
-        events = payload if isinstance(payload, list) else payload.get("response", []) or payload.get("data", []) or []
-        for item in events:
+    if not target_dates:
+        return count
+    payload = client.fixtures_by_range(target_dates[0], target_dates[-1])
+    events = payload if isinstance(payload, list) else payload.get("response", []) or payload.get("data", []) or []
+    for item in events:
             match_date = pd.to_datetime(item.get("match_date") or item.get("event_date"), errors="coerce")
             home = item.get("match_hometeam_name") or item.get("home_team")
             away = item.get("match_awayteam_name") or item.get("away_team")
@@ -347,7 +349,7 @@ def ingest_apifootball_com_events(db: Session, api_key: str, target_dates: list[
             )
             upsert_fixture(db, fx)
             count += 1
-        db.commit()
+    db.commit()
     return count
 
 

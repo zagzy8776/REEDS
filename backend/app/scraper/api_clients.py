@@ -92,9 +92,14 @@ class ApiFootballComClient:
     def fixtures_by_date(self, target_date: str) -> dict | list:
         if not self.api_key:
             return []
+        return self.fixtures_by_range(target_date, target_date)
+
+    def fixtures_by_range(self, from_date: str, to_date: str) -> dict | list:
+        if not self.api_key:
+            return []
         return self.http.get(
             self.base_url,
-            params={"action": "get_events", "from": target_date, "to": target_date, "APIkey": self.api_key},
+            params={"action": "get_events", "from": from_date, "to": to_date, "APIkey": self.api_key},
         ).json()
 
 
@@ -126,8 +131,13 @@ class FootballDataOrgClient:
     def matches_by_date(self, target_date: str) -> dict:
         if not self.api_key:
             return {"matches": []}
+        return self.matches_by_range(target_date, target_date)
+
+    def matches_by_range(self, from_date: str, to_date: str) -> dict:
+        if not self.api_key:
+            return {"matches": []}
         return self.http.get(
             f"{self.base_url}/matches",
-            params={"dateFrom": target_date, "dateTo": target_date},
+            params={"dateFrom": from_date, "dateTo": to_date},
             headers={"X-Auth-Token": self.api_key},
         ).json()
