@@ -17,6 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </Link>
           <div className="flex gap-2 overflow-x-auto pb-1 md:pb-0">
             <Link className="glass-nav-link" href="/predictions">AI Picks</Link>
+            <Link className="glass-nav-link" href="/fixtures">Fixtures</Link>
             <Link className="glass-nav-link" href="/community-leaderboard">Community</Link>
             <Link className="glass-nav-link" href="/predictions/submit">+ Post</Link>
             <Link className="glass-nav-link" href="/combo">Combo</Link>

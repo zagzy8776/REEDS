@@ -111,9 +111,31 @@ def prediction_detail(prediction_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/fixtures/upcoming")
-def upcoming_fixtures(limit: int = 50, db: Session = Depends(get_db)):
-    rows = db.query(Fixture).filter(Fixture.match_date >= date.today(), Fixture.sport.in_(["soccer", "basketball"])).order_by(Fixture.match_date.asc()).limit(min(limit, 100)).all()
-    return [{"id": f.id, "sport": f.sport, "league": f.league, "match_date": f.match_date, "home_team": f.home_team, "away_team": f.away_team} for f in rows]
+def upcoming_fixtures(sport: str | None = None, league: str | None = None, limit: int = 300, db: Session = Depends(get_db)):
+    query = db.query(Fixture).filter(Fixture.match_date >= date.today(), Fixture.sport.in_(["soccer", "basketball"]))
+    if sport:
+        query = query.filter(Fixture.sport == sport)
+    if league:
+        query = query.filter(Fixture.league == league)
+    rows = query.order_by(Fixture.match_date.asc(), Fixture.league.asc()).limit(min(limit, 500)).all()
+    return [
+        {
+            "id": f.id,
+            "sport": f.sport,
+            "league": f.league,
+            "season": f.season,
+            "match_date": f.match_date,
+            "home_team": f.home_team,
+            "away_team": f.away_team,
+            "home_odds": f.home_odds,
+            "draw_odds": f.draw_odds,
+            "away_odds": f.away_odds,
+            "source": f.source,
+            "has_odds": any([f.home_odds, f.draw_odds, f.away_odds]),
+            "odds_source": (f.extra or {}).get("odds_source") if isinstance(f.extra, dict) else None,
+        }
+        for f in rows
+    ]
 
 
 @router.post("/community/predictions")

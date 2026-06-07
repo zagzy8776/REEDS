@@ -37,6 +37,11 @@ export async function getUpcomingFixtures() {
   return safeFetchJson(`${API_URL}/api/fixtures/upcoming?limit=100`, []);
 }
 
+export async function getFixtures(params: Record<string, string> = {}) {
+  const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
+  return safeFetchJson(`${API_URL}/api/fixtures/upcoming${qs ? `?${qs}` : "?limit=300"}`, []);
+}
+
 export async function getCommunityLeaderboard() {
   return safeFetchJson(`${API_URL}/api/community/leaderboard?limit=50`, []);
 }
