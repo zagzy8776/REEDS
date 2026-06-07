@@ -3,6 +3,8 @@ from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from sqlalchemy.orm import Session
+
 from app.core.config import get_settings
 from app.db.models import BacktestRun
 from app.db.session import SessionLocal
