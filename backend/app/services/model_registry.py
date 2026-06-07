@@ -4,8 +4,8 @@ from app.db.models import ModelVersion
 
 
 MIN_ACTIVE_SAMPLES = {
-    "soccer": 500,
-    "basketball": 1000,
+    "soccer": 250,
+    "basketball": 500,
 }
 
 

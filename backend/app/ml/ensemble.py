@@ -49,16 +49,18 @@ class LoyalEdgeEngine:
         }
         pick_1x2, conf_1x2 = max(one_x_two.items(), key=lambda x: x[1])
         over_conf = 0.65 * p["over25"] + 0.35 * min((home_lam + away_lam) / 4, 1)
-        btts_conf = 0.70 * p["btts"] + 0.30 * min(min(home_lam, away_lam) / 2, 1)
+        btts_conf = 0.70 * p["btts"] + 0.30 * min(min(home_lam, away_lam) / 2.5, 1)
 
         def risk(c: float) -> str:
             return "Low" if c >= 0.72 else "Medium" if c >= 0.58 else "High"
 
         reason = soccer_reasoning(p["score"], home_lam + away_lam)
         score_conf = max(1.0, min(p.get("score_prob", 0.0) * 100, 42.0))
+        btts_pick = "BTTS Yes" if btts_conf >= 0.53 else "BTTS No"
+        btts_final_conf = round(max(btts_conf, 1 - btts_conf) * 100, 1)
         return [
             {"market": "1X2", "pick": pick_1x2, "confidence": round(conf_1x2 * 100, 1), "edge_score": round(conf_1x2 * 100, 1), "risk_level": risk(conf_1x2), "reasoning": reason, "engine_meta": {"private": p}},
             {"market": "Goals", "pick": "Over 2.5 Goals" if over_conf >= 0.5 else "Under 2.5 Goals", "confidence": round(max(over_conf, 1 - over_conf) * 100, 1), "edge_score": round(max(over_conf, 1 - over_conf) * 100, 1), "risk_level": risk(max(over_conf, 1 - over_conf)), "reasoning": reason, "engine_meta": {"private": p}},
-            {"market": "BTTS", "pick": "BTTS Yes" if btts_conf >= 0.5 else "BTTS No", "confidence": round(max(btts_conf, 1 - btts_conf) * 100, 1), "edge_score": round(max(btts_conf, 1 - btts_conf) * 100, 1), "risk_level": risk(max(btts_conf, 1 - btts_conf)), "reasoning": reason, "engine_meta": {"private": p}},
+            {"market": "BTTS", "pick": btts_pick, "confidence": btts_final_conf, "edge_score": btts_final_conf, "risk_level": risk(btts_final_conf / 100), "reasoning": reason, "engine_meta": {"private": p}},
             {"market": "Correct Score", "pick": p["score"], "confidence": round(score_conf, 1), "edge_score": round(score_conf, 1), "risk_level": "High", "reasoning": high_variance_warning(), "engine_meta": {"private": p}},
         ]

@@ -10,12 +10,12 @@ from app.services.model_registry import active_model
 
 
 PUBLISH_THRESHOLDS = {
-    "1X2": 64,
-    "Moneyline": 64,
-    "Goals": 66,
-    "BTTS": 66,
-    "Spread": 68,
-    "Total Points": 66,
+    "1X2": 55,
+    "Moneyline": 55,
+    "Goals": 55,
+    "BTTS": 55,
+    "Spread": 60,
+    "Total Points": 55,
     "Correct Score": 101,  # never publish as a customer pick by default; too volatile
 }
 
