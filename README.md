@@ -89,6 +89,30 @@ Recommended model feeding order:
 7. Run POST /api/admin/predict to refresh customer picks
 ```
 
+Focused soccer growth pipeline:
+
+```bash
+# Tier-1 leagues, last 5 completed seasons by default
+python backend/scripts/scale_soccer_data.py --phase tier1 --start-year 2020 --end-year 2025
+
+# Add high-scoring sub-tiers after Tier 1 is stable
+python backend/scripts/scale_soccer_data.py --phase high_scoring --start-year 2021 --end-year 2025
+
+# Global market expansion from 2015 onward
+python backend/scripts/seed_team_aliases.py
+python backend/scripts/scale_soccer_data.py --phase global --start-year 2015 --end-year 2026
+```
+
+After every ~2,000 new soccer matches, run:
+
+```bash
+python backend/scripts/train_models.py
+python backend/scripts/calibrate_models.py
+curl -X POST "$API_URL/api/admin/backtest" -H "X-Admin-Key: $ADMIN_API_KEY"
+```
+
+Watch Brier score and log loss trend down before trusting accuracy claims.
+
 Important model-feeding rules:
 
 - Keep football and basketball data separate by sport.
@@ -118,6 +142,41 @@ Important model-feeding rules:
 - `GET /api/stats/backtest`
 - `POST /api/admin/train` with `X-Admin-Key`
 - `POST /api/admin/predict` with `X-Admin-Key`
+- `POST /api/admin/backtest` with `X-Admin-Key`
+- `POST /api/admin/team-aliases` with `X-Admin-Key`
+- `GET /api/admin/team-aliases` with `X-Admin-Key`
+- `GET /api/admin/odds-snapshots` with `X-Admin-Key`
+- `POST /api/admin/odds-snapshots` with `X-Admin-Key`
+
+## Data quality and market proof
+
+- Team identity is now backed by `teams` and `team_aliases` tables. CSV ingestion
+  resolves raw names through database aliases first, then static aliases, and then
+  creates a canonical self-alias for unknown teams.
+- Prediction generation captures fixture odds into `odds_snapshots` at the moment
+  a pick is created/published. This is the foundation for future ROI and closing
+  line value tracking.
+- Closing odds can be added with `POST /api/admin/odds-snapshots`. Public stats
+  include early ROI/CLV summaries for supported settled markets.
+
+## Database migrations
+
+This project is migration-ready with Alembic. For existing production databases,
+run migrations before deploying schema-dependent code:
+
+```bash
+cd backend
+alembic upgrade head
+```
+
+If you are bootstrapping an empty database for the first time, you can also run:
+
+```bash
+python backend/scripts/ensure_schema.py
+```
+
+Local MVP startup still calls `create_all()` as a safety net, but production
+schema changes should be handled through Alembic revisions.
 
 ## Security
 

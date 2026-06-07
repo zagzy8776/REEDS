@@ -10,7 +10,13 @@ from app.db.session import init_db
 setup_logging()
 settings = get_settings()
 app = FastAPI(title="LOYAL EDGE API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 app.include_router(public.router, prefix="/api")
 app.include_router(admin.router, prefix="/api/admin")
 

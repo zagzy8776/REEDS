@@ -2,8 +2,8 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata = {
-  title: "LOYAL EDGE",
-  description: "Premium football and basketball prediction intelligence",
+  title: "LOYAL EDGE — Transparent Sports Prediction Intelligence",
+  description: "Football and basketball predictions with risk ratings, model validation, and transparent performance tracking.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -18,7 +18,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/predictions">Predictions</Link>
             <Link href="/combo">3-Combo</Link>
             <Link href="/stats">Stats</Link>
-            <Link href="/admin">Control Room</Link>
           </div>
         </nav>
         {children}

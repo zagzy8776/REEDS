@@ -21,7 +21,7 @@ class BasketballEngine:
     def predict(self, history: pd.DataFrame, fixture: dict, line_total: float | None = None) -> list[dict]:
         home_team = normalize_team_name(fixture["home_team"], "basketball")
         away_team = normalize_team_name(fixture["away_team"], "basketball")
-        f = basketball_features_for_fixture(history, home_team, away_team)
+        f = basketball_features_for_fixture(history, home_team, away_team, fixture.get("match_date"))
         home_avg = (f["home_recent_points_for"] + f["away_recent_points_against"]) / 2
         away_avg = (f["away_recent_points_for"] + f["home_recent_points_against"]) / 2
         projected_total = home_avg + away_avg

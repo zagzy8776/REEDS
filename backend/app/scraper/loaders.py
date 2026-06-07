@@ -4,6 +4,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture
+from app.services.data_quality import resolve_team_name
 from app.utils.team_names import normalize_team_name
 
 
@@ -112,8 +113,8 @@ def load_football_csv(db: Session, path: str, league: str = "Unknown", season: s
             league=league,
             season=season,
             match_date=parsed_date.date(),
-            home_team=normalize_team_name(str(r["home_team"]), "soccer"),
-            away_team=normalize_team_name(str(r["away_team"]), "soccer"),
+            home_team=resolve_team_name(db, str(r["home_team"]), "soccer", Path(path).name),
+            away_team=resolve_team_name(db, str(r["away_team"]), "soccer", Path(path).name),
             home_score=None if pd.isna(r.get("home_score")) else int(r.get("home_score")),
             away_score=None if pd.isna(r.get("away_score")) else int(r.get("away_score")),
             home_odds=None if pd.isna(r.get("home_odds")) else float(r.get("home_odds")),
@@ -178,8 +179,8 @@ def load_basketball_csv(db: Session, path: str, league: str = "NBA", season: str
             league=league,
             season=season,
             match_date=parsed_date.date(),
-            home_team=normalize_team_name(str(r["home_team"]), "basketball"),
-            away_team=normalize_team_name(str(r["away_team"]), "basketball"),
+            home_team=resolve_team_name(db, str(r["home_team"]), "basketball", Path(path).name),
+            away_team=resolve_team_name(db, str(r["away_team"]), "basketball", Path(path).name),
             home_score=None if pd.isna(r.get("home_score")) else int(r.get("home_score")),
             away_score=None if pd.isna(r.get("away_score")) else int(r.get("away_score")),
             source=Path(path).name,

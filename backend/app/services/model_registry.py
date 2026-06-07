@@ -9,11 +9,16 @@ MIN_ACTIVE_SAMPLES = {
 }
 
 
-def active_model_path(db: Session, sport: str = "soccer") -> str | None:
+def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
     mv = db.query(ModelVersion).filter(ModelVersion.sport == sport, ModelVersion.is_active == True, ModelVersion.sample_size >= min_samples).order_by(ModelVersion.trained_at.desc()).first()
     if not mv:
         mv = db.query(ModelVersion).filter(ModelVersion.sport == sport, ModelVersion.sample_size >= min_samples).order_by(ModelVersion.accuracy.desc(), ModelVersion.trained_at.desc()).first()
+    return mv
+
+
+def active_model_path(db: Session, sport: str = "soccer") -> str | None:
+    mv = active_model(db, sport)
     return mv.path if mv else None
 
 

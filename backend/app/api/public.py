@@ -1,11 +1,12 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.db.models import Fixture, ModelVersion, Prediction
+from app.db.models import BacktestRun, Fixture, ModelVersion, OddsSnapshot, Prediction
 from app.db.session import get_db
-from app.services.predictions import build_combo
+from app.services.market_metrics import roi_clv_summary
+from app.services.predictions import build_combo, compound_combo_probability
 
 
 router = APIRouter()
@@ -62,27 +63,57 @@ def serialize_prediction(p: Prediction, f: Fixture) -> dict:
         "risk_level": p.risk_level,
         "reasoning": p.reasoning,
         "is_premium": p.is_premium,
+        "version": p.version,
+        "status": p.status,
+        "published_at": p.published_at,
         "result": "pending" if result is None else "won" if result else "lost",
     }
 
 
 @router.get("/predictions/today")
-def today(db: Session = Depends(get_db)):
-    rows = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Fixture.match_date >= date.today()).order_by(Prediction.confidence.desc()).limit(100).all()
+def today(league: str | None = None, market: str | None = None, risk: str | None = None, min_confidence: float = 0, db: Session = Depends(get_db)):
+    query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Prediction.status == "active", Fixture.match_date >= date.today(), Prediction.confidence >= min_confidence)
+    if league:
+        query = query.filter(Fixture.league == league)
+    if market:
+        query = query.filter(Prediction.market == market)
+    if risk:
+        query = query.filter(Prediction.risk_level == risk)
+    rows = query.order_by(Prediction.confidence.desc()).limit(100).all()
     return [serialize_prediction(p, f) for p, f in rows]
+
+
+@router.get("/predictions/{prediction_id}")
+def prediction_detail(prediction_id: int, db: Session = Depends(get_db)):
+    row = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.id == prediction_id, Prediction.is_published == True).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+    p, f = row
+    snapshots = db.query(OddsSnapshot).filter(OddsSnapshot.prediction_id == p.id).order_by(OddsSnapshot.captured_at.desc()).all()
+    return {
+        **serialize_prediction(p, f),
+        "model_version_id": p.model_version_id,
+        "engine_summary": "Model output is calibrated where available and filtered by market-specific publish thresholds.",
+        "odds_snapshots": [{"phase": o.phase, "market": o.market, "home_odds": o.home_odds, "draw_odds": o.draw_odds, "away_odds": o.away_odds, "bookmaker": o.bookmaker, "captured_at": o.captured_at} for o in snapshots],
+        "responsible_note": "Predictions are probabilistic, not guaranteed. Use responsible staking.",
+    }
 
 
 @router.get("/predictions/combo")
 def combo_endpoint(legs: int = 3, min_confidence: float = 60, db: Session = Depends(get_db)):
-    out = [serialize_prediction(p, f) for p, f in build_combo(db, legs, min_confidence)]
-    combined = round(sum(x["confidence"] for x in out) / len(out), 1) if out else 0
-    return {"label": "LOYAL EDGE 3-Leg Combo", "combined_confidence": combined, "risk_level": "Low" if combined >= 72 else "Medium", "legs": out}
+    rows = build_combo(db, legs, min_confidence)
+    out = [serialize_prediction(p, f) for p, f in rows]
+    true_probability = compound_combo_probability([p for p, _ in rows])
+    avg_edge = round(sum(x["edge_score"] for x in out) / len(out), 1) if out else 0
+    return {"label": "LOYAL EDGE 3-Leg Combo", "combined_confidence": true_probability, "avg_edge_score": avg_edge, "risk_level": "High" if true_probability < 45 else "Medium" if true_probability < 65 else "Low", "legs": out}
 
 
 @router.get("/stats/backtest")
 def stats(db: Session = Depends(get_db)):
     models = db.query(ModelVersion).order_by(ModelVersion.trained_at.desc()).limit(10).all()
-    rows = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Fixture.home_score != None, Fixture.away_score != None).all()
+    backtests = db.query(BacktestRun).order_by(BacktestRun.created_at.desc()).limit(10).all()
+    rows = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Fixture.home_score != None, Fixture.away_score != None).all()
+    odds_snapshot_count = db.query(OddsSnapshot).count()
     settled = []
     for p, f in rows:
         result = prediction_result(p, f)
@@ -111,6 +142,9 @@ def stats(db: Session = Depends(get_db)):
         "brand": "LOYAL EDGE",
         "note": "Metrics are historical validation estimates and settled-pick tracking, not guarantees.",
         "models": [{"sport": m.sport, "type": m.model_type, "accuracy": m.accuracy, "sample_size": m.sample_size, "active": m.is_active, "trained_at": m.trained_at} for m in models],
+        "backtests": [{"sport": b.sport, "type": b.model_type, "strategy": b.split_strategy, "accuracy": b.accuracy, "brier_score": b.brier_score, "log_loss": b.log_loss, "sample_size": b.sample_size, "created_at": b.created_at, "metrics": b.metrics} for b in backtests],
+        "data_quality": {"odds_snapshots": odds_snapshot_count, "note": "ROI and CLV become meaningful after published and closing odds are captured consistently."},
+        "market_proof": roi_clv_summary(db),
         "results": {
             "settled_picks": len(settled),
             "wins": sum(1 for _, _, won in settled if won),

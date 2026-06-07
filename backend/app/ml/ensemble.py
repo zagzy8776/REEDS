@@ -5,6 +5,7 @@ import pandas as pd
 
 from app.ml.features import features_for_fixture
 from app.ml.poisson import soccer_probabilities
+from app.ml.calibration import apply_calibration
 from app.services.customer_copy import high_variance_warning, soccer_reasoning
 from app.utils.team_names import normalize_team_name
 
@@ -18,7 +19,16 @@ class LoyalEdgeEngine:
     def predict_soccer(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
         home_team = normalize_team_name(fixture["home_team"], "soccer")
         away_team = normalize_team_name(fixture["away_team"], "soccer")
-        f = features_for_fixture(history, home_team, away_team)
+        f = features_for_fixture(
+            history,
+            home_team,
+            away_team,
+            fixture.get("match_date"),
+            fixture.get("league"),
+            fixture.get("home_odds"),
+            fixture.get("draw_odds"),
+            fixture.get("away_odds"),
+        )
         home_lam = max((f["home_goals_for"] + f["away_goals_against"]) / 2, 0.2)
         away_lam = max((f["away_goals_for"] + f["home_goals_against"]) / 2, 0.2)
         p = soccer_probabilities(home_lam, away_lam)
@@ -29,6 +39,7 @@ class LoyalEdgeEngine:
             probs = self.bundle["model"].predict_proba(x)[0]
             cls_map = {0: "away", 1: "draw", 2: "home"}
             ml_probs = {cls_map.get(c, str(c)): float(probs[i]) for i, c in enumerate(self.bundle["model"].classes_)}
+            ml_probs = apply_calibration(ml_probs, self.bundle.get("calibrator_path"))
 
         form_total = f["home_form_points"] + f["away_form_points"] + 0.01
         one_x_two = {

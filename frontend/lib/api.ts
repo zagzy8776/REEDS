@@ -16,8 +16,13 @@ async function safeFetchJson(url: string, fallback: any) {
   }
 }
 
-export async function getTodayPredictions() {
-  return safeFetchJson(`${API_URL}/api/predictions/today`, []);
+export async function getTodayPredictions(params: Record<string, string> = {}) {
+  const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
+  return safeFetchJson(`${API_URL}/api/predictions/today${qs ? `?${qs}` : ""}`, []);
+}
+
+export async function getPrediction(id: string) {
+  return safeFetchJson(`${API_URL}/api/predictions/${id}`, null);
 }
 
 export async function getCombo() {

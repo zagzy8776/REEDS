@@ -7,6 +7,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
 from app.core.config import get_settings
+from app.ml.calibration import fit_soccer_platt_calibrator
 from app.ml.features import build_basketball_features, build_soccer_features
 
 try:
@@ -95,8 +96,14 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
     acc = float(accuracy_score(y_test, model.predict(X_test)))
     Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
     path = f"{settings.model_dir}/soccer_{model_type}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.joblib"
-    joblib.dump({"model": model, "features": FEATURES, "accuracy": acc, "model_type": model_type, "split": "chronological_75_25"}, path)
-    return {"path": path, "accuracy": acc, "sample_size": len(X), "model_type": model_type, "split": "chronological_75_25"}
+    calibrator_path = None
+    if len(X) >= max(settings.min_training_rows, 1000):
+        try:
+            calibrator_path = fit_soccer_platt_calibrator(fixtures, min_train_rows=max(settings.min_training_rows, 1000))["path"]
+        except ValueError:
+            calibrator_path = None
+    joblib.dump({"model": model, "features": FEATURES, "accuracy": acc, "model_type": model_type, "split": "chronological_75_25", "calibrator_path": calibrator_path}, path)
+    return {"path": path, "accuracy": acc, "sample_size": len(X), "model_type": model_type, "split": "chronological_75_25", "calibrator_path": calibrator_path}
 
 
 def train_basketball_model(fixtures: pd.DataFrame) -> dict:
