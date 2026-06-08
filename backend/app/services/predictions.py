@@ -14,6 +14,9 @@ PUBLISH_THRESHOLDS = {
     "Moneyline": 55,
     "Goals": 55,
     "BTTS": 55,
+    "Double Chance": 58,
+    "Over/Under 1.5": 58,
+    "Over/Under 3.5": 58,
     "Spread": 60,
     "Total Points": 55,
     "Correct Score": 101,  # never publish as a customer pick by default; too volatile
@@ -45,6 +48,28 @@ def choose_provisional_public_pick(items: list[dict]) -> dict | None:
     if not candidates:
         return None
     return max(candidates, key=lambda item: float(item.get("confidence", 0)))
+
+
+def select_public_picks(items: list[dict], max_picks: int = 4) -> set[int]:
+    """Publish a healthy mix of markets instead of only the single highest pick.
+
+    Betting users expect multiple angles per fixture: result, safer double-chance,
+    totals, and BTTS. We still avoid correct score by default because it is highly
+    volatile, but we allow the strongest markets through even while a model is young.
+    """
+
+    eligible = [
+        (idx, item)
+        for idx, item in enumerate(items)
+        if item.get("market") != "Correct Score" and item.get("risk_level") != "High"
+    ]
+    published = {idx for idx, item in eligible if should_publish_pick(item)}
+    if len(published) < max_picks:
+        for idx, _ in sorted(eligible, key=lambda pair: float(pair[1].get("confidence", 0)), reverse=True):
+            published.add(idx)
+            if len(published) >= max_picks:
+                break
+    return published
 
 
 def dataframe_from_db(db: Session) -> pd.DataFrame:
@@ -113,11 +138,12 @@ def generate_today_predictions(db: Session) -> int:
         else:
             model_version_id = soccer_model.id if soccer_model else None
             items = soccer_engine.predict_soccer(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
-        publish_fallback = choose_provisional_public_pick(items) if not any(should_publish_pick(item) for item in items) else None
-        for item in items:
-            is_published = should_publish_pick(item) or item is publish_fallback
+        published_indexes = select_public_picks(items)
+        publish_fallback = choose_provisional_public_pick(items) if not published_indexes else None
+        for idx, item in enumerate(items):
+            is_published = idx in published_indexes or item is publish_fallback
             if item is publish_fallback:
-                item = {**item, "reasoning": f"Provisional public read while live data/model history is still warming up. {item.get('reasoning', '')}"}
+                item = {**item, "reasoning": f"Best available model read for this fixture. {item.get('reasoning', '')}"}
             _supersede_active_prediction(db, fx.id, item["market"])
             version = _next_prediction_version(db, fx.id, item["market"])
             pred = Prediction(

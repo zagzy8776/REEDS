@@ -128,7 +128,7 @@ def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league:
         query = query.filter(Fixture.sport == sport)
     if league:
         query = query.filter(Fixture.league == league)
-    order_date = Fixture.match_date.desc() if normalized_scope in {"results", "old", "past", "all"} else Fixture.match_date.asc()
+    order_date = Fixture.match_date.desc() if normalized_scope in {"results", "old", "past"} else Fixture.match_date.asc()
     rows = query.order_by(order_date, Fixture.league.asc()).limit(min(limit, 500)).all()
     return [
         {
