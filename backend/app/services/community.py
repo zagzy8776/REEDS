@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -64,24 +64,89 @@ def settle_user_predictions(db: Session) -> dict:
 
 
 def community_leaderboard(db: Session, limit: int = 50) -> list[dict]:
-    rows = db.query(UserPrediction).filter(UserPrediction.is_settled == True).order_by(UserPrediction.created_at.asc()).all()
+    rows = db.query(UserPrediction).order_by(UserPrediction.created_at.asc()).all()
     users: dict[str, dict] = {}
     for pred in rows:
-        row = users.setdefault(pred.username, {"username": pred.username, "settled": 0, "wins": 0, "profit_units": 0.0, "current_streak": 0, "best_streak": 0})
+        row = users.setdefault(pred.username, {
+            "username": pred.username,
+            "total_posts": 0,
+            "pending": 0,
+            "settled": 0,
+            "wins": 0,
+            "losses": 0,
+            "profit_units": 0.0,
+            "current_streak": 0,
+            "best_streak": 0,
+            "markets": {},
+            "recent_picks": [],
+            "last_active": None,
+        })
+        row["total_posts"] += 1
+        row["last_active"] = max(row["last_active"], pred.created_at) if row["last_active"] else pred.created_at
+        row["markets"][pred.market] = row["markets"].get(pred.market, 0) + 1
+        row["recent_picks"].append({
+            "id": pred.id,
+            "fixture_id": pred.fixture_id,
+            "market": pred.market,
+            "pick": pred.pick,
+            "is_settled": pred.is_settled,
+            "was_correct": pred.was_correct,
+            "created_at": pred.created_at,
+        })
+        if not pred.is_settled:
+            row["pending"] += 1
+            continue
         row["settled"] += 1
         if pred.was_correct:
             row["wins"] += 1
             row["current_streak"] += 1
             row["best_streak"] = max(row["best_streak"], row["current_streak"])
         else:
+            row["losses"] += 1
             row["current_streak"] = 0
         row["profit_units"] += pred.profit_units or 0.0
     out = []
     for row in users.values():
         row["win_rate"] = round((row["wins"] / row["settled"]) * 100, 1) if row["settled"] else 0
         row["profit_units"] = round(row["profit_units"], 2)
+        row["roi_percent"] = round((row["profit_units"] / (row["settled"] * 10)) * 100, 1) if row["settled"] else 0
+        row["favorite_market"] = max(row["markets"].items(), key=lambda item: item[1])[0] if row["markets"] else "—"
+        row["recent_picks"] = sorted(row["recent_picks"], key=lambda x: x["created_at"], reverse=True)[:5]
+        row["badges"] = []
+        if row["settled"] >= 25:
+            row["badges"].append("Verified volume")
+        if row["win_rate"] >= 60 and row["settled"] >= 10:
+            row["badges"].append("Sharp form")
+        if row["best_streak"] >= 5:
+            row["badges"].append("Hot streak")
+        if row["profit_units"] > 0:
+            row["badges"].append("Profitable")
+        row["rank_score"] = round(row["profit_units"] + (row["win_rate"] / 10) + min(row["settled"], 50) / 5 + row["best_streak"], 2)
+        row.pop("markets", None)
         out.append(row)
-    return sorted(out, key=lambda x: (x["profit_units"], x["win_rate"], x["settled"]), reverse=True)[:limit]
+    return sorted(out, key=lambda x: (x["rank_score"], x["profit_units"], x["win_rate"], x["settled"]), reverse=True)[:limit]
+
+
+def community_overview(db: Session) -> dict:
+    rows = db.query(UserPrediction).order_by(UserPrediction.created_at.desc()).all()
+    settled = [p for p in rows if p.is_settled]
+    wins = sum(1 for p in settled if p.was_correct)
+    since = datetime.utcnow() - timedelta(days=7)
+    active_users = len({p.username for p in rows if p.created_at and p.created_at >= since})
+    markets: dict[str, int] = {}
+    for p in rows:
+        markets[p.market] = markets.get(p.market, 0) + 1
+    return {
+        "total_posts": len(rows),
+        "pending": sum(1 for p in rows if not p.is_settled),
+        "settled": len(settled),
+        "wins": wins,
+        "losses": len(settled) - wins,
+        "community_hit_rate": round((wins / len(settled)) * 100, 1) if settled else 0,
+        "active_users_7d": active_users,
+        "top_markets": [{"market": k, "count": v} for k, v in sorted(markets.items(), key=lambda x: x[1], reverse=True)[:6]],
+        "recent_posts": [{"id": p.id, "fixture_id": p.fixture_id, "username": p.username, "market": p.market, "pick": p.pick, "analysis_text": p.analysis_text, "is_settled": p.is_settled, "was_correct": p.was_correct, "created_at": p.created_at} for p in rows[:12]],
+    }
 
 
 def fixture_consensus(db: Session, fixture_id: int) -> dict:

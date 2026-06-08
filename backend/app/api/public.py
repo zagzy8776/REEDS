@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import BacktestRun, Fixture, ModelVersion, OddsSnapshot, Prediction, UserPrediction
 from app.db.session import get_db
-from app.services.community import community_leaderboard, fixture_consensus
+from app.services.community import community_leaderboard, community_overview, fixture_consensus
 from app.services.market_metrics import roi_clv_summary
 from app.services.predictions import build_combo, compound_combo_probability
 
@@ -247,6 +247,11 @@ def community_for_fixture(fixture_id: int, db: Session = Depends(get_db)):
 @router.get("/community/leaderboard")
 def leaderboard(limit: int = 50, db: Session = Depends(get_db)):
     return community_leaderboard(db, min(limit, 100))
+
+
+@router.get("/community/overview")
+def community(db: Session = Depends(get_db)):
+    return community_overview(db)
 
 
 @router.get("/stats/backtest")

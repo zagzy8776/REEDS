@@ -54,3 +54,7 @@ export async function getFixture(id: string) {
 export async function getCommunityLeaderboard() {
   return safeFetchJson(`${API_URL}/api/community/leaderboard?limit=50`, []);
 }
+
+export async function getCommunityOverview() {
+  return safeFetchJson(`${API_URL}/api/community/overview`, { total_posts: 0, pending: 0, settled: 0, recent_posts: [], top_markets: [] });
+}
