@@ -182,12 +182,26 @@ def start_scheduler() -> BackgroundScheduler:
         report = run_daily_learning_pipeline()
         log.info("Daily learning pipeline completed: %s", report)
 
+    def live_refresh_job():
+        """Refresh fixtures/predictions repeatedly so completed matches make way for upcoming action."""
+        report = run_daily_learning_pipeline()
+        log.info("Live refresh pipeline completed: %s", report)
+
     scheduler.add_job(
         daily_job,
         "cron",
         hour=6,
         minute=0,
         id="daily_learning_pipeline",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        live_refresh_job,
+        "interval",
+        hours=3,
+        id="live_fixture_refresh_pipeline",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

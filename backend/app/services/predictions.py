@@ -125,7 +125,18 @@ def _capture_odds_snapshot(db: Session, fx: Fixture, pred: Prediction, phase: st
 
 def generate_today_predictions(db: Session) -> int:
     history = dataframe_from_db(db)
-    fixtures = db.query(Fixture).filter(Fixture.match_date >= date.today(), Fixture.sport.in_(["soccer", "basketball"])).order_by(Fixture.match_date.asc()).limit(40).all()
+    fixtures = (
+        db.query(Fixture)
+        .filter(
+            Fixture.match_date >= date.today(),
+            Fixture.sport.in_(["soccer", "basketball"]),
+            Fixture.home_score == None,
+            Fixture.away_score == None,
+        )
+        .order_by(Fixture.match_date.asc(), Fixture.league.asc())
+        .limit(80)
+        .all()
+    )
     soccer_model = active_model(db, "soccer")
     basketball_model = active_model(db, "basketball")
     soccer_engine = LoyalEdgeEngine(soccer_model.path if soccer_model else None)

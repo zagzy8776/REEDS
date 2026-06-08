@@ -15,7 +15,7 @@ function formatOdds(value?: number | null) {
 export default async function Fixtures({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams;
   const [fixtures, status] = await Promise.all([
-    getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "300" }),
+    getFixtures({ ...params, scope: params.scope || "upcoming", limit: params.limit || "300" }),
     getFixtureStatus(),
   ]);
   const sports = Array.from(new Set(fixtures.map((f: any) => f.sport))).filter(Boolean);
@@ -55,7 +55,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
 
       <form className="mt-6 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/50 p-4 md:grid-cols-5">
         <select name="scope" defaultValue={params.scope || "all"} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-          <option value="all">All matches</option>
+          <option value="all">All active/upcoming</option>
           <option value="live">Today / Live</option>
           <option value="upcoming">Upcoming</option>
           <option value="results">Old results</option>

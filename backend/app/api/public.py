@@ -121,7 +121,10 @@ def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league:
     elif normalized_scope in {"results", "old", "past"}:
         query = query.filter(Fixture.match_date < date.today())
     elif normalized_scope == "all":
-        pass
+        # Public match center should behave like LiveScore/SofaScore: show active
+        # and upcoming action first. Historical results remain available via
+        # scope=results so they don't bury the next matches users came to track.
+        query = query.filter(Fixture.match_date >= date.today())
     else:
         raise HTTPException(status_code=400, detail="scope must be upcoming, live, results, or all")
     if sport:
