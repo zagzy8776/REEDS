@@ -63,6 +63,7 @@ def serialize_prediction(p: Prediction, f: Fixture) -> dict:
         "edge_score": p.edge_score,
         "risk_level": p.risk_level,
         "reasoning": p.reasoning,
+        "analysis": p.engine_meta or {},
         "is_premium": p.is_premium,
         "version": p.version,
         "status": p.status,
@@ -182,6 +183,34 @@ def fixtures_status(db: Session = Depends(get_db)):
         "latest_match_date": latest.match_date if latest else None,
         "feed_health": "empty" if total == 0 else "needs_live_api" if api_rows == 0 else "active",
         "public_note": "If this says empty or needs_live_api, add API keys on Render and run live ingestion/scheduler. No secret values are exposed here.",
+    }
+
+
+@router.get("/fixtures/{fixture_id}")
+def fixture_detail(fixture_id: int, db: Session = Depends(get_db)):
+    fixture = db.query(Fixture).filter(Fixture.id == fixture_id).first()
+    if not fixture:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+    predictions = db.query(Prediction).filter(Prediction.fixture_id == fixture.id, Prediction.status == "active", Prediction.is_published == True).order_by(Prediction.confidence.desc()).all()
+    return {
+        "fixture": {
+            "id": fixture.id,
+            "sport": fixture.sport,
+            "league": fixture.league,
+            "season": fixture.season,
+            "match_date": fixture.match_date,
+            "home_team": fixture.home_team,
+            "away_team": fixture.away_team,
+            "home_score": fixture.home_score,
+            "away_score": fixture.away_score,
+            "home_odds": fixture.home_odds,
+            "draw_odds": fixture.draw_odds,
+            "away_odds": fixture.away_odds,
+            "api_status": (fixture.extra or {}).get("status") if isinstance(fixture.extra, dict) else None,
+        },
+        "predictions": [serialize_prediction(p, fixture) for p in predictions],
+        "community": fixture_consensus(db, fixture.id),
+        "note": "Fixture detail combines live match context, AI market reads, odds and community sentiment.",
     }
 
 

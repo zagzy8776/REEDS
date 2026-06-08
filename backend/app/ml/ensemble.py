@@ -6,7 +6,7 @@ import pandas as pd
 from app.ml.features import features_for_fixture
 from app.ml.poisson import soccer_probabilities
 from app.ml.calibration import apply_calibration
-from app.services.customer_copy import high_variance_warning, soccer_reasoning
+from app.services.customer_copy import high_variance_warning
 from app.utils.team_names import normalize_team_name
 
 
@@ -69,6 +69,33 @@ class LoyalEdgeEngine:
         def risk(c: float) -> str:
             return "Low" if c >= 0.72 else "Medium" if c >= 0.58 else "High"
 
+        model_factors = [
+            {"label": "Home form points", "value": round(float(f["home_form_points"]), 2), "note": f"{home_team} recent points-per-match profile"},
+            {"label": "Away form points", "value": round(float(f["away_form_points"]), 2), "note": f"{away_team} recent points-per-match profile"},
+            {"label": "Elo gap", "value": round(float(f["elo_diff"]), 1), "note": "Positive favors the home team; negative favors the away team"},
+            {"label": "Projected goals", "value": round(float(home_lam + away_lam), 2), "note": "Model blend of recent scoring and goals allowed"},
+            {"label": "BTTS probability", "value": f"{p['btts']:.1%}", "note": "Chance both teams score from Poisson goal simulation"},
+            {"label": "Over 2.5 probability", "value": f"{p['over25']:.1%}", "note": "Chance total goals finish above 2.5"},
+        ]
+
+        base_meta = {
+            "summary": "LOYAL EDGE blends trained result probability, Poisson goal simulation, recent form, Elo strength, home/away scoring balance, clean-sheet rates, and market odds where available.",
+            "factors": model_factors,
+            "probabilities": {
+                "home_win": round(float(p["home"]), 4),
+                "draw": round(float(p["draw"]), 4),
+                "away_win": round(float(p["away"]), 4),
+                "over25": round(float(p["over25"]), 4),
+                "btts": round(float(p["btts"]), 4),
+            },
+            "projection": {
+                "score_band": p["score"],
+                "home_expected_goals": round(float(home_lam), 2),
+                "away_expected_goals": round(float(away_lam), 2),
+                "total_expected_goals": round(float(home_lam + away_lam), 2),
+            },
+        }
+
         reason_1x2 = f"Model rates {pick_1x2} based on {f['home_form_points']:.1f} vs {f['away_form_points']:.1f} form points, Elo {f['home_elo']:.0f}-{f['away_elo']:.0f}, and league strength {f['league_strength']:.2f}. {home_team} scoring avg {f['home_goals_for']:.2f}, {away_team} avg {f['away_goals_for']:.2f}."
         reason_goals = f"Total goal estimate {home_lam + away_lam:.2f}. Home avg {f['home_goals_for']:.2f}, away avg {f['away_goals_for']:.2f}. Clean sheet rates: home {f['home_clean_sheet_rate_5']:.0%}, away {f['away_clean_sheet_rate_5']:.0%}."
         reason_btts = f"Both teams scoring probability {p['btts']:.1%}. {home_team} failed to score {f['home_failed_score_rate_5']:.0%} of last 5, {away_team} {f['away_failed_score_rate_5']:.0%}."
@@ -85,12 +112,12 @@ class LoyalEdgeEngine:
         over35_conf = round(max(over35, 1 - over35) * 100, 1)
 
         return [
-            {"market": "1X2", "pick": pick_1x2, "confidence": round(conf_1x2 * 100, 1), "edge_score": round(conf_1x2 * 100, 1), "risk_level": risk(conf_1x2), "reasoning": reason_1x2, "engine_meta": {"private": {**p, "home_lam": home_lam, "away_lam": away_lam}}},
-            {"market": "Double Chance", "pick": dc_pick, "confidence": round(dc_conf * 100, 1), "edge_score": round(dc_conf * 100, 1), "risk_level": risk(dc_conf), "reasoning": reason_dc, "engine_meta": {"private": p}},
-            {"market": "Goals", "pick": goals_pick, "confidence": goals_conf, "edge_score": goals_conf, "risk_level": risk(goals_conf / 100), "reasoning": reason_goals, "engine_meta": {"private": p}},
-            {"market": "Over/Under 1.5", "pick": over15_pick, "confidence": over15_conf, "edge_score": over15_conf, "risk_level": risk(over15_conf / 100), "reasoning": reason_goals, "engine_meta": {"private": p}},
-            {"market": "Over/Under 3.5", "pick": over35_pick, "confidence": over35_conf, "edge_score": over35_conf, "risk_level": risk(over35_conf / 100), "reasoning": reason_goals, "engine_meta": {"private": p}},
-            {"market": "BTTS", "pick": btts_pick, "confidence": btts_final_conf, "edge_score": btts_final_conf, "risk_level": risk(btts_final_conf / 100), "reasoning": reason_btts, "engine_meta": {"private": p}},
-            {"market": "Correct Score", "pick": p["score"], "confidence": round(score_conf, 1), "edge_score": round(score_conf, 1), "risk_level": "High", "reasoning": high_variance_warning(), "engine_meta": {"private": p}},
+            {"market": "1X2", "pick": pick_1x2, "confidence": round(conf_1x2 * 100, 1), "edge_score": round(conf_1x2 * 100, 1), "risk_level": risk(conf_1x2), "reasoning": reason_1x2, "engine_meta": {**base_meta, "market_logic": "Result pick compares model win/draw probabilities with form and Elo edge."}},
+            {"market": "Double Chance", "pick": dc_pick, "confidence": round(dc_conf * 100, 1), "edge_score": round(dc_conf * 100, 1), "risk_level": risk(dc_conf), "reasoning": reason_dc, "engine_meta": {**base_meta, "market_logic": "Double chance reduces draw/upset variance by covering two outcomes."}},
+            {"market": "Goals", "pick": goals_pick, "confidence": goals_conf, "edge_score": goals_conf, "risk_level": risk(goals_conf / 100), "reasoning": reason_goals, "engine_meta": {**base_meta, "market_logic": "2.5 goals uses projected goal total plus each team's scoring and concession profile."}},
+            {"market": "Over/Under 1.5", "pick": over15_pick, "confidence": over15_conf, "edge_score": over15_conf, "risk_level": risk(over15_conf / 100), "reasoning": reason_goals, "engine_meta": {**base_meta, "market_logic": "1.5 goals is a safer totals read from the same goal simulation."}},
+            {"market": "Over/Under 3.5", "pick": over35_pick, "confidence": over35_conf, "edge_score": over35_conf, "risk_level": risk(over35_conf / 100), "reasoning": reason_goals, "engine_meta": {**base_meta, "market_logic": "3.5 goals checks whether the match profile points to a very open game or a lower ceiling."}},
+            {"market": "BTTS", "pick": btts_pick, "confidence": btts_final_conf, "edge_score": btts_final_conf, "risk_level": risk(btts_final_conf / 100), "reasoning": reason_btts, "engine_meta": {**base_meta, "market_logic": "BTTS compares both teams' scoring rates, failed-score rates, clean sheets, and simulated both-score probability."}},
+            {"market": "Correct Score", "pick": p["score"], "confidence": round(score_conf, 1), "edge_score": round(score_conf, 1), "risk_level": "High", "reasoning": high_variance_warning(), "engine_meta": {**base_meta, "market_logic": "Correct score is shown as a score-band signal only because exact scores are volatile."}},
         ]
 

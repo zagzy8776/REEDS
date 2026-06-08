@@ -114,6 +114,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
                   </div>
                   <div className="mt-4 flex flex-wrap gap-2 text-xs font-bold">
                     <Link href={`/predictions?league=${encodeURIComponent(f.league)}`} className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-emerald-200">AI reads</Link>
+                    <Link href={`/fixtures/${f.id}`} className="rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-sky-200">Match hub</Link>
                     <Link href={`/predictions/submit`} className="rounded-full border border-slate-700 bg-slate-900 px-3 py-2 text-slate-200">+ Community pick</Link>
                   </div>
                 </div>

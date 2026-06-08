@@ -31,6 +31,10 @@ export default async function PredictionDetail({ params }: { params: Promise<{ i
 
   const premiumLocked = prediction.is_premium;
   const snapshots = prediction.odds_snapshots || [];
+  const analysis = prediction.analysis || {};
+  const factors = analysis.factors || [];
+  const probabilities = analysis.probabilities || {};
+  const projection = analysis.projection || {};
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
@@ -61,6 +65,43 @@ export default async function PredictionDetail({ params }: { params: Promise<{ i
             <p className="mt-4 text-sm text-slate-400">EDGE Score</p>
             <p className="mt-1 text-3xl font-black text-emerald-300">{prediction.edge_score}</p>
           </div>
+        </div>
+      </section>
+
+      <section className="mt-6 card">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="badge inline-block">AI explanation</p>
+            <h2 className="mt-3 text-2xl font-black">Why LOYAL EDGE likes this angle</h2>
+            <p className="mt-2 max-w-3xl text-sm text-slate-400">{analysis.summary || "The model blends team form, goal profile, market context and risk filters."}</p>
+          </div>
+          <p className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-200">{analysis.market_logic || "Market logic available after the next model refresh."}</p>
+        </div>
+        <div className="mt-5 grid gap-3 md:grid-cols-3">
+          {(factors.length ? factors : [
+            { label: "Form", value: "—", note: "Recent team form signal" },
+            { label: "Goal profile", value: "—", note: "Expected goals and scoring trend" },
+            { label: "Risk filter", value: prediction.risk_level, note: "Volatility control" },
+          ]).map((factor: any) => (
+            <div key={factor.label} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+              <p className="text-xs uppercase tracking-wide text-slate-500">{factor.label}</p>
+              <p className="mt-2 text-2xl font-black text-white">{String(factor.value)}</p>
+              <p className="mt-1 text-xs text-slate-400">{factor.note}</p>
+            </div>
+          ))}
+        </div>
+        <div className="mt-5 grid gap-3 md:grid-cols-4">
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Score band</span><br /><b>{projection.score_band || "—"}</b></div>
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Home xG</span><br /><b>{projection.home_expected_goals ?? "—"}</b></div>
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Away xG</span><br /><b>{projection.away_expected_goals ?? "—"}</b></div>
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Total xG</span><br /><b>{projection.total_expected_goals ?? "—"}</b></div>
+        </div>
+        <div className="mt-5 grid gap-3 md:grid-cols-5">
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Home</span><br /><b>{probabilities.home_win !== undefined ? `${Math.round(probabilities.home_win * 100)}%` : "—"}</b></div>
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Draw</span><br /><b>{probabilities.draw !== undefined ? `${Math.round(probabilities.draw * 100)}%` : "—"}</b></div>
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Away</span><br /><b>{probabilities.away_win !== undefined ? `${Math.round(probabilities.away_win * 100)}%` : "—"}</b></div>
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Over 2.5</span><br /><b>{probabilities.over25 !== undefined ? `${Math.round(probabilities.over25 * 100)}%` : "—"}</b></div>
+          <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">BTTS</span><br /><b>{probabilities.btts !== undefined ? `${Math.round(probabilities.btts * 100)}%` : "—"}</b></div>
         </div>
       </section>
 

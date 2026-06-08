@@ -47,6 +47,10 @@ export async function getFixtureStatus() {
   return safeFetchJson(`${API_URL}/api/fixtures/status`, null);
 }
 
+export async function getFixture(id: string) {
+  return safeFetchJson(`${API_URL}/api/fixtures/${id}`, null);
+}
+
 export async function getCommunityLeaderboard() {
   return safeFetchJson(`${API_URL}/api/community/leaderboard?limit=50`, []);
 }
