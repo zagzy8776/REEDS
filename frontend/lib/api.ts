@@ -58,3 +58,32 @@ export async function getCommunityLeaderboard() {
 export async function getCommunityOverview() {
   return safeFetchJson(`${API_URL}/api/community/overview`, { total_posts: 0, pending: 0, settled: 0, recent_posts: [], top_markets: [] });
 }
+
+export async function getCommunityExperts() {
+  return safeFetchJson(`${API_URL}/api/community/experts?limit=50`, []);
+}
+
+export async function getWinWall() {
+  return safeFetchJson(`${API_URL}/api/community/win-wall?limit=30`, []);
+}
+
+export async function getDailyChallenge() {
+  return safeFetchJson(`${API_URL}/api/community/daily-challenge`, { active: false });
+}
+
+export async function getUserProfile(username: string) {
+  return safeFetchJson(`${API_URL}/api/community/profile/${encodeURIComponent(username)}`, null);
+}
+
+export async function followUser(follower: string, following: string) {
+  try {
+    const r = await fetch(`${API_URL}/api/community/follow`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ follower, following }),
+    });
+    return r.ok ? r.json() : null;
+  } catch {
+    return null;
+  }
+}

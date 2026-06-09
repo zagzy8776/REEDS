@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import BacktestRun, CommunityComment, CommunityPlay, CommunityReaction, Fixture, ModelVersion, OddsSnapshot, Prediction, UserPrediction, WinSlip
 from app.db.session import get_db
-from app.services.community import community_leaderboard, community_overview, fixture_consensus, prediction_social_context
+from app.services.community import community_leaderboard, community_overview, fixture_consensus, prediction_social_context, experts_list, win_wall, daily_challenge, follow_user, user_profile
 from app.services.market_metrics import roi_clv_summary
 from app.services.predictions import build_combo, compound_combo_probability
 
@@ -301,6 +301,15 @@ async def submit_user_prediction(request: Request, db: Session = Depends(get_db)
     fixture = db.query(Fixture).filter(Fixture.id == int(fixture_id), Fixture.match_date >= date.today()).first()
     if not fixture:
         raise HTTPException(status_code=404, detail="Upcoming fixture not found")
+    # Duplicate check: block if user already has active pick on same fixture+market
+    existing = db.query(UserPrediction).filter(
+        UserPrediction.fixture_id == fixture.id,
+        UserPrediction.username == username,
+        UserPrediction.market == market,
+        UserPrediction.is_settled == False,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"You already have an active pick on this match ({market}). Wait for it to settle first.")
     row = UserPrediction(fixture_id=fixture.id, username=username, market=market, pick=pick, analysis_text=analysis or None)
     db.add(row)
     db.commit()
@@ -321,6 +330,41 @@ def leaderboard(limit: int = 50, db: Session = Depends(get_db)):
 @router.get("/community/overview")
 def community(db: Session = Depends(get_db)):
     return community_overview(db)
+
+
+@router.get("/community/experts")
+def experts(limit: int = 50, db: Session = Depends(get_db)):
+    return experts_list(db, min(limit, 100))
+
+
+@router.get("/community/win-wall")
+def win_wall_endpoint(limit: int = 30, db: Session = Depends(get_db)):
+    return win_wall(db, min(limit, 50))
+
+
+@router.get("/community/daily-challenge")
+def daily_challenge_endpoint(db: Session = Depends(get_db)):
+    return daily_challenge(db)
+
+
+@router.get("/community/profile/{username}")
+def profile(username: str, db: Session = Depends(get_db)):
+    result = user_profile(db, username)
+    if not result:
+        raise HTTPException(status_code=404, detail="User not found")
+    return result
+
+
+@router.post("/community/follow")
+async def follow_endpoint(request: Request, db: Session = Depends(get_db)):
+    payload = await request.json()
+    follower = str(payload.get("follower", "")).strip()[:80]
+    following = str(payload.get("following", "")).strip()[:80]
+    if not follower or not following:
+        raise HTTPException(status_code=400, detail="follower and following are required")
+    if follower == following:
+        raise HTTPException(status_code=400, detail="Cannot follow yourself")
+    return follow_user(db, follower, following)
 
 
 @router.get("/stats/backtest")

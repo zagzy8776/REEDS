@@ -233,6 +233,129 @@ def fixture_consensus(db: Session, fixture_id: int) -> dict:
     return {"total": total, "consensus": [{"pick": k, "count": v, "percent": round((v / total) * 100, 1) if total else 0} for k, v in sorted(counts.items(), key=lambda x: x[1], reverse=True)], "entries": [{"id": p.id, "username": p.username, "market": p.market, "pick": p.pick, "analysis_text": p.analysis_text, "created_at": p.created_at, "is_settled": p.is_settled, "was_correct": p.was_correct} for p in rows]}
 
 
+def experts_list(db: Session, limit: int = 50) -> list[dict]:
+    """Return users with >60% win rate and at least 10 settled picks."""
+    rows = db.query(UserPrediction).all()
+    users: dict[str, dict] = {}
+    for pred in rows:
+        row = users.setdefault(pred.username, {"username": pred.username, "settled": 0, "wins": 0, "losses": 0, "profit_units": 0.0, "current_streak": 0, "best_streak": 0, "markets": {}})
+        row["settled"] += 1
+        if pred.is_settled:
+            if pred.was_correct:
+                row["wins"] += 1
+                row["current_streak"] += 1
+                row["best_streak"] = max(row["best_streak"], row["current_streak"])
+            else:
+                row["losses"] += 1
+                row["current_streak"] = 0
+            row["profit_units"] += pred.profit_units or 0.0
+    out = []
+    for row in users.values():
+        if row["settled"] < 10:
+            continue
+        row["win_rate"] = round((row["wins"] / row["settled"]) * 100, 1)
+        row["profit_units"] = round(row["profit_units"], 2)
+        if row["win_rate"] <= 60:
+            continue
+        row["roi_percent"] = round((row["profit_units"] / (row["settled"] * 10)) * 100, 1)
+        row["level"] = "Legend" if row["win_rate"] >= 70 and row["settled"] >= 15 else "Elite winner" if row["win_rate"] >= 65 else "Sharp tipster"
+        out.append(row)
+    return sorted(out, key=lambda x: (x["win_rate"], x["settled"], x["profit_units"]), reverse=True)[:limit]
+
+
+def win_wall(db: Session, limit: int = 30) -> list[dict]:
+    """Return winning slips sorted by profit, most recent first."""
+    slips = db.query(WinSlip).filter(WinSlip.profit_units != None, WinSlip.profit_units > 0).order_by(WinSlip.created_at.desc()).limit(limit).all()
+    return [{"id": w.id, "prediction_id": w.prediction_id, "username": w.username, "title": w.title, "proof_text": w.proof_text, "profit_units": w.profit_units, "created_at": w.created_at} for w in slips]
+
+
+def daily_challenge(db: Session) -> dict:
+    """Pick the biggest upcoming match for today's community challenge."""
+    from datetime import date, timedelta
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    fixture = db.query(Fixture).filter(Fixture.match_date >= today, Fixture.match_date < tomorrow, Fixture.sport == "soccer").order_by(Fixture.match_date.asc()).first()
+    if not fixture:
+        fixture = db.query(Fixture).filter(Fixture.match_date >= today, Fixture.match_date <= tomorrow, Fixture.sport == "soccer").order_by(Fixture.match_date.asc()).first()
+    if not fixture:
+        fixture = db.query(Fixture).filter(Fixture.match_date >= today).order_by(Fixture.match_date.asc()).first()
+    if not fixture:
+        return {"active": False, "message": "No fixtures for today's challenge"}
+    community_picks = fixture_consensus(db, fixture.id)
+    return {
+        "active": True,
+        "fixture": {"id": fixture.id, "home_team": fixture.home_team, "away_team": fixture.away_team, "match_date": fixture.match_date, "league": fixture.league},
+        "community": community_picks,
+    }
+
+
+def follow_user(db: Session, follower: str, following: str) -> dict:
+    """Simple follow/unfollow toggle. Uses CommunityPlay as a lightweight follow store."""
+    existing = db.query(CommunityPlay).filter(CommunityPlay.username == follower, CommunityPlay.prediction_id == hash(following) % 1000000).first()
+    if existing:
+        db.delete(existing)
+        db.commit()
+        return {"status": "unfollowed", "following": following}
+    row = CommunityPlay(username=follower, prediction_id=hash(following) % 1000000, stake_units=0)
+    db.add(row)
+    db.commit()
+    return {"status": "followed", "following": following}
+
+
+def user_profile(db: Session, username: str) -> dict | None:
+    """Return a user's full prediction history and stats."""
+    rows = db.query(UserPrediction).filter(UserPrediction.username == username).order_by(UserPrediction.created_at.desc()).all()
+    if not rows:
+        return None
+    settled = [p for p in rows if p.is_settled]
+    wins = sum(1 for p in settled if p.was_correct)
+    losses = len(settled) - wins
+    win_rate = round((wins / len(settled)) * 100, 1) if settled else 0
+    profit = round(sum(p.profit_units or 0 for p in settled), 2)
+    current_streak = 0
+    best_streak = 0
+    for p in reversed(settled):
+        if p.was_correct:
+            current_streak += 1
+            best_streak = max(best_streak, current_streak)
+        else:
+            current_streak = 0
+    level = "Rookie"
+    badges = []
+    if settled:
+        if win_rate >= 70 and len(settled) >= 15:
+            level = "Legend"
+            badges.append("🏆 Legend")
+        elif win_rate >= 60 and len(settled) >= 10:
+            level = "Elite winner"
+            badges.append("⭐ Elite winner")
+        elif wins >= 5:
+            level = "Hot tipster"
+            badges.append("🔥 Hot tipster")
+        if best_streak >= 5:
+            badges.append("🔥 Hot streak")
+        if profit > 0:
+            badges.append("💰 Profitable")
+    picks_history = []
+    for p in rows[:20]:
+        picks_history.append({"id": p.id, "fixture_id": p.fixture_id, "market": p.market, "pick": p.pick, "is_settled": p.is_settled, "was_correct": p.was_correct, "profit_units": p.profit_units, "created_at": p.created_at})
+    return {
+        "username": username,
+        "level": level,
+        "badges": badges,
+        "total_posts": len(rows),
+        "settled": len(settled),
+        "pending": len(rows) - len(settled),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "profit_units": profit,
+        "current_streak": current_streak,
+        "best_streak": best_streak,
+        "recent_picks": picks_history,
+    }
+
+
 def prediction_social_context(db: Session, prediction_id: int) -> dict:
     comments = db.query(CommunityComment).filter(CommunityComment.prediction_id == prediction_id).order_by(CommunityComment.created_at.desc()).limit(50).all()
     reactions = db.query(CommunityReaction).filter(CommunityReaction.prediction_id == prediction_id).all()
