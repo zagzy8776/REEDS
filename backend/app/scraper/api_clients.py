@@ -141,3 +141,44 @@ class FootballDataOrgClient:
             params={"dateFrom": from_date, "dateTo": to_date},
             headers={"X-Auth-Token": self.api_key},
         ).json()
+
+
+class AllSportsApiClient:
+    """AllSportsAPI adapter.
+
+    Free tier note: the provider allows around 260 calls/hour but only exposes
+    two assigned leagues per year. We therefore call one ranged endpoint per
+    sport instead of one request per date, keeping usage low.
+    """
+
+    def __init__(self, api_key: str | None, base_url: str = "https://apiv2.allsportsapi.com"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def events_by_range(self, sport: str, from_date: str, to_date: str) -> dict | list:
+        if not self.api_key:
+            return {"result": []}
+        return self.http.get(
+            f"{self.base_url}/{sport}",
+            params={"met": "Fixtures", "APIkey": self.api_key, "from": from_date, "to": to_date},
+        ).json()
+
+
+class TheSportsDbClient:
+    """TheSportsDB free-tier adapter.
+
+    We use the public v1 JSON endpoint and keep scheduler calls capped. This is
+    a fallback/coverage source, not a high-frequency live feed.
+    """
+
+    def __init__(self, api_key: str | None = "3", base_url: str = "https://www.thesportsdb.com/api/v1/json"):
+        self.api_key = api_key or "3"
+        self.base_url = f"{base_url.rstrip('/')}/{self.api_key}"
+        self.http = HttpClient()
+
+    def events_day(self, target_date: str, sport: str | None = None) -> dict:
+        params = {"d": target_date}
+        if sport:
+            params["s"] = sport
+        return self.http.get(f"{self.base_url}/eventsday.php", params=params).json()

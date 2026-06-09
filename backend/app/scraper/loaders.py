@@ -4,7 +4,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture
-from app.scraper.api_clients import ApiBasketballClient, ApiFootballClient, ApiFootballComClient, FootballDataOrgClient, SportMonksFootballClient, TheOddsApiClient
+from app.scraper.api_clients import AllSportsApiClient, ApiBasketballClient, ApiFootballClient, ApiFootballComClient, FootballDataOrgClient, SportMonksFootballClient, TheOddsApiClient, TheSportsDbClient
 from app.services.data_quality import resolve_team_name
 from app.utils.team_names import normalize_team_name
 
@@ -115,6 +115,42 @@ def _to_float_or_none(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+ALLSPORTS_SPORT_MAP = {
+    "football": "soccer",
+    "soccer": "soccer",
+    "basketball": "basketball",
+    "tennis": "tennis",
+    "cricket": "cricket",
+    "hockey": "hockey",
+    "baseball": "baseball",
+    "american-football": "american_football",
+    "volleyball": "volleyball",
+    "handball": "handball",
+}
+
+
+THESPORTSDB_SPORT_MAP = {
+    "Soccer": "soccer",
+    "Basketball": "basketball",
+    "American Football": "american_football",
+    "Cricket": "cricket",
+    "Tennis": "tennis",
+    "Ice Hockey": "hockey",
+    "Baseball": "baseball",
+    "Rugby": "rugby",
+    "Motorsport": "motorsport",
+    "Fighting": "mma",
+}
+
+
+def _first_present(row: dict, keys: list[str]):
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def _parse_api_football_1x2_odds(payload: dict) -> dict[int, dict[str, float | None]]:
@@ -384,6 +420,100 @@ def ingest_api_basketball_games(db: Session, api_key: str, target_dates: list[st
             upsert_fixture(db, fx)
             count += 1
         db.commit()
+    return count
+
+
+def ingest_allsportsapi_events(db: Session, api_key: str, target_dates: list[str], sports: list[str] | None = None) -> int:
+    """Ingest fixtures from AllSportsAPI using one ranged request per sport.
+
+    This is free-tier friendly: with football,basketball,tennis,cricket enabled
+    and a 7-day window it uses only 4 calls per scheduler run, not 28+ calls.
+    AllSportsAPI free accounts expose only two assigned leagues, but whatever
+    your account can see will be normalized into the shared fixtures table.
+    """
+
+    if not target_dates:
+        return 0
+    client = AllSportsApiClient(api_key)
+    count = 0
+    for provider_sport in sports or ["football", "basketball", "tennis", "cricket"]:
+        canonical_sport = ALLSPORTS_SPORT_MAP.get(provider_sport, provider_sport.replace("-", "_"))
+        try:
+            payload = client.events_by_range(provider_sport, target_dates[0], target_dates[-1])
+        except Exception:  # noqa: BLE001 - one provider sport should not stop others
+            continue
+        events = payload if isinstance(payload, list) else payload.get("result", []) or payload.get("response", []) or []
+        for item in events:
+            match_date = pd.to_datetime(_first_present(item, ["event_date", "match_date", "date", "event_time"]), errors="coerce")
+            home = _first_present(item, ["event_home_team", "match_hometeam_name", "home_team", "homeTeam", "player1"])
+            away = _first_present(item, ["event_away_team", "match_awayteam_name", "away_team", "awayTeam", "player2"])
+            if pd.isna(match_date) or not home or not away:
+                continue
+            league = _first_present(item, ["league_name", "event_league", "country_name", "league", "tournament_name"]) or provider_sport.title()
+            season = str(_first_present(item, ["league_season", "season", "event_season"]) or match_date.year)
+            fx = Fixture(
+                sport=canonical_sport,
+                league=str(league)[:80],
+                season=season[:20],
+                match_date=match_date.date(),
+                home_team=resolve_team_name(db, str(home), canonical_sport, "allsportsapi"),
+                away_team=resolve_team_name(db, str(away), canonical_sport, "allsportsapi"),
+                home_score=_to_int_or_none(_first_present(item, ["event_final_result_home", "event_home_final_result", "event_home_result", "match_hometeam_score", "home_score"])),
+                away_score=_to_int_or_none(_first_present(item, ["event_final_result_away", "event_away_final_result", "event_away_result", "match_awayteam_score", "away_score"])),
+                home_odds=_to_float_or_none(_first_present(item, ["odd_1", "home_odds"])),
+                draw_odds=_to_float_or_none(_first_present(item, ["odd_x", "draw_odds"])),
+                away_odds=_to_float_or_none(_first_present(item, ["odd_2", "away_odds"])),
+                source="allsportsapi",
+                extra={"provider_sport": provider_sport, "event_key": item.get("event_key") or item.get("match_id"), "raw_status": item.get("event_status") or item.get("match_status")},
+            )
+            upsert_fixture(db, fx)
+            count += 1
+        db.commit()
+    return count
+
+
+def ingest_thesportsdb_events(db: Session, api_key: str | None, target_dates: list[str], sports: list[str] | None = None, max_calls: int = 8) -> int:
+    """Ingest TheSportsDB events with a hard request cap.
+
+    The free tier is useful as coverage insurance, but we keep calls low by
+    limiting date+sport combinations. Default 4 sports x first 2 dates = 8 calls.
+    """
+
+    client = TheSportsDbClient(api_key or "3")
+    provider_sports = sports or ["Soccer", "Basketball", "American Football", "Cricket"]
+    count = 0
+    calls = 0
+    for target_date in target_dates[:2]:
+        for provider_sport in provider_sports:
+            if calls >= max_calls:
+                return count
+            calls += 1
+            canonical_sport = THESPORTSDB_SPORT_MAP.get(provider_sport, provider_sport.lower().replace(" ", "_"))
+            try:
+                payload = client.events_day(target_date, provider_sport)
+            except Exception:  # noqa: BLE001
+                continue
+            for item in payload.get("events", []) or []:
+                match_date = pd.to_datetime(item.get("dateEvent") or target_date, errors="coerce")
+                home = item.get("strHomeTeam")
+                away = item.get("strAwayTeam")
+                if pd.isna(match_date) or not home or not away:
+                    continue
+                fx = Fixture(
+                    sport=canonical_sport,
+                    league=(item.get("strLeague") or provider_sport)[:80],
+                    season=str(item.get("strSeason") or match_date.year)[:20],
+                    match_date=match_date.date(),
+                    home_team=resolve_team_name(db, str(home), canonical_sport, "thesportsdb"),
+                    away_team=resolve_team_name(db, str(away), canonical_sport, "thesportsdb"),
+                    home_score=_to_int_or_none(item.get("intHomeScore")),
+                    away_score=_to_int_or_none(item.get("intAwayScore")),
+                    source="thesportsdb",
+                    extra={"event_id": item.get("idEvent"), "provider_sport": provider_sport, "status": item.get("strStatus")},
+                )
+                upsert_fixture(db, fx)
+                count += 1
+            db.commit()
     return count
 
 

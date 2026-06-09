@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     api_football_com_key: str = ""
     api_basketball_key: str = ""
     api_sports_key: str = ""
+    allsportsapi_key: str = ""
+    allsportsapi_sports: str = "football,basketball,tennis,cricket"
+    thesportsdb_api_key: str = "3"
+    thesportsdb_enabled: bool = True
+    thesportsdb_sports: str = "Soccer,Basketball,American Football,Cricket"
+    thesportsdb_max_calls: int = 8
     sportmonks_api_key: str = ""
     football_data_api_key: str = ""
     the_odds_api_key: str = ""
@@ -29,6 +35,14 @@ class Settings(BaseSettings):
     @property
     def odds_api_sport_keys(self) -> list[str]:
         return [sport.strip() for sport in self.the_odds_api_sport_keys.split(",") if sport.strip()]
+
+    @property
+    def allsportsapi_sport_list(self) -> list[str]:
+        return [sport.strip() for sport in self.allsportsapi_sports.split(",") if sport.strip()]
+
+    @property
+    def thesportsdb_sport_list(self) -> list[str]:
+        return [sport.strip() for sport in self.thesportsdb_sports.split(",") if sport.strip()]
 
     model_config = SettingsConfigDict(
         env_file=".env",

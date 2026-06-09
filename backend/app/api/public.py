@@ -73,8 +73,10 @@ def serialize_prediction(p: Prediction, f: Fixture) -> dict:
 
 
 @router.get("/predictions/today")
-def today(league: str | None = None, market: str | None = None, risk: str | None = None, min_confidence: float = 0, db: Session = Depends(get_db)):
+def today(sport: str | None = None, league: str | None = None, market: str | None = None, risk: str | None = None, min_confidence: float = 0, db: Session = Depends(get_db)):
     query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Prediction.status == "active", Fixture.match_date >= date.today(), Prediction.confidence >= min_confidence)
+    if sport:
+        query = query.filter(Fixture.sport == sport)
     if league:
         query = query.filter(Fixture.league == league)
     if market:
@@ -182,7 +184,7 @@ async def post_win_slip(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/fixtures/upcoming")
 def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league: str | None = None, limit: int = 300, db: Session = Depends(get_db)):
-    query = db.query(Fixture).filter(Fixture.sport.in_(["soccer", "basketball"]))
+    query = db.query(Fixture)
     normalized_scope = scope.lower().strip()
     if normalized_scope == "upcoming":
         query = query.filter(Fixture.match_date >= date.today())
@@ -237,8 +239,10 @@ def fixtures_status(db: Session = Depends(get_db)):
     with_scores = db.query(Fixture).filter(Fixture.home_score != None, Fixture.away_score != None).count()
     with_odds = db.query(Fixture).filter((Fixture.home_odds != None) | (Fixture.draw_odds != None) | (Fixture.away_odds != None)).count()
     latest = db.query(Fixture).order_by(Fixture.match_date.desc()).first()
-    api_rows = db.query(Fixture).filter(Fixture.source.in_(["api_football", "api_basketball"])).count()
+    api_sources = ["api_football", "api_basketball", "apifootball_com", "football_data_org", "sportmonks", "allsportsapi", "thesportsdb"]
+    api_rows = db.query(Fixture).filter(Fixture.source.in_(api_sources)).count()
     sample_rows = db.query(Fixture).filter(Fixture.source == "sample").count()
+    sports = db.query(Fixture.sport).distinct().all()
     return {
         "checked_at": datetime.utcnow(),
         "total": total,
@@ -249,6 +253,7 @@ def fixtures_status(db: Session = Depends(get_db)):
         "with_odds": with_odds,
         "api_rows": api_rows,
         "sample_rows": sample_rows,
+        "sports": [row[0] for row in sports],
         "latest_match_date": latest.match_date if latest else None,
         "feed_health": "empty" if total == 0 else "needs_live_api" if api_rows == 0 else "active",
         "public_note": "If this says empty or needs_live_api, add API keys on Render and run live ingestion/scheduler. No secret values are exposed here.",
