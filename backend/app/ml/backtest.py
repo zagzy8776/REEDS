@@ -8,7 +8,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
 
 from app.ml.features import build_basketball_features, build_soccer_features
-from app.ml.train import BASKETBALL_FEATURES, FEATURES
+from app.ml.train import BASKETBALL_FEATURES, FEATURES, _build_model_factories, _train_ensemble
 
 
 @dataclass

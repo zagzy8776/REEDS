@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import Fixture, UserPrediction
+from app.db.models import CommunityComment, CommunityPlay, CommunityReaction, Fixture, UserPrediction, WinSlip
 
 
 def grade_user_prediction(pred: UserPrediction, fixture: Fixture) -> bool | None:
@@ -110,9 +111,11 @@ def community_leaderboard(db: Session, limit: int = 50) -> list[dict]:
         row["win_rate"] = round((row["wins"] / row["settled"]) * 100, 1) if row["settled"] else 0
         row["profit_units"] = round(row["profit_units"], 2)
         row["roi_percent"] = round((row["profit_units"] / (row["settled"] * 10)) * 100, 1) if row["settled"] else 0
-        row["favorite_market"] = max(row["markets"].items(), key=lambda item: item[1])[0] if row["markets"] else "—"
+        row["favorite_market"] = max(row["markets"].items(), key=lambda item: item[1])[0] if row["markets"] else "-"
         row["recent_picks"] = sorted(row["recent_picks"], key=lambda x: x["created_at"], reverse=True)[:5]
         row["badges"] = []
+        row["level"] = "Rookie"
+        row["level_color"] = "slate"
         if row["settled"] >= 25:
             row["badges"].append("Verified volume")
         if row["win_rate"] >= 60 and row["settled"] >= 10:
@@ -121,10 +124,70 @@ def community_leaderboard(db: Session, limit: int = 50) -> list[dict]:
             row["badges"].append("Hot streak")
         if row["profit_units"] > 0:
             row["badges"].append("Profitable")
+        if row["win_rate"] >= 70 and row["settled"] >= 15:
+            row["level"] = "Legend"
+            row["level_color"] = "amber"
+        elif row["win_rate"] >= 60 and row["settled"] >= 10:
+            row["level"] = "Elite winner"
+            row["level_color"] = "emerald"
+        elif row["wins"] >= 5 or row["best_streak"] >= 3:
+            row["level"] = "Hot tipster"
+            row["level_color"] = "sky"
+        elif row["total_posts"] >= 3:
+            row["level"] = "Active voice"
+            row["level_color"] = "violet"
         row["rank_score"] = round(row["profit_units"] + (row["win_rate"] / 10) + min(row["settled"], 50) / 5 + row["best_streak"], 2)
         row.pop("markets", None)
         out.append(row)
     return sorted(out, key=lambda x: (x["rank_score"], x["profit_units"], x["win_rate"], x["settled"]), reverse=True)[:limit]
+
+
+def _post_social_summary(db: Session, post_ids: list[int]) -> dict[int, dict]:
+    if not post_ids:
+        return {}
+    out = {post_id: {"comments": 0, "plays": 0, "win_slips": 0, "rating_count": 0, "average_rating": 0, "reactions": {}} for post_id in post_ids}
+    comment_rows = db.query(CommunityComment.prediction_id, func.count(CommunityComment.id)).filter(CommunityComment.prediction_id.in_(post_ids)).group_by(CommunityComment.prediction_id).all()
+    play_rows = db.query(CommunityPlay.prediction_id, func.count(CommunityPlay.id)).filter(CommunityPlay.prediction_id.in_(post_ids)).group_by(CommunityPlay.prediction_id).all()
+    win_rows = db.query(WinSlip.prediction_id, func.count(WinSlip.id)).filter(WinSlip.prediction_id.in_(post_ids)).group_by(WinSlip.prediction_id).all()
+    reaction_rows = db.query(CommunityReaction.prediction_id, CommunityReaction.reaction, func.count(CommunityReaction.id), func.avg(CommunityReaction.rating), func.count(CommunityReaction.rating)).filter(CommunityReaction.prediction_id.in_(post_ids)).group_by(CommunityReaction.prediction_id, CommunityReaction.reaction).all()
+    for post_id, count in comment_rows:
+        out[post_id]["comments"] = count
+    for post_id, count in play_rows:
+        out[post_id]["plays"] = count
+    for post_id, count in win_rows:
+        out[post_id]["win_slips"] = count
+    for post_id, reaction, count, avg_rating, rating_count in reaction_rows:
+        out[post_id]["reactions"][reaction] = count
+        if rating_count:
+            out[post_id]["average_rating"] = round(float(avg_rating or 0), 1)
+            out[post_id]["rating_count"] += int(rating_count)
+    return out
+
+
+def weekly_winners(db: Session, limit: int = 8) -> list[dict]:
+    since = datetime.utcnow() - timedelta(days=7)
+    rows = db.query(UserPrediction).filter(UserPrediction.created_at >= since).order_by(UserPrediction.created_at.asc()).all()
+    users: dict[str, dict] = {}
+    for pred in rows:
+        row = users.setdefault(pred.username, {"username": pred.username, "posts": 0, "settled": 0, "wins": 0, "profit_units": 0.0, "win_rate": 0, "weekly_score": 0})
+        row["posts"] += 1
+        if pred.is_settled:
+            row["settled"] += 1
+            if pred.was_correct:
+                row["wins"] += 1
+            row["profit_units"] += pred.profit_units or 0.0
+    out = []
+    for row in users.values():
+        row["win_rate"] = round((row["wins"] / row["settled"]) * 100, 1) if row["settled"] else 0
+        row["profit_units"] = round(row["profit_units"], 2)
+        row["weekly_score"] = round((row["wins"] * 3) + row["profit_units"] + min(row["posts"], 10) + (row["win_rate"] / 20), 2)
+        row["level"] = "Weekly contender"
+        if row["wins"] >= 5 and row["win_rate"] >= 60:
+            row["level"] = "Winner of the week"
+        elif row["wins"] >= 3:
+            row["level"] = "Hot this week"
+        out.append(row)
+    return sorted(out, key=lambda x: (x["weekly_score"], x["wins"], x["profit_units"]), reverse=True)[:limit]
 
 
 def community_overview(db: Session) -> dict:
@@ -136,6 +199,12 @@ def community_overview(db: Session) -> dict:
     markets: dict[str, int] = {}
     for p in rows:
         markets[p.market] = markets.get(p.market, 0) + 1
+    comments = db.query(CommunityComment).count()
+    plays = db.query(CommunityPlay).count()
+    reactions = db.query(CommunityReaction).count()
+    win_slips = db.query(WinSlip).order_by(WinSlip.created_at.desc()).limit(10).all()
+    recent_posts = rows[:12]
+    social = _post_social_summary(db, [p.id for p in recent_posts])
     return {
         "total_posts": len(rows),
         "pending": sum(1 for p in rows if not p.is_settled),
@@ -144,8 +213,13 @@ def community_overview(db: Session) -> dict:
         "losses": len(settled) - wins,
         "community_hit_rate": round((wins / len(settled)) * 100, 1) if settled else 0,
         "active_users_7d": active_users,
+        "comments": comments,
+        "plays": plays,
+        "ratings": reactions,
+        "weekly_winners": weekly_winners(db),
         "top_markets": [{"market": k, "count": v} for k, v in sorted(markets.items(), key=lambda x: x[1], reverse=True)[:6]],
-        "recent_posts": [{"id": p.id, "fixture_id": p.fixture_id, "username": p.username, "market": p.market, "pick": p.pick, "analysis_text": p.analysis_text, "is_settled": p.is_settled, "was_correct": p.was_correct, "created_at": p.created_at} for p in rows[:12]],
+        "recent_posts": [{"id": p.id, "fixture_id": p.fixture_id, "username": p.username, "market": p.market, "pick": p.pick, "analysis_text": p.analysis_text, "is_settled": p.is_settled, "was_correct": p.was_correct, "profit_units": p.profit_units, "created_at": p.created_at, "social": social.get(p.id, {})} for p in recent_posts],
+        "recent_wins": [{"id": w.id, "prediction_id": w.prediction_id, "username": w.username, "title": w.title, "proof_text": w.proof_text, "profit_units": w.profit_units, "created_at": w.created_at} for w in win_slips],
     }
 
 
@@ -157,3 +231,25 @@ def fixture_consensus(db: Session, fixture_id: int) -> dict:
         counts[key] = counts.get(key, 0) + 1
     total = len(rows)
     return {"total": total, "consensus": [{"pick": k, "count": v, "percent": round((v / total) * 100, 1) if total else 0} for k, v in sorted(counts.items(), key=lambda x: x[1], reverse=True)], "entries": [{"id": p.id, "username": p.username, "market": p.market, "pick": p.pick, "analysis_text": p.analysis_text, "created_at": p.created_at, "is_settled": p.is_settled, "was_correct": p.was_correct} for p in rows]}
+
+
+def prediction_social_context(db: Session, prediction_id: int) -> dict:
+    comments = db.query(CommunityComment).filter(CommunityComment.prediction_id == prediction_id).order_by(CommunityComment.created_at.desc()).limit(50).all()
+    reactions = db.query(CommunityReaction).filter(CommunityReaction.prediction_id == prediction_id).all()
+    plays = db.query(CommunityPlay).filter(CommunityPlay.prediction_id == prediction_id).order_by(CommunityPlay.created_at.desc()).limit(50).all()
+    wins = db.query(WinSlip).filter(WinSlip.prediction_id == prediction_id).order_by(WinSlip.created_at.desc()).limit(20).all()
+    reaction_counts: dict[str, int] = {}
+    ratings = []
+    for r in reactions:
+        reaction_counts[r.reaction] = reaction_counts.get(r.reaction, 0) + 1
+        if r.rating:
+            ratings.append(r.rating)
+    return {
+        "comments": [{"id": c.id, "username": c.username, "comment_text": c.comment_text, "created_at": c.created_at} for c in comments],
+        "reactions": reaction_counts,
+        "average_rating": round(sum(ratings) / len(ratings), 1) if ratings else 0,
+        "rating_count": len(ratings),
+        "plays": [{"id": p.id, "username": p.username, "stake_units": p.stake_units, "status": p.status, "created_at": p.created_at} for p in plays],
+        "plays_count": len(plays),
+        "win_slips": [{"id": w.id, "username": w.username, "title": w.title, "proof_text": w.proof_text, "profit_units": w.profit_units, "created_at": w.created_at} for w in wins],
+    }

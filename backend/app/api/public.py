@@ -3,9 +3,9 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.db.models import BacktestRun, Fixture, ModelVersion, OddsSnapshot, Prediction, UserPrediction
+from app.db.models import BacktestRun, CommunityComment, CommunityPlay, CommunityReaction, Fixture, ModelVersion, OddsSnapshot, Prediction, UserPrediction, WinSlip
 from app.db.session import get_db
-from app.services.community import community_leaderboard, community_overview, fixture_consensus
+from app.services.community import community_leaderboard, community_overview, fixture_consensus, prediction_social_context
 from app.services.market_metrics import roi_clv_summary
 from app.services.predictions import build_combo, compound_combo_probability
 
@@ -108,7 +108,76 @@ def prediction_detail(prediction_id: int, db: Session = Depends(get_db)):
         "odds_snapshots": [{"phase": o.phase, "market": o.market, "home_odds": o.home_odds, "draw_odds": o.draw_odds, "away_odds": o.away_odds, "bookmaker": o.bookmaker, "captured_at": o.captured_at} for o in snapshots],
         "responsible_note": "Predictions are probabilistic, not guaranteed. Use responsible staking.",
         "community": fixture_consensus(db, f.id),
+        "social": prediction_social_context(db, p.id),
     }
+
+
+@router.get("/community/predictions/{prediction_id}/social")
+def prediction_social(prediction_id: int, db: Session = Depends(get_db)):
+    return prediction_social_context(db, prediction_id)
+
+
+@router.post("/community/predictions/{prediction_id}/comments")
+async def add_prediction_comment(prediction_id: int, request: Request, db: Session = Depends(get_db)):
+    payload = await request.json()
+    username = str(payload.get("username", "")).strip()[:80]
+    comment_text = str(payload.get("comment_text", "")).strip()[:1000]
+    if not username or not comment_text:
+        raise HTTPException(status_code=400, detail="username and comment_text are required")
+    row = CommunityComment(prediction_id=prediction_id, username=username, comment_text=comment_text)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "status": "commented"}
+
+
+@router.post("/community/predictions/{prediction_id}/reactions")
+async def add_prediction_reaction(prediction_id: int, request: Request, db: Session = Depends(get_db)):
+    payload = await request.json()
+    username = str(payload.get("username", "")).strip()[:80]
+    reaction = str(payload.get("reaction", "like")).strip()[:30]
+    rating = payload.get("rating")
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+    row = CommunityReaction(prediction_id=prediction_id, username=username, reaction=reaction, rating=int(rating) if rating else None)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "status": "reacted"}
+
+
+@router.post("/community/predictions/{prediction_id}/plays")
+async def tail_prediction(prediction_id: int, request: Request, db: Session = Depends(get_db)):
+    payload = await request.json()
+    username = str(payload.get("username", "")).strip()[:80]
+    stake_units = float(payload.get("stake_units") or 1)
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+    row = CommunityPlay(prediction_id=prediction_id, username=username, stake_units=stake_units)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "status": "tailed"}
+
+
+@router.post("/community/win-slips")
+async def post_win_slip(request: Request, db: Session = Depends(get_db)):
+    payload = await request.json()
+    username = str(payload.get("username", "")).strip()[:80]
+    title = str(payload.get("title", "")).strip()[:160]
+    if not username or not title:
+        raise HTTPException(status_code=400, detail="username and title are required")
+    row = WinSlip(
+        prediction_id=payload.get("prediction_id"),
+        username=username,
+        title=title,
+        proof_text=str(payload.get("proof_text", "")).strip()[:1000] or None,
+        profit_units=float(payload.get("profit_units")) if payload.get("profit_units") not in {None, ""} else None,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "status": "win_posted"}
 
 
 @router.get("/fixtures/upcoming")

@@ -2,7 +2,7 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000
 
 async function safeFetchJson(url: string, fallback: any) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
+  const timeout = setTimeout(() => controller.abort(), 12000); // 12s instead of 5s
   try {
     const r = await fetch(url, {
       cache: "no-store",

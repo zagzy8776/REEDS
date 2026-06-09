@@ -2,8 +2,9 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata = {
-  title: "LOYAL EDGE — Transparent Sports Prediction Intelligence",
+  title: "LOYAL EDGE - Transparent Sports Prediction Intelligence",
   description: "Football and basketball predictions with risk ratings, model validation, and transparent performance tracking.",
+  icons: { icon: "/favicon.svg" },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

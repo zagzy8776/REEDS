@@ -91,6 +91,50 @@ class UserPrediction(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class CommunityComment(Base):
+    __tablename__ = "community_comments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prediction_id: Mapped[int] = mapped_column(Integer, index=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    comment_text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class CommunityReaction(Base):
+    __tablename__ = "community_reactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prediction_id: Mapped[int] = mapped_column(Integer, index=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    reaction: Mapped[str] = mapped_column(String(30), default="like", index=True)
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class CommunityPlay(Base):
+    __tablename__ = "community_plays"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prediction_id: Mapped[int] = mapped_column(Integer, index=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    stake_units: Mapped[float] = mapped_column(Float, default=1.0)
+    status: Mapped[str] = mapped_column(String(30), default="tailed", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class WinSlip(Base):
+    __tablename__ = "win_slips"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prediction_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    proof_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    profit_units: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class OddsSnapshot(Base):
     __tablename__ = "odds_snapshots"
 

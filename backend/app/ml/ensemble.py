@@ -1,6 +1,7 @@
-from pathlib import Path
+froilem pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from app.ml.features import features_for_fixture
@@ -11,10 +12,54 @@ from app.utils.team_names import normalize_team_name
 
 
 class LoyalEdgeEngine:
-    """Private hybrid engine. Public UI only shows LOYAL EDGE branding."""
+    """Private hybrid engine using multi-model ensemble + Poisson blend.
+
+    Loads the ensemble bundle trained by train.py (which may contain XGBoost,
+    LightGBM, CatBoost, RandomForest, GradientBoosting, and a meta-learner).
+    Blends ensemble probabilities with Poisson goal simulation for final output.
+    """
 
     def __init__(self, model_path: str | None = None):
         self.bundle = joblib.load(model_path) if model_path and Path(model_path).exists() else None
+
+    def _ensemble_predict(self, features_row: dict, labels: list[int]) -> dict[str, float]:
+        """Run the ensemble on a single fixture feature vector."""
+        if not self.bundle or "models" not in self.bundle:
+            return {"away": 0.33, "draw": 0.33, "home": 0.34}
+
+        x = pd.DataFrame([features_row]).reindex(columns=self.bundle["features"], fill_value=0)
+        models = self.bundle["models"]
+        weights = self.bundle.get("weights", [1.0] * len(models))
+        total_weight = sum(weights)
+        all_probas = []
+
+        for name, model in models.items():
+            try:
+                probas = model.predict_proba(x)[0]
+                aligned = np.zeros(len(labels))
+                for src_idx, cls in enumerate(model.classes_):
+                    if cls in labels:
+                        aligned[labels.index(cls)] = probas[src_idx]
+                all_probas.append(aligned)
+            except Exception:
+                # Fallback: if a model fails, skip it
+                uniform = np.ones(len(labels)) / len(labels)
+                all_probas.append(uniform)
+
+        # Weighted average
+        ensemble_probas = sum(
+            proba * (w / total_weight)
+            for proba, w in zip(all_probas, weights)
+        )
+
+        # Meta-learner blend if available
+        if "meta_learner" in self.bundle:
+            stacked = np.column_stack(all_probas)
+            meta_probas = self.bundle["meta_learner"].predict_proba(stacked)[0]
+            ensemble_probas = 0.7 * ensemble_probas + 0.3 * meta_probas
+
+        cls_map = {0: "away", 1: "draw", 2: "home"}
+        return {cls_map.get(i, str(i)): float(ensemble_probas[i]) for i in range(len(labels))}
 
     def predict_soccer(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
         home_team = normalize_team_name(fixture["home_team"], "soccer")
@@ -32,14 +77,11 @@ class LoyalEdgeEngine:
         home_lam = max((f["home_goals_for"] + f["away_goals_against"]) / 2, 0.2)
         away_lam = max((f["away_goals_for"] + f["home_goals_against"]) / 2, 0.2)
         p = soccer_probabilities(home_lam, away_lam)
-        ml_probs = {"away": 0.33, "draw": 0.33, "home": 0.34}
 
-        if self.bundle:
-            x = pd.DataFrame([f]).reindex(columns=self.bundle["features"], fill_value=0)
-            probs = self.bundle["model"].predict_proba(x)[0]
-            cls_map = {0: "away", 1: "draw", 2: "home"}
-            ml_probs = {cls_map.get(c, str(c)): float(probs[i]) for i, c in enumerate(self.bundle["model"].classes_)}
-            ml_probs = apply_calibration(ml_probs, self.bundle.get("calibrator_path"))
+        # Ensemble prediction with meta-learner blend
+        labels = [0, 1, 2]  # away, draw, home
+        ml_probs = self._ensemble_predict(f, labels)
+        ml_probs = apply_calibration(ml_probs, self.bundle.get("calibrator_path") if self.bundle else None)
 
         form_total = f["home_form_points"] + f["away_form_points"] + 0.01
         one_x_two = {
@@ -76,10 +118,18 @@ class LoyalEdgeEngine:
             {"label": "Projected goals", "value": round(float(home_lam + away_lam), 2), "note": "Model blend of recent scoring and goals allowed"},
             {"label": "BTTS probability", "value": f"{p['btts']:.1%}", "note": "Chance both teams score from Poisson goal simulation"},
             {"label": "Over 2.5 probability", "value": f"{p['over25']:.1%}", "note": "Chance total goals finish above 2.5"},
+            {"label": "Home streak", "value": f"{f.get('home_streak_len', 0):.0f} {'W' if f.get('home_streak_winning') else 'L'}", "note": "Current result streak for home side"},
+            {"label": "Away streak", "value": f"{f.get('away_streak_len', 0):.0f} {'W' if f.get('away_streak_winning') else 'L'}", "note": "Current result streak for away side"},
+            {"label": "H2H home win rate", "value": f"{f.get('h2h_home_win_rate', 0.5):.0%}", "note": "Head-to-head history home win percentage"},
+            {"label": "Home scoring consistency", "value": f"{f.get('home_scoring_consistency', 0.65):.0%}", "note": "Scored in last 5 matches"},
+            {"label": "Away scoring consistency", "value": f"{f.get('away_scoring_consistency', 0.60):.0%}", "note": "Scored in last 5 matches"},
         ]
 
+        # Shot model info
+        summary = "LOYAL EDGE AI blends trained prediction probabilities, Poisson goal simulation, recent form, Elo strength, H2H records, streaks, home/away scoring balance, clean-sheet rates, and market odds where available."
+
         base_meta = {
-            "summary": "LOYAL EDGE blends trained result probability, Poisson goal simulation, recent form, Elo strength, home/away scoring balance, clean-sheet rates, and market odds where available.",
+            "summary": summary,
             "factors": model_factors,
             "probabilities": {
                 "home_win": round(float(p["home"]), 4),
@@ -120,4 +170,3 @@ class LoyalEdgeEngine:
             {"market": "BTTS", "pick": btts_pick, "confidence": btts_final_conf, "edge_score": btts_final_conf, "risk_level": risk(btts_final_conf / 100), "reasoning": reason_btts, "engine_meta": {**base_meta, "market_logic": "BTTS compares both teams' scoring rates, failed-score rates, clean sheets, and simulated both-score probability."}},
             {"market": "Correct Score", "pick": p["score"], "confidence": round(score_conf, 1), "edge_score": round(score_conf, 1), "risk_level": "High", "reasoning": high_variance_warning(), "engine_meta": {**base_meta, "market_logic": "Correct score is shown as a score-band signal only because exact scores are volatile."}},
         ]
-

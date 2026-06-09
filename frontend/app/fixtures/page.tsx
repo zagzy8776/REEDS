@@ -9,7 +9,7 @@ function formatDate(value?: string) {
 }
 
 function formatOdds(value?: number | null) {
-  return typeof value === "number" ? value.toFixed(2) : "—";
+  return typeof value === "number" ? value.toFixed(2) : "-";
 }
 
 export default async function Fixtures({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
@@ -34,16 +34,16 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
       <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] lg:items-end">
         <div>
-          <p className="badge inline-block">Fixture center</p>
-          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Match center: upcoming, live board, and old results.</h1>
-          <p className="mt-3 max-w-3xl text-slate-300">Track fixtures from the live feed, see finished scores and goals, check odds availability, then open AI reads or post your community angle.</p>
+          <p className="badge inline-block">Match center</p>
+          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Upcoming games, today’s board, and results.</h1>
+          <p className="mt-3 max-w-3xl text-slate-300">Find the match, check the score or odds, open the AI picks, or post your own take.</p>
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
             <Link href="/predictions" className="rounded-xl bg-emerald-400 px-5 py-3 text-center font-black text-slate-950">View AI picks</Link>
             <Link href="/predictions/submit" className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-center font-bold">+ Post community pick</Link>
           </div>
         </div>
         <div className="card">
-          <p className="text-sm text-slate-400">Live feed status</p>
+          <p className="text-sm text-slate-400">Feed status</p>
           <div className="mt-4 grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
             <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{fixtures.length}</b><br /><span className="text-xs text-slate-500">Fixtures</span></div>
             <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{leagues.length}</b><br /><span className="text-xs text-slate-500">Leagues</span></div>
@@ -77,7 +77,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
               <b className="text-white">Feed status:</b> <span className={status.feed_health === "active" ? "text-emerald-300" : "text-amber-300"}>{String(status.feed_health).replaceAll("_", " ")}</span>
               <p className="mt-1 text-slate-400">API rows: {status.api_rows} • Sample rows: {status.sample_rows} • Scores: {status.with_scores} • Odds: {status.with_odds}</p>
             </div>
-            <p className="max-w-xl text-xs text-slate-500">{status.public_note}</p>
+            <p className="max-w-xl text-xs text-slate-500">{status.feed_health === "active" ? "The match feed is connected." : "If the feed looks empty, check the API keys and scheduler on Render."}</p>
           </div>
         </section>
       ) : null}
@@ -103,8 +103,8 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
                     </div>
                   </div>
                   <div className="mt-4 grid grid-cols-3 gap-2 text-center text-sm">
-                    <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Score</span><br /><b>{f.home_score ?? "—"} - {f.away_score ?? "—"}</b></div>
-                    <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Goals</span><br /><b>{f.total_goals ?? "—"}</b></div>
+                    <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Score</span><br /><b>{f.home_score ?? "-"} - {f.away_score ?? "-"}</b></div>
+                    <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Goals</span><br /><b>{f.total_goals ?? "-"}</b></div>
                     <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Status</span><br /><b className="capitalize">{String(f.api_status || f.result_label || "pending").replaceAll("_", " ")}</b></div>
                   </div>
                   <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm">
@@ -124,7 +124,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
         )) : (
           <div className="card border-dashed border-emerald-400/30 bg-emerald-400/5 text-slate-300">
             <h2 className="text-2xl font-black text-white">No fixtures are showing yet.</h2>
-            <p className="mt-2">Once the backend live ingestion runs with your API keys on Render, upcoming fixtures, today’s board, and old results will appear here automatically.</p>
+            <p className="mt-2">Once the live feed runs, fixtures and results will show here.</p>
           </div>
         )}
       </section>

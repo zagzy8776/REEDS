@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     admin_api_key: str = "change-me"
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     enable_scheduler: bool = False
-    min_training_rows: int = 20
+    min_training_rows: int = 200
     model_dir: str = "data/models"
     public_brand_name: str = "LOYAL EDGE"
     api_football_key: str = ""

@@ -1,4 +1,4 @@
-# LOYAL EDGE — Sports Prediction Website
+# LOYAL EDGE - Sports Prediction Website
 
 LOYAL EDGE is a production-style sports analytics website for soccer and basketball expansion. Public users see **EDGE Score**, **Value Rating**, **Risk Level**, and 3-leg combos. Internally, the backend uses a hybrid analytics engine: form features + Poisson-style scoring model + XGBoost/RandomForest classifiers + risk filters.
 
