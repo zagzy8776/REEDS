@@ -13,6 +13,7 @@ from app.ml.calibration import fit_soccer_platt_calibrator
 from app.ml.train import train_basketball_model, train_soccer_model
 from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events
 from app.services.community import settle_user_predictions
+from app.services.coverage_seed import ensure_multisport_showcase
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
 
@@ -69,7 +70,7 @@ def run_daily_learning_pipeline() -> dict:
 
     db = SessionLocal()
     settings = get_settings()
-    report: dict = {"ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0, "allsportsapi": 0, "thesportsdb": 0}, "community_settled": 0, "trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
+    report: dict = {"ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0, "allsportsapi": 0, "thesportsdb": 0}, "coverage_seeded": {}, "community_settled": 0, "trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
     try:
         # Seed historical CSV data if not already loaded
         csv_count = seed_local_csv_history(db)
@@ -135,6 +136,12 @@ def run_daily_learning_pipeline() -> dict:
             except Exception as exc:  # noqa: BLE001
                 log.exception("Daily TheSportsDB ingestion failed")
                 report["skipped"].append({"stage": "ingest", "provider": "thesportsdb", "reason": str(exc)})
+
+        try:
+            report["coverage_seeded"] = ensure_multisport_showcase(db)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Daily multi-sport coverage seed failed")
+            report["skipped"].append({"stage": "coverage_seed", "reason": str(exc)})
 
         try:
             report["community_settled"] = settle_user_predictions(db)["settled"]

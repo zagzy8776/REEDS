@@ -8,11 +8,12 @@ from app.db.models import BacktestRun, Fixture, OddsSnapshot, Team, TeamAlias
 from app.db.session import get_db
 from app.ml.backtest import walk_forward_backtest
 from app.ml.train import train_basketball_model, train_soccer_model
-from app.scraper.loaders import ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures
+from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events
 from app.services.data_quality import upsert_team_alias
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
 from app.services.community import settle_user_predictions
+from app.services.coverage_seed import ensure_multisport_showcase
 
 
 router = APIRouter()
@@ -41,6 +42,11 @@ def feed_config():
         "sportmonks_api_key_configured": bool(settings.sportmonks_api_key),
         "football_data_api_key_configured": bool(settings.football_data_api_key),
         "api_basketball_key_configured": bool(settings.api_basketball_key),
+        "allsportsapi_key_configured": bool(settings.allsportsapi_key),
+        "allsportsapi_sports": settings.allsportsapi_sport_list,
+        "thesportsdb_enabled": settings.thesportsdb_enabled,
+        "thesportsdb_sports": settings.thesportsdb_sport_list,
+        "thesportsdb_max_calls": settings.thesportsdb_max_calls,
         "the_odds_api_key_configured": bool(settings.the_odds_api_key),
         "scheduler_enabled": settings.enable_scheduler,
         "live_ingest_days": settings.live_ingest_days,
@@ -64,13 +70,15 @@ def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = F
             "sportmonks_configured": bool(settings.sportmonks_api_key),
             "football_data_org_configured": bool(settings.football_data_api_key),
             "api_basketball_or_sports_configured": bool(basketball_key),
+            "allsportsapi_configured": bool(settings.allsportsapi_key),
+            "thesportsdb_enabled": settings.thesportsdb_enabled,
             "the_odds_api_configured": bool(settings.the_odds_api_key),
         },
-        "ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0},
+        "ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0, "allsportsapi": 0, "thesportsdb": 0},
         "skipped": [],
     }
-    if sport not in {"all", "soccer", "basketball"}:
-        raise HTTPException(status_code=400, detail="sport must be all, soccer, or basketball")
+    if sport not in {"all", "soccer", "basketball", "multisport", "cricket", "tennis", "american_football"}:
+        raise HTTPException(status_code=400, detail="sport must be all, soccer, basketball, multisport, cricket, tennis, or american_football")
     if sport in {"all", "soccer"}:
         if football_key:
             try:
@@ -113,8 +121,46 @@ def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = F
                 result["skipped"].append({"sport": "basketball", "reason": str(exc)})
         else:
             result["skipped"].append({"sport": "basketball", "reason": "API_BASKETBALL_KEY or API_SPORTS_KEY not configured"})
+    if sport in {"all", "multisport", "basketball", "cricket", "tennis", "american_football"}:
+        if settings.allsportsapi_key:
+            try:
+                requested = settings.allsportsapi_sport_list
+                if sport == "basketball":
+                    requested = ["basketball"]
+                elif sport == "cricket":
+                    requested = ["cricket"]
+                elif sport == "tennis":
+                    requested = ["tennis"]
+                elif sport == "american_football":
+                    requested = ["american-football"]
+                result["ingested"]["allsportsapi"] = ingest_allsportsapi_events(db, settings.allsportsapi_key, dates, requested)
+            except Exception as exc:  # noqa: BLE001
+                result["skipped"].append({"provider": "allsportsapi", "reason": str(exc)})
+        else:
+            result["skipped"].append({"provider": "allsportsapi", "reason": "ALLSPORTSAPI_KEY not configured"})
+        if settings.thesportsdb_enabled:
+            try:
+                result["ingested"]["thesportsdb"] = ingest_thesportsdb_events(db, settings.thesportsdb_api_key, dates, settings.thesportsdb_sport_list, settings.thesportsdb_max_calls)
+            except Exception as exc:  # noqa: BLE001
+                result["skipped"].append({"provider": "thesportsdb", "reason": str(exc)})
     result["fixture_count"] = db.query(Fixture).count()
     return result
+
+
+@router.post("/refresh-board", dependencies=[Depends(require_admin)])
+def refresh_board(days: int | None = None, db: Session = Depends(get_db)):
+    """Low-click admin refresh: ingest free-tier feeds, then generate predictions."""
+    ingest_report = ingest_live(days=days, sport="all", skip_odds=True, db=db)
+    coverage_seeded = ensure_multisport_showcase(db)
+    generated = generate_today_predictions(db)
+    return {"ingest": ingest_report, "coverage_seeded": coverage_seeded, "generated_predictions": generated}
+
+
+@router.post("/coverage-seed", dependencies=[Depends(require_admin)])
+def coverage_seed(db: Session = Depends(get_db)):
+    seeded = ensure_multisport_showcase(db)
+    generated = generate_today_predictions(db)
+    return {"coverage_seeded": seeded, "generated_predictions": generated}
 
 
 @router.post("/train", dependencies=[Depends(require_admin)])

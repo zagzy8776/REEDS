@@ -126,7 +126,7 @@ def _capture_odds_snapshot(db: Session, fx: Fixture, pred: Prediction, phase: st
 
 def generate_today_predictions(db: Session) -> int:
     history = dataframe_from_db(db)
-    fixtures = (
+    raw_fixtures = (
         db.query(Fixture)
         .filter(
             Fixture.match_date >= date.today(),
@@ -134,9 +134,18 @@ def generate_today_predictions(db: Session) -> int:
             Fixture.away_score == None,
         )
         .order_by(Fixture.match_date.asc(), Fixture.league.asc())
-        .limit(80)
+        .limit(240)
         .all()
     )
+    # Keep the AI board multi-sport even when one sport has many fixtures.
+    # This avoids soccer crowding out basketball/cricket/tennis on free feeds.
+    by_sport: dict[str, list[Fixture]] = {}
+    for fx in raw_fixtures:
+        by_sport.setdefault(fx.sport, []).append(fx)
+    fixtures = []
+    for sport in sorted(by_sport.keys()):
+        fixtures.extend(by_sport[sport][:30])
+    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:120]
     soccer_model = active_model(db, "soccer")
     basketball_model = active_model(db, "basketball")
     soccer_engine = LoyalEdgeEngine(soccer_model.path if soccer_model else None)
