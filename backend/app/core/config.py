@@ -17,11 +17,11 @@ class Settings(BaseSettings):
     api_basketball_key: str = ""
     api_sports_key: str = ""
     allsportsapi_key: str = ""
-    allsportsapi_sports: str = "football,basketball,tennis,cricket"
+    allsportsapi_sports: str = "football,basketball,tennis,cricket,hockey,baseball,american-football,volleyball,handball"
     thesportsdb_api_key: str = "3"
     thesportsdb_enabled: bool = True
-    thesportsdb_sports: str = "Soccer,Basketball,American Football,Cricket"
-    thesportsdb_max_calls: int = 8
+    thesportsdb_sports: str = "Soccer,Basketball,American Football,Cricket,Tennis,Ice Hockey,Baseball,Rugby,Motorsport,Fighting"
+    thesportsdb_max_calls: int = 10
     sportmonks_api_key: str = ""
     football_data_api_key: str = ""
     the_odds_api_key: str = ""

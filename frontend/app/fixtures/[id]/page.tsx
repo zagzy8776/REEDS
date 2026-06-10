@@ -26,7 +26,7 @@ export default async function FixtureDetail({ params }: { params: Promise<{ id: 
       <Link className="text-sm font-bold text-emerald-300" href="/fixtures">← Match center</Link>
       <section className="card mt-6">
         <p className="badge inline-block">Match page</p>
-        <h1 className="mt-4 text-4xl font-black">{f.home_team} vs {f.away_team}</h1>
+        <h1 className="mt-4 break-words text-3xl font-black sm:text-4xl">{f.home_team} vs {f.away_team}</h1>
         <p className="mt-2 text-slate-400">{f.sport} • {f.league} • {formatDate(f.match_date)} • {String(f.api_status || "pending").replaceAll("_", " ")}</p>
         <div className="mt-6 grid gap-3 md:grid-cols-4">
           <div className="rounded-xl bg-slate-950 p-4"><span className="text-slate-500">Score</span><br /><b>{f.home_score ?? "-"} - {f.away_score ?? "-"}</b></div>
@@ -36,7 +36,7 @@ export default async function FixtureDetail({ params }: { params: Promise<{ id: 
         </div>
       </section>
       <section className="mt-8">
-        <div className="flex items-end justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div><p className="badge inline-block">AI picks</p><h2 className="mt-3 text-2xl font-black">Picks for this match</h2></div>
           <p className="text-sm text-slate-500">{picks.length} active pick{picks.length === 1 ? "" : "s"}</p>
         </div>

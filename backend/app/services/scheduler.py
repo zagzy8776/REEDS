@@ -70,7 +70,7 @@ def run_daily_learning_pipeline() -> dict:
 
     db = SessionLocal()
     settings = get_settings()
-    report: dict = {"ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0, "allsportsapi": 0, "thesportsdb": 0}, "coverage_seeded": {}, "community_settled": 0, "trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
+    report: dict = {"ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0, "allsportsapi": 0, "thesportsdb": 0}, "coverage_seeded": {}, "call_budget": {"live_ingest_days": settings.live_ingest_days, "thesportsdb_max_calls": settings.thesportsdb_max_calls, "odds_skipped_on_scheduler": True}, "community_settled": 0, "trained": [], "calibrated": None, "backtests": [], "skipped": [], "generated_predictions": 0}
     try:
         # Seed historical CSV data if not already loaded
         csv_count = seed_local_csv_history(db)
@@ -87,7 +87,8 @@ def run_daily_learning_pipeline() -> dict:
                     db,
                     football_key,
                     dates,
-                    include_odds=True,
+                    # Keep scheduler quota light. Odds can be fetched manually via admin ingest with skip_odds=false.
+                    include_odds=False,
                     the_odds_api_key=settings.the_odds_api_key,
                     the_odds_api_sport_keys=settings.odds_api_sport_keys,
                 )

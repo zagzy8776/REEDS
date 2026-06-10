@@ -150,6 +150,7 @@ def _build_model_factories():
             min_samples_leaf=params.get("min_samples_leaf", 1) if params else 1,
             max_features=params.get("max_features", "sqrt") if params else "sqrt",
             class_weight="balanced",
+            n_jobs=-1,
             random_state=42,
         )))
     if GradientBoostingClassifier is not None:
@@ -319,6 +320,39 @@ def _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trial
     }
 
 
+def _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels: list[int], sport: str) -> dict:
+    """Fast production-safe trainer for very large historical datasets.
+
+    Full GradientBoosting/meta-learner training can run for a long time once the
+    local DB grows past 100k rows. This path trains a parallel RandomForest only,
+    keeps the same bundle shape used by prediction serving, and validates on the
+    chronological holdout.
+    """
+
+    if RandomForestClassifier is None:
+        raise ValueError("RandomForestClassifier is unavailable")
+    model = RandomForestClassifier(
+        n_estimators=220 if sport == "soccer" else 250,
+        max_depth=28 if sport == "soccer" else None,
+        min_samples_leaf=2 if sport == "soccer" else 1,
+        max_features="sqrt",
+        class_weight="balanced",
+        n_jobs=-1,
+        random_state=42,
+    )
+    model.fit(X_train, y_train)
+    preds = model.predict(X_test)
+    accuracy = float(accuracy_score(y_test, preds))
+    return {
+        "models": {"random_forest_fast": model},
+        "meta_learner": None,
+        "accuracy": accuracy,
+        "model_types": ["random_forest_fast"],
+        "weights": [max(accuracy, 0.5)],
+        "ensemble_probas": None,
+    }
+
+
 def train_soccer_model(fixtures: pd.DataFrame) -> dict:
     settings = get_settings()
     fixtures = fixtures[fixtures.get("sport", "soccer") == "soccer"].sort_values("match_date").copy()
@@ -340,15 +374,24 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
     labels = [0, 1, 2]  # away, draw, home
     factories = _build_model_factories()
 
-    # Train ensemble with available models
-    result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=15)
+    # Train ensemble with available models. For very large public-history imports,
+    # use a fast RF path so training finishes reliably on local/Render machines.
+    if len(X) >= 60000:
+        result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, "soccer")
+    else:
+        result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=15)
 
     Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
     model_type_str = "+".join(result["model_types"])
     path = f"{settings.model_dir}/soccer_ensemble_{model_type_str}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.joblib"
 
     calibrator_path = None
-    if len(X) >= max(settings.min_training_rows, 1000):
+    if len(X) >= 60000:
+        # Calibration retrains another forest and becomes too expensive after
+        # mass public-data imports. Keep the existing calibrator active until a
+        # dedicated sampled calibration job is added.
+        calibrator_path = None
+    elif len(X) >= max(settings.min_training_rows, 1000):
         try:
             calibrator_path = fit_soccer_platt_calibrator(fixtures, min_train_rows=max(settings.min_training_rows, 1000))["path"]
         except ValueError:
@@ -402,7 +445,10 @@ def train_basketball_model(fixtures: pd.DataFrame) -> dict:
     # Remove multi-class only models for basketball (binary classification)
     factories = [(n, f) for n, f in factories if n != "gradient_boosting"]
 
-    result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=10)
+    if len(X) >= 60000:
+        result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, "basketball")
+    else:
+        result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=10)
 
     Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
     model_type_str = "+".join(result["model_types"])

@@ -11,3 +11,6 @@ node_modules/
 .vercel/
 data/models/*.joblib
 data/models/*.json
+data/raw/**/*.csv
+data/raw/**/*.json
+data/raw/statsbomb_open_data/

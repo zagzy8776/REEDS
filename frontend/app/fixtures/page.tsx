@@ -3,6 +3,12 @@ import { getFixtureStatus, getFixtures } from "../../lib/api";
 
 export const dynamic = "force-dynamic";
 
+const DEFAULT_SPORTS = ["soccer", "basketball", "tennis", "cricket", "american_football", "baseball", "hockey", "rugby", "volleyball", "handball", "mma", "motorsport"];
+
+function labelSport(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function formatDate(value?: string) {
   if (!value) return "TBA";
   return new Intl.DateTimeFormat("en", { weekday: "short", month: "short", day: "numeric" }).format(new Date(value));
@@ -18,7 +24,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
     getFixtures({ ...params, scope: params.scope || "upcoming", limit: params.limit || "300" }),
     getFixtureStatus(),
   ]);
-  const sports = Array.from(new Set(fixtures.map((f: any) => f.sport))).filter(Boolean);
+  const sports = Array.from(new Set([...DEFAULT_SPORTS, ...fixtures.map((f: any) => f.sport)])).filter(Boolean);
   const leagues = Array.from(new Set(fixtures.map((f: any) => f.league))).filter(Boolean);
   const withOdds = fixtures.filter((f: any) => f.has_odds).length;
   const completed = fixtures.filter((f: any) => f.home_score !== null && f.away_score !== null).length;
@@ -61,7 +67,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
           <option value="results">Old results</option>
         </select>
         <select name="sport" defaultValue={params.sport || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-          <option value="">All sports</option>{sports.map((x: any) => <option key={x} value={x}>{x}</option>)}
+          <option value="">All sports</option>{sports.map((x: any) => <option key={x} value={x}>{labelSport(String(x))}</option>)}
         </select>
         <select name="league" defaultValue={params.league || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
           <option value="">All leagues</option>{leagues.map((x: any) => <option key={x} value={x}>{x}</option>)}

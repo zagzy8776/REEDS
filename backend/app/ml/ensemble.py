@@ -52,11 +52,24 @@ class LoyalEdgeEngine:
             for proba, w in zip(all_probas, weights)
         )
 
-        # Meta-learner blend if available
+        # Meta-learner blend if available. During training the meta model sees
+        # one row shaped as [model_1_class_probs..., model_2_class_probs...].
+        # For a single fixture we must flatten all model probability vectors
+        # into that same one-row shape, not column-stack into (classes, models).
         if "meta_learner" in self.bundle:
-            stacked = np.column_stack(all_probas)
-            meta_probas = self.bundle["meta_learner"].predict_proba(stacked)[0]
-            ensemble_probas = 0.7 * ensemble_probas + 0.3 * meta_probas
+            stacked = np.array([np.concatenate(all_probas)])
+            try:
+                meta_probas = self.bundle["meta_learner"].predict_proba(stacked)[0]
+                aligned_meta = np.zeros(len(labels))
+                for src_idx, cls in enumerate(self.bundle["meta_learner"].classes_):
+                    if cls in labels:
+                        aligned_meta[labels.index(cls)] = meta_probas[src_idx]
+                if aligned_meta.sum() > 0:
+                    ensemble_probas = 0.7 * ensemble_probas + 0.3 * aligned_meta
+            except Exception:
+                # If an older bundle has a different meta shape, keep the safe
+                # weighted ensemble output rather than failing prediction generation.
+                pass
 
         cls_map = {0: "away", 1: "draw", 2: "home"}
         return {cls_map.get(i, str(i)): float(ensemble_probas[i]) for i in range(len(labels))}

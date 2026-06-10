@@ -77,8 +77,9 @@ def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = F
         "ingested": {"soccer": 0, "api_sports_football": 0, "apifootball_com": 0, "sportmonks": 0, "football_data_org": 0, "basketball": 0, "allsportsapi": 0, "thesportsdb": 0},
         "skipped": [],
     }
-    if sport not in {"all", "soccer", "basketball", "multisport", "cricket", "tennis", "american_football"}:
-        raise HTTPException(status_code=400, detail="sport must be all, soccer, basketball, multisport, cricket, tennis, or american_football")
+    allowed_sports = {"all", "soccer", "basketball", "multisport", "cricket", "tennis", "american_football", "baseball", "hockey", "rugby", "volleyball", "handball", "mma", "motorsport"}
+    if sport not in allowed_sports:
+        raise HTTPException(status_code=400, detail=f"sport must be one of: {', '.join(sorted(allowed_sports))}")
     if sport in {"all", "soccer"}:
         if football_key:
             try:
@@ -121,18 +122,21 @@ def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = F
                 result["skipped"].append({"sport": "basketball", "reason": str(exc)})
         else:
             result["skipped"].append({"sport": "basketball", "reason": "API_BASKETBALL_KEY or API_SPORTS_KEY not configured"})
-    if sport in {"all", "multisport", "basketball", "cricket", "tennis", "american_football"}:
+    if sport in {"all", "multisport", "basketball", "cricket", "tennis", "american_football", "baseball", "hockey", "rugby", "volleyball", "handball", "mma", "motorsport"}:
         if settings.allsportsapi_key:
             try:
                 requested = settings.allsportsapi_sport_list
-                if sport == "basketball":
-                    requested = ["basketball"]
-                elif sport == "cricket":
-                    requested = ["cricket"]
-                elif sport == "tennis":
-                    requested = ["tennis"]
-                elif sport == "american_football":
-                    requested = ["american-football"]
+                single_sport_map = {
+                    "basketball": ["basketball"],
+                    "cricket": ["cricket"],
+                    "tennis": ["tennis"],
+                    "american_football": ["american-football"],
+                    "baseball": ["baseball"],
+                    "hockey": ["hockey"],
+                    "volleyball": ["volleyball"],
+                    "handball": ["handball"],
+                }
+                requested = single_sport_map.get(sport, requested)
                 result["ingested"]["allsportsapi"] = ingest_allsportsapi_events(db, settings.allsportsapi_key, dates, requested)
             except Exception as exc:  # noqa: BLE001
                 result["skipped"].append({"provider": "allsportsapi", "reason": str(exc)})
@@ -140,7 +144,19 @@ def ingest_live(days: int | None = None, sport: str = "all", skip_odds: bool = F
             result["skipped"].append({"provider": "allsportsapi", "reason": "ALLSPORTSAPI_KEY not configured"})
         if settings.thesportsdb_enabled:
             try:
-                result["ingested"]["thesportsdb"] = ingest_thesportsdb_events(db, settings.thesportsdb_api_key, dates, settings.thesportsdb_sport_list, settings.thesportsdb_max_calls)
+                sportsdb_single_sport_map = {
+                    "basketball": ["Basketball"],
+                    "cricket": ["Cricket"],
+                    "tennis": ["Tennis"],
+                    "american_football": ["American Football"],
+                    "baseball": ["Baseball"],
+                    "hockey": ["Ice Hockey"],
+                    "rugby": ["Rugby"],
+                    "mma": ["Fighting"],
+                    "motorsport": ["Motorsport"],
+                }
+                requested_sportsdb = sportsdb_single_sport_map.get(sport, settings.thesportsdb_sport_list)
+                result["ingested"]["thesportsdb"] = ingest_thesportsdb_events(db, settings.thesportsdb_api_key, dates, requested_sportsdb, settings.thesportsdb_max_calls)
             except Exception as exc:  # noqa: BLE001
                 result["skipped"].append({"provider": "thesportsdb", "reason": str(exc)})
     result["fixture_count"] = db.query(Fixture).count()

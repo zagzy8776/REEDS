@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from app.ml.features import basketball_features_for_fixture
@@ -18,6 +19,55 @@ class BasketballEngine:
     def __init__(self, model_path: str | None = None):
         self.bundle = joblib.load(model_path) if model_path and Path(model_path).exists() else None
 
+    def _bundle_home_win_probability(self, features: dict) -> float | None:
+        """Serve both legacy single-model bundles and new ensemble bundles."""
+
+        if not self.bundle:
+            return None
+        x = pd.DataFrame([features]).reindex(columns=self.bundle["features"], fill_value=0)
+
+        if "model" in self.bundle:
+            probs = self.bundle["model"].predict_proba(x)[0]
+            classes = list(self.bundle["model"].classes_)
+            return float(probs[classes.index(1)]) if 1 in classes else None
+
+        if "models" not in self.bundle:
+            return None
+
+        labels = self.bundle.get("labels", [0, 1])
+        models = self.bundle["models"]
+        weights = self.bundle.get("weights", [1.0] * len(models))
+        total_weight = sum(weights) or 1.0
+        all_probas = []
+
+        for model in models.values():
+            try:
+                probs = model.predict_proba(x)[0]
+                aligned = np.zeros(len(labels))
+                for src_idx, cls in enumerate(model.classes_):
+                    if cls in labels:
+                        aligned[labels.index(cls)] = probs[src_idx]
+                all_probas.append(aligned)
+            except Exception:
+                all_probas.append(np.ones(len(labels)) / len(labels))
+
+        ensemble_probas = sum(proba * (w / total_weight) for proba, w in zip(all_probas, weights))
+
+        if "meta_learner" in self.bundle and all_probas:
+            stacked = np.array([np.concatenate(all_probas)])
+            try:
+                meta_probas = self.bundle["meta_learner"].predict_proba(stacked)[0]
+                aligned_meta = np.zeros(len(labels))
+                for src_idx, cls in enumerate(self.bundle["meta_learner"].classes_):
+                    if cls in labels:
+                        aligned_meta[labels.index(cls)] = meta_probas[src_idx]
+                if aligned_meta.sum() > 0:
+                    ensemble_probas = 0.7 * ensemble_probas + 0.3 * aligned_meta
+            except Exception:
+                pass
+
+        return float(ensemble_probas[labels.index(1)]) if 1 in labels else None
+
     def predict(self, history: pd.DataFrame, fixture: dict, line_total: float | None = None) -> list[dict]:
         home_team = normalize_team_name(fixture["home_team"], "basketball")
         away_team = normalize_team_name(fixture["away_team"], "basketball")
@@ -29,10 +79,7 @@ class BasketballEngine:
 
         home_win_prob = 0.55
         if self.bundle:
-            x = pd.DataFrame([f]).reindex(columns=self.bundle["features"], fill_value=0)
-            probs = self.bundle["model"].predict_proba(x)[0]
-            classes = list(self.bundle["model"].classes_)
-            home_win_prob = float(probs[classes.index(1)]) if 1 in classes else 0.55
+            home_win_prob = self._bundle_home_win_probability(f) or 0.55
         else:
             home_win_prob = min(0.78, max(0.22, 0.50 + (spread_edge / 24)))
 

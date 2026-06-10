@@ -436,7 +436,7 @@ def ingest_allsportsapi_events(db: Session, api_key: str, target_dates: list[str
         return 0
     client = AllSportsApiClient(api_key)
     count = 0
-    for provider_sport in sports or ["football", "basketball", "tennis", "cricket"]:
+    for provider_sport in sports or ["football", "basketball", "tennis", "cricket", "hockey", "baseball", "american-football", "volleyball", "handball"]:
         canonical_sport = ALLSPORTS_SPORT_MAP.get(provider_sport, provider_sport.replace("-", "_"))
         try:
             payload = client.events_by_range(provider_sport, target_dates[0], target_dates[-1])
@@ -476,14 +476,16 @@ def ingest_thesportsdb_events(db: Session, api_key: str | None, target_dates: li
     """Ingest TheSportsDB events with a hard request cap.
 
     The free tier is useful as coverage insurance, but we keep calls low by
-    limiting date+sport combinations. Default 4 sports x first 2 dates = 8 calls.
+    limiting date+sport combinations. Defaults favor breadth: many sports for
+    today only, with a hard max_calls cap so free API quota is protected.
     """
 
     client = TheSportsDbClient(api_key or "3")
-    provider_sports = sports or ["Soccer", "Basketball", "American Football", "Cricket"]
+    provider_sports = sports or ["Soccer", "Basketball", "American Football", "Cricket", "Tennis", "Ice Hockey", "Baseball", "Rugby", "Motorsport", "Fighting"]
     count = 0
     calls = 0
-    for target_date in target_dates[:2]:
+    # Breadth before depth: one call per sport for the closest dates first.
+    for target_date in target_dates[:1]:
         for provider_sport in provider_sports:
             if calls >= max_calls:
                 return count
