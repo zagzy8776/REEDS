@@ -498,8 +498,13 @@ def ingest_allsportsapi_events(db: Session, api_key: str, target_dates: list[str
                 upsert_fixture(db, fx)
                 count += 1
             except Exception:  # noqa: BLE001 - skip malformed provider rows without killing the sport/provider run
+                db.rollback()
                 continue
-        db.commit()
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001 - one provider sport should not stop others
+            db.rollback()
+            continue
     return count
 
 
