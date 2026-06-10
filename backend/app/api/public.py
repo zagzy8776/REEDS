@@ -1,6 +1,7 @@
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import BacktestRun, CommunityComment, CommunityPlay, CommunityReaction, Fixture, ModelVersion, OddsSnapshot, Prediction, UserPrediction, WinSlip
@@ -11,6 +12,26 @@ from app.services.predictions import build_combo, compound_combo_probability
 
 
 router = APIRouter()
+
+
+def _apply_league_filter(query, league: str):
+    """Support exact league values plus friendly searches like worldcup.
+
+    The frontend league dropdown sends exact values such as ``FIFA World Cup``,
+    but users also type/share URLs with compact names like ``worldcup``. Match
+    both the normal text and a compact no-space/no-hyphen version.
+    """
+
+    raw = league.strip()
+    compact = raw.lower().replace(" ", "").replace("-", "")
+    compact_league = func.replace(func.replace(func.lower(Fixture.league), " ", ""), "-", "")
+    return query.filter(
+        or_(
+            Fixture.league == raw,
+            Fixture.league.ilike(f"%{raw}%"),
+            compact_league.ilike(f"%{compact}%"),
+        )
+    )
 
 
 def prediction_result(p: Prediction, f: Fixture) -> bool | None:
@@ -78,7 +99,7 @@ def today(sport: str | None = None, league: str | None = None, market: str | Non
     if sport:
         query = query.filter(Fixture.sport == sport)
     if league:
-        query = query.filter(Fixture.league == league)
+        query = _apply_league_filter(query, league)
     if market:
         query = query.filter(Prediction.market == market)
     if risk:
@@ -202,7 +223,7 @@ def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league:
     if sport:
         query = query.filter(Fixture.sport == sport)
     if league:
-        query = query.filter(Fixture.league == league)
+        query = _apply_league_filter(query, league)
     order_date = Fixture.match_date.desc() if normalized_scope in {"results", "old", "past"} else Fixture.match_date.asc()
     rows = query.order_by(order_date, Fixture.league.asc()).limit(min(limit, 500)).all()
     return [

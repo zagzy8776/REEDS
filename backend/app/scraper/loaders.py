@@ -153,6 +153,34 @@ def _first_present(row: dict, keys: list[str]):
     return None
 
 
+def _events_from_provider_payload(payload) -> list[dict]:
+    """Normalize provider responses into a safe list of event dictionaries.
+
+    Some free sports APIs return ``result`` as a list, some return a dictionary
+    keyed by date/league, and error responses can be plain strings. Ingestion
+    should skip unsupported rows instead of crashing the whole scheduler run.
+    """
+
+    if isinstance(payload, list):
+        candidates = payload
+    elif isinstance(payload, dict):
+        raw = payload.get("result") or payload.get("response") or payload.get("data") or []
+        if isinstance(raw, list):
+            candidates = raw
+        elif isinstance(raw, dict):
+            candidates = []
+            for value in raw.values():
+                if isinstance(value, list):
+                    candidates.extend(value)
+                elif isinstance(value, dict):
+                    candidates.append(value)
+        else:
+            candidates = []
+    else:
+        candidates = []
+    return [item for item in candidates if isinstance(item, dict)]
+
+
 def _parse_api_football_1x2_odds(payload: dict) -> dict[int, dict[str, float | None]]:
     odds_by_fixture: dict[int, dict[str, float | None]] = {}
     for item in payload.get("response", []) or []:
@@ -442,32 +470,35 @@ def ingest_allsportsapi_events(db: Session, api_key: str, target_dates: list[str
             payload = client.events_by_range(provider_sport, target_dates[0], target_dates[-1])
         except Exception:  # noqa: BLE001 - one provider sport should not stop others
             continue
-        events = payload if isinstance(payload, list) else payload.get("result", []) or payload.get("response", []) or []
+        events = _events_from_provider_payload(payload)
         for item in events:
-            match_date = pd.to_datetime(_first_present(item, ["event_date", "match_date", "date", "event_time"]), errors="coerce")
-            home = _first_present(item, ["event_home_team", "match_hometeam_name", "home_team", "homeTeam", "player1"])
-            away = _first_present(item, ["event_away_team", "match_awayteam_name", "away_team", "awayTeam", "player2"])
-            if pd.isna(match_date) or not home or not away:
+            try:
+                match_date = pd.to_datetime(_first_present(item, ["event_date", "match_date", "date", "event_time"]), errors="coerce")
+                home = _first_present(item, ["event_home_team", "match_hometeam_name", "home_team", "homeTeam", "player1", "event_first_player"])
+                away = _first_present(item, ["event_away_team", "match_awayteam_name", "away_team", "awayTeam", "player2", "event_second_player"])
+                if pd.isna(match_date) or not home or not away:
+                    continue
+                league = _first_present(item, ["league_name", "event_league", "country_name", "league", "tournament_name"]) or provider_sport.title()
+                season = str(_first_present(item, ["league_season", "season", "event_season"]) or match_date.year)
+                fx = Fixture(
+                    sport=canonical_sport,
+                    league=str(league)[:80],
+                    season=season[:20],
+                    match_date=match_date.date(),
+                    home_team=resolve_team_name(db, str(home), canonical_sport, "allsportsapi"),
+                    away_team=resolve_team_name(db, str(away), canonical_sport, "allsportsapi"),
+                    home_score=_to_int_or_none(_first_present(item, ["event_final_result_home", "event_home_final_result", "event_home_result", "match_hometeam_score", "home_score"])),
+                    away_score=_to_int_or_none(_first_present(item, ["event_final_result_away", "event_away_final_result", "event_away_result", "match_awayteam_score", "away_score"])),
+                    home_odds=_to_float_or_none(_first_present(item, ["odd_1", "home_odds"])),
+                    draw_odds=_to_float_or_none(_first_present(item, ["odd_x", "draw_odds"])),
+                    away_odds=_to_float_or_none(_first_present(item, ["odd_2", "away_odds"])),
+                    source="allsportsapi",
+                    extra={"provider_sport": provider_sport, "event_key": item.get("event_key") or item.get("match_id"), "raw_status": item.get("event_status") or item.get("match_status")},
+                )
+                upsert_fixture(db, fx)
+                count += 1
+            except Exception:  # noqa: BLE001 - skip malformed provider rows without killing the sport/provider run
                 continue
-            league = _first_present(item, ["league_name", "event_league", "country_name", "league", "tournament_name"]) or provider_sport.title()
-            season = str(_first_present(item, ["league_season", "season", "event_season"]) or match_date.year)
-            fx = Fixture(
-                sport=canonical_sport,
-                league=str(league)[:80],
-                season=season[:20],
-                match_date=match_date.date(),
-                home_team=resolve_team_name(db, str(home), canonical_sport, "allsportsapi"),
-                away_team=resolve_team_name(db, str(away), canonical_sport, "allsportsapi"),
-                home_score=_to_int_or_none(_first_present(item, ["event_final_result_home", "event_home_final_result", "event_home_result", "match_hometeam_score", "home_score"])),
-                away_score=_to_int_or_none(_first_present(item, ["event_final_result_away", "event_away_final_result", "event_away_result", "match_awayteam_score", "away_score"])),
-                home_odds=_to_float_or_none(_first_present(item, ["odd_1", "home_odds"])),
-                draw_odds=_to_float_or_none(_first_present(item, ["odd_x", "draw_odds"])),
-                away_odds=_to_float_or_none(_first_present(item, ["odd_2", "away_odds"])),
-                source="allsportsapi",
-                extra={"provider_sport": provider_sport, "event_key": item.get("event_key") or item.get("match_id"), "raw_status": item.get("event_status") or item.get("match_status")},
-            )
-            upsert_fixture(db, fx)
-            count += 1
         db.commit()
     return count
 

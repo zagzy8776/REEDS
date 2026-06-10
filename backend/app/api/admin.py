@@ -8,6 +8,7 @@ from app.db.models import BacktestRun, Fixture, OddsSnapshot, Team, TeamAlias
 from app.db.session import get_db
 from app.ml.backtest import walk_forward_backtest
 from app.ml.train import train_basketball_model, train_soccer_model
+from app.scraper.api_clients import ApiFootballClient
 from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events
 from app.services.data_quality import upsert_team_alias
 from app.services.model_registry import register_model
@@ -53,6 +54,52 @@ def feed_config():
         "odds_sport_keys": settings.odds_api_sport_keys,
         "note": "This endpoint intentionally shows only presence/booleans, never secret values.",
     }
+
+
+@router.get("/diagnostics/api-football", dependencies=[Depends(require_admin)])
+def api_football_diagnostics(date_: str | None = None):
+    """Safely test API-Football without exposing the configured API key."""
+
+    settings = get_settings()
+    api_key = settings.api_football_key or settings.api_sports_key
+    target_date = date_ or date.today().isoformat()
+    result = {
+        "provider": "api_sports_football",
+        "date": target_date,
+        "key_configured": bool(api_key),
+        "base_url": "https://v3.football.api-sports.io",
+        "response_count": 0,
+        "errors": None,
+        "message": None,
+        "sample": [],
+    }
+    if not api_key:
+        result["message"] = "API_FOOTBALL_KEY or API_SPORTS_KEY is not configured"
+        return result
+    try:
+        payload = ApiFootballClient(api_key).fixtures_by_date(target_date)
+    except Exception as exc:  # noqa: BLE001
+        result["message"] = str(exc)
+        return result
+    rows = payload.get("response", []) if isinstance(payload, dict) else []
+    result["response_count"] = len(rows)
+    if isinstance(payload, dict):
+        result["errors"] = payload.get("errors") or None
+        result["message"] = payload.get("message") or payload.get("note")
+    for item in rows[:5]:
+        fixture = item.get("fixture", {}) if isinstance(item, dict) else {}
+        league = item.get("league", {}) if isinstance(item, dict) else {}
+        teams = item.get("teams", {}) if isinstance(item, dict) else {}
+        result["sample"].append({
+            "fixture_id": fixture.get("id"),
+            "date": fixture.get("date"),
+            "league": league.get("name"),
+            "country": league.get("country"),
+            "home": (teams.get("home") or {}).get("name"),
+            "away": (teams.get("away") or {}).get("name"),
+            "status": fixture.get("status"),
+        })
+    return result
 
 
 @router.post("/ingest-live", dependencies=[Depends(require_admin)])
