@@ -73,6 +73,44 @@ def select_public_picks(items: list[dict], max_picks: int = 4) -> set[int]:
     return published
 
 
+def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
+    """Guarantee every pick has a clear user-facing explanation.
+
+    Engines normally provide reasoning, but fallback/new-sport feeds can be thin.
+    This keeps customer copy transparent by always answering: what was picked,
+    how confident the model is, what risk applies, and what signals were checked.
+    """
+
+    reasoning = str(item.get("reasoning") or "").strip()
+    meta = item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else {}
+    summary = str(meta.get("summary") or "").strip()
+    market_logic = str(meta.get("market_logic") or "").strip()
+    factors = meta.get("factors") if isinstance(meta.get("factors"), list) else []
+    factor_text = "; ".join(
+        f"{factor.get('label')}: {factor.get('value')}"
+        for factor in factors[:3]
+        if isinstance(factor, dict) and factor.get("label") is not None
+    )
+    if not reasoning:
+        pieces = [
+            f"The model chose {item.get('pick')} in the {item.get('market')} market at {item.get('confidence')}% confidence.",
+            market_logic or summary or f"It compared available {fixture.sport.replace('_', ' ')} history, recent scoring/results, and home/away context.",
+        ]
+        if factor_text:
+            pieces.append(f"Key signals: {factor_text}.")
+        pieces.append(f"Risk is marked {item.get('risk_level', 'Medium')} because confidence and data depth are not guarantees.")
+        reasoning = " ".join(pieces)
+    elif "risk" not in reasoning.lower():
+        reasoning = f"{reasoning} Risk is marked {item.get('risk_level', 'Medium')} based on confidence and available data depth."
+    item["reasoning"] = reasoning
+    item["engine_meta"] = {
+        "summary": summary or f"LOYAL EDGE reviewed {fixture.sport.replace('_', ' ')} fixture context before selecting this market.",
+        **meta,
+        "customer_explanation": reasoning,
+    }
+    return item
+
+
 def dataframe_from_db(db: Session) -> pd.DataFrame:
     rows = db.query(Fixture).all()
     return pd.DataFrame([{
@@ -165,6 +203,7 @@ def generate_today_predictions(db: Session) -> int:
         published_indexes = select_public_picks(items)
         publish_fallback = choose_provisional_public_pick(items) if not published_indexes else None
         for idx, item in enumerate(items):
+            item = explain_prediction_item(item, fx)
             is_published = idx in published_indexes or item is publish_fallback
             if item is publish_fallback:
                 item = {**item, "reasoning": f"Best available model read for this fixture. {item.get('reasoning', '')}"}
