@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -22,7 +23,7 @@ log = logging.getLogger(__name__)
 
 
 def _date_window(days: int) -> list[str]:
-    return [(date.today() + timedelta(days=offset)).isoformat() for offset in range(max(days, 1))]
+     return [(date.today() + timedelta(days=offset)).isoformat() for offset in range(max(days, 1))]
 
 
 def seed_local_csv_history(db: Session) -> int:
@@ -87,8 +88,7 @@ def run_daily_learning_pipeline() -> dict:
                     db,
                     football_key,
                     dates,
-                    # Keep scheduler quota light. Odds can be fetched manually via admin ingest with skip_odds=false.
-                    include_odds=False,
+                    include_odds=True,
                     the_odds_api_key=settings.the_odds_api_key,
                     the_odds_api_sport_keys=settings.odds_api_sport_keys,
                 )

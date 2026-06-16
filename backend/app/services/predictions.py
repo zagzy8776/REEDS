@@ -1,12 +1,15 @@
-from datetime import date, datetime
+import logging
+from datetime import date, datetime, timedelta
 
 import pandas as pd
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture, OddsSnapshot, Prediction
 from app.ml.basketball import BasketballEngine
 from app.ml.ensemble import LoyalEdgeEngine
 from app.ml.generic import GenericSportEngine
+from app.ml.sport_specific import BaseballEngine, CricketEngine, TennisEngine
 from app.services.model_registry import active_model
 
 
@@ -111,8 +114,16 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
     return item
 
 
-def dataframe_from_db(db: Session) -> pd.DataFrame:
-    rows = db.query(Fixture).all()
+def dataframe_from_db(db: Session, max_age_days: int = 730) -> pd.DataFrame:
+    """Load fixtures into a DataFrame, limited to recent history.
+
+    Args:
+        max_age_days: Maximum age of fixtures to load (default 2 years).
+                      The full DB could contain 10+ years of CSV data — loading
+                      it all into memory would crash the server.
+    """
+    cutoff = date.today() - timedelta(days=max_age_days)
+    rows = db.query(Fixture).filter(func.date(Fixture.match_date) >= cutoff).all()
     return pd.DataFrame([{
         "id": r.id,
         "sport": r.sport,
@@ -162,12 +173,16 @@ def _capture_odds_snapshot(db: Session, fx: Fixture, pred: Prediction, phase: st
     ))
 
 
+log = logging.getLogger(__name__)
+
+
 def generate_today_predictions(db: Session) -> int:
     history = dataframe_from_db(db)
+    today_ref = date.today()
     raw_fixtures = (
         db.query(Fixture)
         .filter(
-            Fixture.match_date >= date.today(),
+            func.date(Fixture.match_date) >= today_ref,
             Fixture.home_score == None,
             Fixture.away_score == None,
         )
@@ -188,47 +203,69 @@ def generate_today_predictions(db: Session) -> int:
     basketball_model = active_model(db, "basketball")
     soccer_engine = LoyalEdgeEngine(soccer_model.path if soccer_model else None)
     basketball_engine = BasketballEngine(basketball_model.path if basketball_model else None)
+    tennis_engine = TennisEngine()
+    cricket_engine = CricketEngine()
+    baseball_engine = BaseballEngine()
     generic_engine = GenericSportEngine()
     count = 0
     for fx in fixtures:
-        if fx.sport == "basketball":
-            model_version_id = basketball_model.id if basketball_model else None
-            items = basketball_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
-        elif fx.sport == "soccer":
-            model_version_id = soccer_model.id if soccer_model else None
-            items = soccer_engine.predict_soccer(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
-        else:
-            model_version_id = None
-            items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
-        published_indexes = select_public_picks(items)
-        publish_fallback = choose_provisional_public_pick(items) if not published_indexes else None
-        for idx, item in enumerate(items):
-            item = explain_prediction_item(item, fx)
-            is_published = idx in published_indexes or item is publish_fallback
-            if item is publish_fallback:
-                item = {**item, "reasoning": f"Best available model read for this fixture. {item.get('reasoning', '')}"}
-            _supersede_active_prediction(db, fx.id, item["market"])
-            version = _next_prediction_version(db, fx.id, item["market"])
-            pred = Prediction(
-                fixture_id=fx.id,
-                model_version_id=model_version_id,
-                version=version,
-                status="active",
-                **item,
-                is_premium=is_published and item["confidence"] >= 70,
-                is_published=is_published,
-                published_at=datetime.utcnow() if is_published else None,
-            )
-            db.add(pred)
-            db.flush()
-            _capture_odds_snapshot(db, fx, pred, "published" if is_published else "initial")
-            count += 1
+        try:
+            if fx.sport == "basketball":
+                model_version_id = basketball_model.id if basketball_model else None
+                items = basketball_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
+            elif fx.sport == "soccer":
+                model_version_id = soccer_model.id if soccer_model else None
+                items = soccer_engine.predict_soccer(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
+            elif fx.sport == "tennis":
+                model_version_id = None
+                items = tennis_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league})
+            elif fx.sport == "cricket":
+                model_version_id = None
+                items = cricket_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league})
+            elif fx.sport == "baseball":
+                model_version_id = None
+                items = baseball_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league})
+            else:
+                model_version_id = None
+                items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
+            published_indexes = select_public_picks(items)
+            fallback_idx = None
+            if not published_indexes:
+                fallback_item = choose_provisional_public_pick(items)
+                if fallback_item:
+                    fallback_idx = items.index(fallback_item) if fallback_item in items else None
+            for idx, item in enumerate(items):
+                item = explain_prediction_item(item, fx)
+                is_published = idx in published_indexes or idx == fallback_idx
+                if idx == fallback_idx and fallback_idx is not None:
+                    item = {**item, "reasoning": f"Best available model read for this fixture. {item.get('reasoning', '')}"}
+                _supersede_active_prediction(db, fx.id, item["market"])
+                version = _next_prediction_version(db, fx.id, item["market"])
+                pred = Prediction(
+                    fixture_id=fx.id,
+                    model_version_id=model_version_id,
+                    version=version,
+                    status="active",
+                    **item,
+                    is_premium=is_published and item["confidence"] >= 70,
+                    is_published=is_published,
+                    published_at=datetime.utcnow() if is_published else None,
+                )
+                db.add(pred)
+                db.flush()
+                _capture_odds_snapshot(db, fx, pred, "published" if is_published else "initial")
+                count += 1
+            db.flush()  # flush per-fixture so partial progress is persisted
+        except Exception:
+            log.exception("Failed to generate predictions for fixture %d (%s: %s vs %s)", fx.id, fx.sport, fx.home_team, fx.away_team)
+            continue
     db.commit()
     return count
 
 
 def build_combo(db: Session, legs: int = 3, min_confidence: float = 60):
-    picks = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.confidence >= min_confidence, Prediction.is_published == True, Prediction.status == "active", Fixture.match_date >= date.today()).order_by(Prediction.confidence.desc()).all()
+    today_ref = date.today()
+    picks = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.confidence >= min_confidence, Prediction.is_published == True, Prediction.status == "active", func.date(Fixture.match_date) >= today_ref).order_by(Prediction.confidence.desc()).all()
     selected, teams = [], set()
     for pred, fx in picks:
         if fx.home_team in teams or fx.away_team in teams:

@@ -498,7 +498,6 @@ def ingest_allsportsapi_events(db: Session, api_key: str, target_dates: list[str
                 upsert_fixture(db, fx)
                 count += 1
             except Exception:  # noqa: BLE001 - skip malformed provider rows without killing the sport/provider run
-                db.rollback()
                 continue
         try:
             db.commit()
@@ -508,20 +507,19 @@ def ingest_allsportsapi_events(db: Session, api_key: str, target_dates: list[str
     return count
 
 
-def ingest_thesportsdb_events(db: Session, api_key: str | None, target_dates: list[str], sports: list[str] | None = None, max_calls: int = 8) -> int:
+def ingest_thesportsdb_events(db: Session, api_key: str | None, target_dates: list[str], sports: list[str] | None = None, max_calls: int = 50) -> int:
     """Ingest TheSportsDB events with a hard request cap.
 
-    The free tier is useful as coverage insurance, but we keep calls low by
-    limiting date+sport combinations. Defaults favor breadth: many sports for
-    today only, with a hard max_calls cap so free API quota is protected.
+    The free tier is useful as coverage insurance. Defaults favor breadth: many
+    sports across all target dates, with a hard max_calls cap so free API quota
+    is protected.
     """
 
     client = TheSportsDbClient(api_key or "3")
     provider_sports = sports or ["Soccer", "Basketball", "American Football", "Cricket", "Tennis", "Ice Hockey", "Baseball", "Rugby", "Motorsport", "Fighting"]
     count = 0
     calls = 0
-    # Breadth before depth: one call per sport for the closest dates first.
-    for target_date in target_dates[:1]:
+    for target_date in target_dates:
         for provider_sport in provider_sports:
             if calls >= max_calls:
                 return count
@@ -532,25 +530,28 @@ def ingest_thesportsdb_events(db: Session, api_key: str | None, target_dates: li
             except Exception:  # noqa: BLE001
                 continue
             for item in payload.get("events", []) or []:
-                match_date = pd.to_datetime(item.get("dateEvent") or target_date, errors="coerce")
-                home = item.get("strHomeTeam")
-                away = item.get("strAwayTeam")
-                if pd.isna(match_date) or not home or not away:
+                try:
+                    match_date = pd.to_datetime(item.get("dateEvent") or target_date, errors="coerce")
+                    home = item.get("strHomeTeam")
+                    away = item.get("strAwayTeam")
+                    if pd.isna(match_date) or not home or not away:
+                        continue
+                    fx = Fixture(
+                        sport=canonical_sport,
+                        league=(item.get("strLeague") or provider_sport)[:80],
+                        season=str(item.get("strSeason") or match_date.year)[:20],
+                        match_date=match_date.date(),
+                        home_team=resolve_team_name(db, str(home), canonical_sport, "thesportsdb"),
+                        away_team=resolve_team_name(db, str(away), canonical_sport, "thesportsdb"),
+                        home_score=_to_int_or_none(item.get("intHomeScore")),
+                        away_score=_to_int_or_none(item.get("intAwayScore")),
+                        source="thesportsdb",
+                        extra={"event_id": item.get("idEvent"), "provider_sport": provider_sport, "status": item.get("strStatus")},
+                    )
+                    upsert_fixture(db, fx)
+                    count += 1
+                except Exception:  # noqa: BLE001 - skip bad event rows
                     continue
-                fx = Fixture(
-                    sport=canonical_sport,
-                    league=(item.get("strLeague") or provider_sport)[:80],
-                    season=str(item.get("strSeason") or match_date.year)[:20],
-                    match_date=match_date.date(),
-                    home_team=resolve_team_name(db, str(home), canonical_sport, "thesportsdb"),
-                    away_team=resolve_team_name(db, str(away), canonical_sport, "thesportsdb"),
-                    home_score=_to_int_or_none(item.get("intHomeScore")),
-                    away_score=_to_int_or_none(item.get("intAwayScore")),
-                    source="thesportsdb",
-                    extra={"event_id": item.get("idEvent"), "provider_sport": provider_sport, "status": item.get("strStatus")},
-                )
-                upsert_fixture(db, fx)
-                count += 1
             db.commit()
     return count
 

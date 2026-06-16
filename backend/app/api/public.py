@@ -95,7 +95,7 @@ def serialize_prediction(p: Prediction, f: Fixture) -> dict:
 
 @router.get("/predictions/today")
 def today(sport: str | None = None, league: str | None = None, market: str | None = None, risk: str | None = None, min_confidence: float = 0, db: Session = Depends(get_db)):
-    query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Prediction.status == "active", Fixture.match_date >= date.today(), Prediction.confidence >= min_confidence)
+    query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Prediction.status == "active", func.date(Fixture.match_date) >= func.current_date(), Prediction.confidence >= min_confidence)
     if sport:
         query = query.filter(Fixture.sport == sport)
     if league:
@@ -208,16 +208,16 @@ def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league:
     query = db.query(Fixture)
     normalized_scope = scope.lower().strip()
     if normalized_scope == "upcoming":
-        query = query.filter(Fixture.match_date >= date.today())
+        query = query.filter(func.date(Fixture.match_date) >= func.current_date())
     elif normalized_scope in {"live", "today"}:
-        query = query.filter(Fixture.match_date == date.today())
+        query = query.filter(func.date(Fixture.match_date) == func.current_date())
     elif normalized_scope in {"results", "old", "past"}:
-        query = query.filter(Fixture.match_date < date.today())
+        query = query.filter(func.date(Fixture.match_date) < func.current_date())
     elif normalized_scope == "all":
         # Public match center should behave like LiveScore/SofaScore: show active
         # and upcoming action first. Historical results remain available via
         # scope=results so they don't bury the next matches users came to track.
-        query = query.filter(Fixture.match_date >= date.today())
+        query = query.filter(func.date(Fixture.match_date) >= func.current_date())
     else:
         raise HTTPException(status_code=400, detail="scope must be upcoming, live, results, or all")
     if sport:
@@ -254,9 +254,9 @@ def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league:
 @router.get("/fixtures/status")
 def fixtures_status(db: Session = Depends(get_db)):
     total = db.query(Fixture).count()
-    upcoming = db.query(Fixture).filter(Fixture.match_date >= date.today()).count()
-    today = db.query(Fixture).filter(Fixture.match_date == date.today()).count()
-    results = db.query(Fixture).filter(Fixture.match_date < date.today()).count()
+    upcoming = db.query(Fixture).filter(func.date(Fixture.match_date) >= func.current_date()).count()
+    today = db.query(Fixture).filter(func.date(Fixture.match_date) == func.current_date()).count()
+    results = db.query(Fixture).filter(func.date(Fixture.match_date) < func.current_date()).count()
     with_scores = db.query(Fixture).filter(Fixture.home_score != None, Fixture.away_score != None).count()
     with_odds = db.query(Fixture).filter((Fixture.home_odds != None) | (Fixture.draw_odds != None) | (Fixture.away_odds != None)).count()
     latest = db.query(Fixture).order_by(Fixture.match_date.desc()).first()
@@ -324,7 +324,7 @@ async def submit_user_prediction(request: Request, db: Session = Depends(get_db)
     analysis = str(payload.get("analysis_text", "")).strip()[:1000]
     if not fixture_id or not username or not market or not pick:
         raise HTTPException(status_code=400, detail="fixture_id, username, market, and pick are required")
-    fixture = db.query(Fixture).filter(Fixture.id == int(fixture_id), Fixture.match_date >= date.today()).first()
+    fixture = db.query(Fixture).filter(Fixture.id == int(fixture_id), func.date(Fixture.match_date) >= func.current_date()).first()
     if not fixture:
         raise HTTPException(status_code=404, detail="Upcoming fixture not found")
     # Duplicate check: block if user already has active pick on same fixture+market
