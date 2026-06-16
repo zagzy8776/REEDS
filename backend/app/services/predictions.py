@@ -157,11 +157,28 @@ def _next_prediction_version(db: Session, fixture_id: int, market: str) -> int:
 
 
 def _supersede_active_prediction(db: Session, fixture_id: int, market: str) -> None:
+    # Supersede by exact market match
     db.query(Prediction).filter(
         Prediction.fixture_id == fixture_id,
         Prediction.market == market,
         Prediction.status == "active",
     ).update({"status": "superseded", "superseded_at": datetime.utcnow()})
+    # Also supersede legacy market names that were renamed (e.g., "Total Points" → "Total Games" for tennis)
+    legacy_markets = {
+        "Total Games": ["Total Points"],
+        "Point Spread": ["Spread"],
+        "Run Line": ["Spread"],
+        "Both Teams to Score": ["BTTS"],
+        "Over/Under 2.5": ["Goals"],
+    }
+    new_to_old = {v: k for k, v in legacy_markets.items()}
+    old_market = new_to_old.get(market)
+    if old_market:
+        db.query(Prediction).filter(
+            Prediction.fixture_id == fixture_id,
+            Prediction.market == old_market,
+            Prediction.status == "active",
+        ).update({"status": "superseded", "superseded_at": datetime.utcnow()})
 
 
 def _capture_odds_snapshot(db: Session, fx: Fixture, pred: Prediction, phase: str) -> None:
