@@ -18,11 +18,17 @@ PUBLISH_THRESHOLDS = {
     "Moneyline": 55,
     "Goals": 55,
     "BTTS": 55,
+    "Both Teams to Score": 55,
     "Double Chance": 58,
     "Over/Under 1.5": 58,
+    "Over/Under 2.5": 55,
     "Over/Under 3.5": 58,
     "Spread": 60,
+    "Point Spread": 60,
+    "Run Line": 58,
     "Total Points": 55,
+    "Total Runs": 55,
+    "Total Games": 55,
     "Correct Score": 101,  # never publish as a customer pick by default; too volatile
 }
 

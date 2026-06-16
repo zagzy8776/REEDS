@@ -18,6 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </Link>
           <div className="-mx-3 flex gap-2 overflow-x-auto px-3 pb-1 [scrollbar-width:none] md:mx-0 md:px-0 md:pb-0">
             <Link className="glass-nav-link" href="/predictions">AI Picks</Link>
+            <Link className="glass-nav-link" href="/predictions/history">History</Link>
             <Link className="glass-nav-link" href="/fixtures">Fixtures</Link>
             <Link className="glass-nav-link" href="/community-leaderboard">Tipsters</Link>
             <Link className="glass-nav-link" href="/community/win-wall">Win Wall</Link>

@@ -132,9 +132,10 @@ class TennisEngine:
             "projection": {"projected_sets": round(projected_sets, 1), "surface": surface},
         }
         reason = f"Tennis read leans {'Home Win' if home_win_prob >= 0.5 else 'Away Win'} from recent player form, {surface} surface context, H2H rate {h2h_home_rate:.0%}, and set-margin signal."
+        total_pick = "Over 21.5 Games" if projected_sets >= 2.8 else "Under 21.5 Games"
         return [
             {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**meta, "market_logic": "Moneyline blends player win rate, head-to-head, set margin, surface hint, and fatigue proxy."}},
-            {"market": "Total Points", "pick": "Projected Long Match" if projected_sets >= 2.8 else "Projected Short Match", "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Projected match length is around {projected_sets:.1f} sets based on form gap and available scoring history.", "engine_meta": {**meta, "market_logic": "Tennis total read estimates match length from competitiveness and recent set/game scoring proxies."}},
+            {"market": "Total Games", "pick": total_pick, "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Projected match length is around {projected_sets:.1f} sets based on form gap and available scoring history.", "engine_meta": {**meta, "market_logic": "Tennis total read estimates match length from competitiveness and recent set/game scoring proxies."}},
         ]
 
 
@@ -176,7 +177,8 @@ class CricketEngine:
             {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**meta, "market_logic": "Moneyline blends team win form, run margin, head-to-head, format, and toss/chasing uncertainty."}}
         ]
         if projected_runs:
-            items.append({"market": "Total Points", "pick": "Projected High Runs" if projected_runs >= 300 else "Projected Controlled Runs", "confidence": 56.5, "edge_score": 56.5, "risk_level": "Medium", "reasoning": f"Available cricket scoring history projects roughly {projected_runs:.1f} combined runs/wickets scoring context for this matchup.", "engine_meta": {**meta, "market_logic": "Run total read uses recent runs for/against and format context."}})
+            over_under = "Over" if projected_runs >= 300 else "Under"
+            items.append({"market": "Total Runs", "pick": f"{over_under} {int(projected_runs // 50 * 50 + 50)} Runs", "confidence": 56.5, "edge_score": 56.5, "risk_level": "Medium", "reasoning": f"Available cricket scoring history projects roughly {projected_runs:.1f} combined runs for this matchup.", "engine_meta": {**meta, "market_logic": "Run total read uses recent runs for/against and format context."}})
         return items
 
 
@@ -213,8 +215,10 @@ class BaseballEngine:
         reason = f"Baseball read leans {'Home Win' if home_win_prob >= 0.5 else 'Away Win'} from run differential edge {run_diff:.2f}, recent runs allowed, H2H {h2h_home_rate:.0%}, and home park adjustment."
         items = [
             {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**meta, "market_logic": "Moneyline blends win form, run differential, pitching/bullpen proxy, head-to-head, and home park edge."}},
-            {"market": "Spread", "pick": "Home Run Line Lean" if run_diff >= 0 else "Away Run Line Lean", "confidence": round(min(70, max(56, abs(run_diff) * 6 + 56)), 1), "edge_score": round(min(70, max(56, abs(run_diff) * 6 + 56)), 1), "risk_level": "Medium", "reasoning": f"Run-line lean follows recent run differential gap of {run_diff:.2f} runs per game.", "engine_meta": {**meta, "market_logic": "Run-line lean is based on recent average run differential rather than only win/loss form."}},
+            {"market": "Run Line", "pick": f"Home {run_diff:+.1f}" if run_diff >= 0 else f"Away {run_diff:+.1f}", "confidence": round(min(70, max(56, abs(run_diff) * 6 + 56)), 1), "edge_score": round(min(70, max(56, abs(run_diff) * 6 + 56)), 1), "risk_level": "Medium", "reasoning": f"Run-line follows recent run differential gap of {run_diff:.2f} runs per game.", "engine_meta": {**meta, "market_logic": "Run-line is based on recent average run differential rather than only win/loss form."}},
         ]
         if projected_total:
-            items.append({"market": "Total Points", "pick": "Projected Over Profile" if projected_total >= 8.5 else "Projected Under Profile", "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Recent baseball scoring profile projects about {projected_total:.1f} total runs.", "engine_meta": {**meta, "market_logic": "Total runs read blends both teams' recent scoring and runs allowed."}})
+            threshold = 8.5
+            over_under = "Over" if projected_total >= threshold else "Under"
+            items.append({"market": "Total Runs", "pick": f"{over_under} {threshold}", "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Recent baseball scoring profile projects about {projected_total:.1f} total runs.", "engine_meta": {**meta, "market_logic": "Total runs read blends both teams' recent scoring and runs allowed."}})
         return items

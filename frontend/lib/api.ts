@@ -21,6 +21,11 @@ export async function getTodayPredictions(params: Record<string, string> = {}) {
   return safeFetchJson(`${API_URL}/api/predictions/today${qs ? `?${qs}` : ""}`, []);
 }
 
+export async function getPredictionHistory(params: Record<string, string> = {}) {
+  const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
+  return safeFetchJson(`${API_URL}/api/predictions/history${qs ? `?${qs}` : "?days=7&limit=50"}`, []);
+}
+
 export async function getPrediction(id: string) {
   return safeFetchJson(`${API_URL}/api/predictions/${id}`, null);
 }

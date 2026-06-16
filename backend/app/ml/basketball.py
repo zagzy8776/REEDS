@@ -100,9 +100,10 @@ class BasketballEngine:
             "projection": {"home_points": round(home_avg, 1), "away_points": round(away_avg, 1), "total_points": round(projected_total, 1)},
         }
 
+        spread_line = f"Home {spread_edge:+.1f}" if spread_edge >= 0 else f"Away {spread_edge:+.1f}"
         return [
             {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**base_meta, "market_logic": "Moneyline chooses the side with the stronger win probability after recent scoring and model edge are blended.", "private": f}},
-            {"market": "Spread", "pick": "Home Spread Lean" if spread_edge >= 0 else "Away Spread Lean", "confidence": round(spread_conf, 1), "edge_score": round(spread_conf, 1), "risk_level": _risk(spread_conf), "reasoning": reason, "engine_meta": {**base_meta, "market_logic": "Spread lean checks projected point margin plus home-court adjustment.", "private": {**f, "spread_edge": spread_edge}}},
+            {"market": "Point Spread", "pick": spread_line, "confidence": round(spread_conf, 1), "edge_score": round(spread_conf, 1), "risk_level": _risk(spread_conf), "reasoning": reason, "engine_meta": {**base_meta, "market_logic": "Point spread uses projected point margin plus home-court adjustment.", "private": {**f, "spread_edge": spread_edge}}},
             {"market": "Total Points", "pick": total_pick, "confidence": 58.0, "edge_score": 58.0, "risk_level": "Medium", "reasoning": f"Projected combined points: {projected_total:.1f}.", "engine_meta": {**base_meta, "market_logic": "Total points compares the projected combined score with the available line when a line is present.", "private": {**f, "projected_total": projected_total}}},
         ]
 

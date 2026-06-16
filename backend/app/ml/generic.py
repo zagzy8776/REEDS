@@ -81,13 +81,14 @@ class GenericSportEngine:
             }
         ]
         if projected_total:
+            over_under = "Over" if projected_total >= 2.5 else "Under"
             items.append({
                 "market": "Total Points",
-                "pick": "Projected High Total" if projected_total >= 2.5 else "Projected Low Total",
+                "pick": f"{over_under} 2.5",
                 "confidence": 56.0,
                 "edge_score": 56.0,
                 "risk_level": "Medium",
-                "reasoning": f"Recent games in this sport/team sample average around {projected_total} total points/goals/runs, so the model expects a {'higher' if projected_total >= 2.5 else 'lower'} scoring profile.",
+                "reasoning": f"Recent games in this sport/team sample average around {projected_total} total points/goals/runs.",
                 "engine_meta": {**meta, "projection": {"projected_total": projected_total}, "market_logic": "Total read uses the recent combined scoring average from available completed games."},
             })
         return items

@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, or_
@@ -49,13 +49,21 @@ def prediction_result(p: Prediction, f: Fixture) -> bool | None:
             return away_score > home_score
         if "draw" in pick:
             return home_score == away_score
-    if market == "goals":
+    if market in {"goals", "over/under 2.5", "over/under 1.5", "over/under 3.5"}:
         total = home_score + away_score
-        if "over 2.5" in pick:
-            return total > 2.5
-        if "under 2.5" in pick:
-            return total < 2.5
-    if market == "btts":
+        # Extract the line from the pick (e.g., "Over 2.5 Goals", "Under 1.5 Goals")
+        parts = pick.replace("goals", "").strip().split()
+        try:
+            threshold = float(parts[-1]) if len(parts) > 1 and parts[-1].replace(".", "").isdigit() else 0.0
+            if threshold == 0:
+                threshold = float(parts[0]) if parts[0].replace(".", "").isdigit() else 2.5
+        except (ValueError, IndexError):
+            threshold = 2.5
+        if "over" in pick:
+            return total > threshold
+        if "under" in pick:
+            return total < threshold
+    if market in {"btts", "both teams to score"}:
         both_scored = home_score > 0 and away_score > 0
         if "yes" in pick:
             return both_scored
@@ -63,6 +71,44 @@ def prediction_result(p: Prediction, f: Fixture) -> bool | None:
             return not both_scored
     if market == "correct score":
         return pick == f"{home_score}-{away_score}"
+    if market in {"spread", "point spread", "run line"}:
+        # Extract the spread value (e.g., "Home +5.5" or "Away -3.0")
+        parts = pick.replace("home", "").replace("away", "").strip().split()
+        try:
+            spread = float(parts[-1]) if parts else 0.0
+        except (ValueError, IndexError):
+            return None
+        if pick.startswith("home"):
+            return (home_score - away_score) > -spread
+        if pick.startswith("away"):
+            return (away_score - home_score) > spread
+    if market in {"total points", "total runs", "total games"}:
+        total = home_score + away_score
+        if pick.startswith("over"):
+            parts = pick.replace("over", "").strip().split()
+            try:
+                threshold = float(parts[0]) if parts else 2.5
+            except (ValueError, IndexError):
+                threshold = 2.5
+            return total > threshold
+        if pick.startswith("under"):
+            parts = pick.replace("under", "").strip().split()
+            try:
+                threshold = float(parts[0]) if parts else 2.5
+            except (ValueError, IndexError):
+                threshold = 2.5
+            return total < threshold
+        if "high" in pick:
+            return total >= 2.5
+        if "low" in pick:
+            return total < 2.5
+    if market == "double chance":
+        if "home" in pick and "draw" in pick:
+            return home_score >= away_score
+        if "away" in pick and "draw" in pick:
+            return away_score >= home_score
+        if "home" in pick and "away" in pick:
+            return home_score != away_score
 
     # Spread/total lines need the actual bookmaker line to grade correctly.
     return None
@@ -105,6 +151,20 @@ def today(sport: str | None = None, league: str | None = None, market: str | Non
     if risk:
         query = query.filter(Prediction.risk_level == risk)
     rows = query.order_by(Prediction.confidence.desc()).limit(100).all()
+    return [serialize_prediction(p, f) for p, f in rows]
+
+
+@router.get("/predictions/history")
+def prediction_history(sport: str | None = None, days: int = 7, limit: int = 50, db: Session = Depends(get_db)):
+    """Show past AI predictions with results (won/lost/pending)."""
+    cutoff = date.today() - timedelta(days=days)
+    query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(
+        Prediction.is_published == True,
+        Fixture.match_date >= cutoff,
+    )
+    if sport:
+        query = query.filter(Fixture.sport == sport)
+    rows = query.order_by(Fixture.match_date.desc(), Prediction.confidence.desc()).limit(min(limit, 200)).all()
     return [serialize_prediction(p, f) for p, f in rows]
 
 
