@@ -221,11 +221,12 @@ def generate_today_predictions(db: Session) -> int:
     for sport in sorted(by_sport.keys()):
         fixtures.extend(by_sport[sport][:20])
     fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:60]
-    # Lazy-load engines only for sports that have fixtures
+    # Lazy-load model references
     soccer_model = active_model(db, "soccer") if any(fx.sport == "soccer" for fx in fixtures) else None
     basketball_model = active_model(db, "basketball") if any(fx.sport == "basketball" for fx in fixtures) else None
-    soccer_engine = LoyalEdgeEngine(soccer_model.path if soccer_model else None) if soccer_model else None
-    basketball_engine = BasketballEngine(basketball_model.path if basketball_model else None) if basketball_model else None
+    # Engines work without a model (fallback heuristics), so always instantiate them
+    soccer_engine = LoyalEdgeEngine(soccer_model.path if soccer_model else None)
+    basketball_engine = BasketballEngine(basketball_model.path if basketball_model else None)
     tennis_engine = TennisEngine() if any(fx.sport == "tennis" for fx in fixtures) else None
     cricket_engine = CricketEngine() if any(fx.sport == "cricket" for fx in fixtures) else None
     baseball_engine = BaseballEngine() if any(fx.sport == "baseball" for fx in fixtures) else None
