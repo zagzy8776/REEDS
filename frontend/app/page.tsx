@@ -21,6 +21,9 @@ export default async function Home() {
   const results = stats.results || {};
   const hitRate = results.hit_rate || 0;
   const settled = results.settled_picks || 0;
+  const highConfidenceCount = allPicks.filter((p: any) => Number(p.confidence || 0) >= 65).length;
+  const trackRecordLabel = settled > 0 ? String(settled) : "Building";
+  const hitRateLabel = settled > 0 ? `${hitRate}%` : "Pending";
   return (
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
       {/* Hero */}
@@ -31,6 +34,7 @@ export default async function Home() {
           <p className="mt-5 text-slate-300">Every pick shows confidence, risk, and the model’s reasoning. Track every result on the history page. No hidden track record.</p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
             <Link className="rounded-xl bg-emerald-400 px-5 py-3 font-bold text-slate-950" href="/predictions">View AI Picks</Link>
+            <Link className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-5 py-3 font-bold text-amber-200" href="/predictions?min_confidence=65">High-confidence picks</Link>
             <Link className="rounded-xl border border-slate-700 px-5 py-3 font-bold" href="/predictions/history">Track Record</Link>
             <Link className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-5 py-3 font-bold text-emerald-200" href="/predictions/submit">+ Post Pick</Link>
           </div>
@@ -38,22 +42,25 @@ export default async function Home() {
           <div className="mt-8 grid gap-3 sm:grid-cols-3">
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
               <p className="text-xs uppercase tracking-wide text-slate-500">Settled picks</p>
-              <p className="mt-1 text-2xl font-black">{settled}</p>
+              <p className="mt-1 text-2xl font-black">{trackRecordLabel}</p>
             </div>
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
               <p className="text-xs uppercase tracking-wide text-slate-500">AI hit rate</p>
-              <p className="mt-1 text-2xl font-black text-emerald-300">{hitRate}%</p>
+              <p className="mt-1 text-2xl font-black text-emerald-300">{hitRateLabel}</p>
             </div>
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-xs uppercase tracking-wide text-slate-500">Sports covered</p>
-              <p className="mt-1 text-2xl font-black">{sports.length || status?.sports?.length || 0}</p>
+              <p className="text-xs uppercase tracking-wide text-slate-500">65%+ picks today</p>
+              <p className="mt-1 text-2xl font-black">{highConfidenceCount}</p>
             </div>
           </div>
+          {settled === 0 ? (
+            <p className="mt-3 text-xs text-slate-500">Track record is initializing from published picks only. We show pending/building states instead of fake proof.</p>
+          ) : null}
         </div>
         <div className="card">
           <h2 className="text-xl font-bold">Top picks right now</h2>
           <p className="mt-1 text-sm text-slate-400">Highest-confidence AI reads for today.</p>
-          <div className="mt-4 space-y-3">{picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="rounded-2xl border border-dashed border-emerald-400/30 bg-emerald-400/5 p-5"><p className="font-bold text-emerald-200">Picks loading or no upcoming fixtures.</p><p className="mt-2 text-sm text-slate-400">The AI board refreshes as soon as new matches are scheduled.</p></div>}</div>
+          <div className="mt-4 space-y-3">{picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="rounded-2xl border border-dashed border-emerald-400/30 bg-emerald-400/5 p-5"><p className="font-bold text-emerald-200">AI picks are warming up.</p><p className="mt-2 text-sm text-slate-400">The live fixture feed is separate from the prediction board. Picks appear after the scheduler or admin refresh generates published model reads.</p><div className="mt-4 flex flex-wrap gap-2"><Link href="/fixtures" className="rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs font-bold text-sky-200">Check live fixtures</Link><Link href="/predictions?min_confidence=65" className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-bold text-amber-200">High-confidence board</Link></div></div>}</div>
           {picks.length > 0 && <Link href="/predictions" className="mt-4 block text-center text-sm font-bold text-emerald-300">View all picks →</Link>}
         </div>
       </section>

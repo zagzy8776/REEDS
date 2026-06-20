@@ -1,108 +1,89 @@
 import Link from "next/link";
-import { getPredictionHistory } from "../../../lib/api";
+import { PredictionCard } from "../../../components/PredictionCard";
+import { getPredictionHistory, getStats } from "../../../lib/api";
 
 export const dynamic = "force-dynamic";
 
-const DEFAULT_SPORTS = ["soccer", "basketball", "tennis", "cricket", "baseball", "hockey", "handball", "american_football", "volleyball", "rugby", "mma"];
-
-function labelSport(value: string) {
-  return value.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+function resultClass(result: string) {
+  if (result === "won") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
+  if (result === "lost") return "border-rose-400/30 bg-rose-400/10 text-rose-200";
+  return "border-sky-400/30 bg-sky-400/10 text-sky-200";
 }
 
-function formatDate(dateStr: string) {
-  return new Intl.DateTimeFormat("en", { weekday: "short", month: "short", day: "numeric" }).format(new Date(dateStr));
+function resultLabel(result: string) {
+  if (result === "won") return "Won";
+  if (result === "lost") return "Lost";
+  return "Pending";
 }
 
 export default async function PredictionHistory({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams;
-  const picks = await getPredictionHistory(params);
-  const sports = Array.from(new Set([...DEFAULT_SPORTS, ...picks.map((p: any) => p.sport)])).filter(Boolean);
-
-  // Stats
-  const settled = picks.filter((p: any) => p.result !== "pending");
-  const wins = settled.filter((p: any) => p.result === "won").length;
-  const losses = settled.filter((p: any) => p.result === "lost").length;
-  const hitRate = settled.length > 0 ? ((wins / settled.length) * 100).toFixed(1) : "0.0";
+  const [history, stats] = await Promise.all([
+    getPredictionHistory({ days: params.days || "14", limit: params.limit || "100", sport: params.sport || "" }),
+    getStats(),
+  ]);
+  const results = stats.results || { settled_picks: 0, wins: 0, losses: 0, hit_rate: 0 };
+  const sports = Array.from(new Set(history.map((p: any) => p.sport))).filter(Boolean);
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+      <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] lg:items-end">
         <div>
-          <p className="badge inline-block">Track record</p>
-          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Prediction History</h1>
-          <p className="mt-2 max-w-3xl text-slate-400">How our AI predictions performed over the last 7 days.</p>
-        </div>
-      </div>
-
-      {/* Stats bar */}
-      <section className="mt-6 grid gap-4 md:grid-cols-4">
-        <div className="card">
-          <p className="text-sm text-slate-400">Settled Picks</p>
-          <p className="mt-2 text-3xl font-black">{settled.length}</p>
+          <p className="badge inline-block">Public track record</p>
+          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Every AI pick stays visible.</h1>
+          <p className="mt-3 max-w-3xl text-slate-300">
+            Wins, losses, and pending picks are shown together so the record builds in public. No winner-only screenshots.
+          </p>
+          <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+            <Link href="/predictions?min_confidence=65" className="rounded-xl bg-emerald-400 px-5 py-3 text-center font-black text-slate-950">High-confidence board</Link>
+            <Link href="/stats" className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-center font-bold">Full stats</Link>
+          </div>
         </div>
         <div className="card">
-          <p className="text-sm text-slate-400">Wins</p>
-          <p className="mt-2 text-3xl font-black text-emerald-300">{wins}</p>
-        </div>
-        <div className="card">
-          <p className="text-sm text-slate-400">Losses</p>
-          <p className="mt-2 text-3xl font-black text-rose-300">{losses}</p>
-        </div>
-        <div className="card">
-          <p className="text-sm text-slate-400">Hit Rate</p>
-          <p className="mt-2 text-3xl font-black">{hitRate}%</p>
+          <p className="text-sm text-slate-400">Settled public picks</p>
+          <div className="mt-4 grid grid-cols-2 gap-3 text-center sm:grid-cols-4 lg:grid-cols-2">
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{results.settled_picks || 0}</b><br /><span className="text-xs text-slate-500">Settled</span></div>
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{results.hit_rate || 0}%</b><br /><span className="text-xs text-slate-500">Hit rate</span></div>
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{results.wins || 0}</b><br /><span className="text-xs text-slate-500">Wins</span></div>
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-rose-300">{results.losses || 0}</b><br /><span className="text-xs text-slate-500">Losses</span></div>
+          </div>
         </div>
       </section>
 
-      {/* Filters */}
-      <form className="mt-6 grid gap-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4 md:grid-cols-3">
+      <section className="responsible-note mt-6">
+        <b>Transparent by design:</b> A young board may show pending picks before settled history exists. That is normal and more honest than inventing proof.
+      </section>
+
+      <form className="mt-6 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/50 p-4 md:grid-cols-4">
         <select name="sport" defaultValue={params.sport || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-          <option value="">All sports</option>
-          {sports.map((x: any) => <option key={x} value={x}>{labelSport(String(x))}</option>)}
+          <option value="">All sports</option>{sports.map((x: any) => <option key={x} value={x}>{String(x).replaceAll("_", " ")}</option>)}
         </select>
-        <select name="days" defaultValue={params.days || "7"} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-          <option value="1">Last 24 hours</option>
-          <option value="3">Last 3 days</option>
+        <select name="days" defaultValue={params.days || "14"} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
           <option value="7">Last 7 days</option>
           <option value="14">Last 14 days</option>
           <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
         </select>
+        <input name="limit" type="number" min="25" max="200" defaultValue={params.limit || "100"} className="rounded-xl border border-slate-800 bg-slate-950 p-3" />
         <button className="rounded-xl bg-emerald-400 px-4 py-3 font-bold text-slate-950">Apply filters</button>
       </form>
 
-      {picks.length === 0 && (
-        <div className="card mt-8 text-center text-slate-400">
-          <b className="text-white">No historical predictions found.</b>
-          <p className="mt-2">Predictions appear here after matches are played and settled.</p>
-        </div>
-      )}
-
-      {/* History list */}
-      <div className="mt-8 space-y-3">
-        {picks.map((p: any) => {
-          const resultBadge = p.result === "won" ? "bg-emerald-500/20 text-emerald-300" : p.result === "lost" ? "bg-rose-500/20 text-rose-300" : "bg-slate-500/20 text-slate-400";
-          const resultLabel = p.result === "won" ? "✓ WON" : p.result === "lost" ? "✗ LOST" : "⏳ Pending";
-          return (
-            <Link key={p.id} href={`/predictions/${p.id}`} className="block rounded-xl border border-slate-800 bg-slate-900/50 p-4 transition hover:border-slate-600 hover:bg-slate-900">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="min-w-0">
-                  <p className="text-xs uppercase text-slate-500">{labelSport(p.sport)} • {p.league}</p>
-                  <h3 className="mt-1 font-bold">{p.home_team} vs {p.away_team}</h3>
-                  <p className="mt-1 text-sm">
-                    <span className="text-emerald-300">{p.market}: {p.pick}</span>
-                    <span className="ml-2 text-slate-500">({p.confidence}% confidence)</span>
-                  </p>
-                  <p className="mt-0.5 text-xs text-slate-500">{formatDate(p.match_date)}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className={`rounded-full px-3 py-1 text-xs font-bold ${resultBadge}`}>{resultLabel}</span>
-                  <span className="text-xs text-slate-500">{p.risk_level}</span>
-                </div>
-              </div>
-            </Link>
-          );
-        })}
-      </div>
+      <section className="mt-8 grid gap-5 md:grid-cols-2">
+        {history.length ? history.map((p: any) => (
+          <div key={`${p.id}-${p.version || 1}`} className="relative">
+            <div className={`absolute -right-2 -top-2 z-10 rounded-full border px-3 py-1 text-xs font-black ${resultClass(p.result)}`}>
+              {resultLabel(p.result)}
+            </div>
+            <PredictionCard p={p} />
+          </div>
+        )) : (
+          <div className="card border-dashed border-emerald-400/30 bg-emerald-400/5 text-slate-300 md:col-span-2">
+            <h2 className="text-2xl font-black text-white">No public history yet.</h2>
+            <p className="mt-2">Once the AI board publishes picks and fixtures settle, the full record will appear here.</p>
+            <Link href="/predictions" className="mt-4 inline-flex rounded-xl bg-emerald-400 px-4 py-2 text-sm font-black text-slate-950">View today’s picks</Link>
+          </div>
+        )}
+      </section>
     </main>
   );
 }
