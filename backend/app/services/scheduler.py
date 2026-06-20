@@ -12,7 +12,7 @@ from app.db.session import SessionLocal
 from app.ml.backtest import walk_forward_backtest
 from app.ml.calibration import fit_soccer_platt_calibrator
 from app.ml.train import train_basketball_model, train_soccer_model
-from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events
+from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events, sync_live_scores
 from app.services.community import settle_user_predictions
 from app.services.coverage_seed import ensure_multisport_showcase
 from app.services.model_registry import register_model
@@ -226,6 +226,32 @@ def start_scheduler() -> BackgroundScheduler:
         "interval",
         hours=3,
         id="live_fixture_refresh_pipeline",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Score sync every 15 minutes so users see live/final scores
+    def score_sync_job():
+        db = SessionLocal()
+        settings = get_settings()
+        try:
+            result = sync_live_scores(
+                db,
+                settings.api_football_key or settings.api_sports_key,
+                settings.api_basketball_key or settings.api_sports_key,
+            )
+            log.info("Score sync: %s", result)
+        except Exception:
+            log.exception("Score sync job failed")
+        finally:
+            db.close()
+
+    scheduler.add_job(
+        score_sync_job,
+        "interval",
+        minutes=15,
+        id="live_score_sync",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

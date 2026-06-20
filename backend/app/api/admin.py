@@ -10,7 +10,7 @@ from app.db.session import get_db
 from app.ml.backtest import walk_forward_backtest
 from app.ml.train import train_basketball_model, train_soccer_model
 from app.scraper.api_clients import ApiFootballClient
-from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events
+from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events, sync_live_scores
 from app.services.data_quality import upsert_team_alias
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
@@ -239,6 +239,16 @@ def train(db: Session = Depends(get_db)):
         except ValueError as exc:
             skipped.append({"sport": sport, "reason": str(exc)})
     return {"status": "trained", "trained": trained, "skipped": skipped}
+
+
+@router.post("/sync-scores", dependencies=[Depends(require_admin)])
+def sync_scores(db: Session = Depends(get_db)):
+    """Pull live and finished scores for today's fixtures from API-Football and API-Basketball."""
+    settings = get_settings()
+    football_key = settings.api_football_key or settings.api_sports_key
+    basketball_key = settings.api_basketball_key or settings.api_sports_key
+    result = sync_live_scores(db, football_key, basketball_key)
+    return {"synced": result}
 
 
 @router.post("/predict", dependencies=[Depends(require_admin)])

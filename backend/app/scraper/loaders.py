@@ -130,6 +130,49 @@ ALLSPORTS_SPORT_MAP = {
     "handball": "handball",
 }
 
+# League name fragments that confirm a sport regardless of provider sport field.
+# Prevents Valencia Basketball being stored as soccer, or a football league
+# being mislabelled as basketball by a provider.
+_LEAGUE_SPORT_HINTS: list[tuple[str, str]] = [
+    # Soccer signals
+    ("fifa", "soccer"), ("world cup", "soccer"), ("premier league", "soccer"),
+    ("la liga", "soccer"), ("serie a", "soccer"), ("bundesliga", "soccer"),
+    ("ligue 1", "soccer"), ("champions league", "soccer"), ("europa league", "soccer"),
+    ("mls", "soccer"), ("usl", "soccer"), ("eredivisie", "soccer"),
+    ("primera division", "soccer"), ("j league", "soccer"),
+    ("a-league", "soccer"), ("a league", "soccer"),
+    # Basketball signals
+    ("nba", "basketball"), ("euroleague", "basketball"), ("eurocup", "basketball"),
+    ("wnba", "basketball"), ("nbl", "basketball"), ("bbl", "basketball"),
+    ("acb", "basketball"), ("big3", "basketball"), ("bsn", "basketball"),
+    ("cebl", "basketball"), ("lnb", "basketball"),
+    # American football
+    ("nfl", "american_football"), ("cfl", "american_football"),
+    ("ncaa football", "american_football"),
+    # Baseball
+    ("mlb", "baseball"), ("npb", "baseball"),
+    # Hockey
+    ("nhl", "hockey"), ("khl", "hockey"), ("iihf", "hockey"),
+    # Rugby
+    ("super rugby", "rugby"), ("six nations", "rugby"), ("rugby league", "rugby"),
+    ("rugby union", "rugby"), ("premiership rugby", "rugby"),
+    # Cricket
+    ("ipl", "cricket"), ("test match", "cricket"), ("t20", "cricket"),
+    ("one day", "cricket"), ("blast", "cricket"),
+    # Tennis
+    ("atp", "tennis"), ("wta", "tennis"), ("grand slam", "tennis"),
+    ("wimbledon", "tennis"), ("roland", "tennis"),
+]
+
+
+def _infer_sport_from_league(league: str, default: str) -> str:
+    """Override provider sport when the league name is unambiguous."""
+    low = league.lower()
+    for fragment, sport in _LEAGUE_SPORT_HINTS:
+        if fragment in low:
+            return sport
+    return default
+
 
 THESPORTSDB_SPORT_MAP = {
     "Soccer": "soccer",
@@ -480,9 +523,11 @@ def ingest_allsportsapi_events(db: Session, api_key: str, target_dates: list[str
                     continue
                 league = _first_present(item, ["league_name", "event_league", "country_name", "league", "tournament_name"]) or provider_sport.title()
                 season = str(_first_present(item, ["league_season", "season", "event_season"]) or match_date.year)
+                league_str = str(league)[:80]
+                canonical_sport = _infer_sport_from_league(league_str, canonical_sport)
                 fx = Fixture(
                     sport=canonical_sport,
-                    league=str(league)[:80],
+                    league=league_str,
                     season=season[:20],
                     match_date=match_date.date(),
                     home_team=resolve_team_name(db, str(home), canonical_sport, "allsportsapi"),
@@ -536,9 +581,11 @@ def ingest_thesportsdb_events(db: Session, api_key: str | None, target_dates: li
                     away = item.get("strAwayTeam")
                     if pd.isna(match_date) or not home or not away:
                         continue
+                    league_str = (item.get("strLeague") or provider_sport)[:80]
+                    canonical_sport = _infer_sport_from_league(league_str, canonical_sport)
                     fx = Fixture(
                         sport=canonical_sport,
-                        league=(item.get("strLeague") or provider_sport)[:80],
+                        league=league_str,
                         season=str(item.get("strSeason") or match_date.year)[:20],
                         match_date=match_date.date(),
                         home_team=resolve_team_name(db, str(home), canonical_sport, "thesportsdb"),
@@ -647,3 +694,107 @@ def load_basketball_csv(db: Session, path: str, league: str = "NBA", season: str
         count += 1
     db.commit()
     return count
+
+
+def sync_live_scores(db: Session, football_key: str | None, basketball_key: str | None) -> dict:
+    """Pull live/finished scores for today's fixtures and update the DB.
+
+    Called every 10-15 minutes by the scheduler and the /api/admin/sync-scores
+    endpoint so users see real scores during and after matches.
+    Returns counts of updated soccer and basketball fixtures.
+    """
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    updated = {"soccer": 0, "basketball": 0, "errors": []}
+
+    # --- Soccer via API-Football ---
+    if football_key:
+        try:
+            client = ApiFootballClient(football_key)
+            payload = client.fixtures_by_date(today)
+            for item in payload.get("response", []) or []:
+                fixture_data = item.get("fixture", {})
+                teams = item.get("teams", {})
+                goals = item.get("goals", {})
+                status = fixture_data.get("status", {})
+                status_short = status.get("short", "") if isinstance(status, dict) else str(status)
+                # Only update rows that have a score or are finished
+                if status_short not in {"FT", "AET", "PEN", "1H", "2H", "HT", "ET", "BT", "P", "SUSP", "INT", "LIVE"}:
+                    continue
+                home_score = _to_int_or_none(goals.get("home"))
+                away_score = _to_int_or_none(goals.get("away"))
+                if home_score is None and away_score is None:
+                    continue
+                home_name = str((teams.get("home") or {}).get("name") or "")
+                away_name = str((teams.get("away") or {}).get("name") or "")
+                match_date_raw = pd.to_datetime(fixture_data.get("date"), errors="coerce")
+                if pd.isna(match_date_raw) or not home_name or not away_name:
+                    continue
+                home_name = resolve_team_name(db, home_name, "soccer", "api_football")
+                away_name = resolve_team_name(db, away_name, "soccer", "api_football")
+                existing = db.query(Fixture).filter(
+                    Fixture.sport == "soccer",
+                    Fixture.match_date == match_date_raw.date(),
+                    Fixture.home_team == home_name,
+                    Fixture.away_team == away_name,
+                ).first()
+                if existing:
+                    existing.home_score = home_score
+                    existing.away_score = away_score
+                    extra = dict(existing.extra or {})
+                    extra["status"] = status_short
+                    extra["live"] = status_short in {"1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT"}
+                    extra["elapsed"] = (status.get("elapsed") if isinstance(status, dict) else None)
+                    existing.extra = extra
+                    updated["soccer"] += 1
+            db.commit()
+        except Exception as exc:
+            updated["errors"].append({"sport": "soccer", "reason": str(exc)})
+
+    # --- Basketball via API-Basketball ---
+    if basketball_key:
+        try:
+            client = ApiBasketballClient(basketball_key)
+            payload = client.games_by_date(today)
+            for item in payload.get("response", []) or []:
+                teams = item.get("teams", {})
+                scores = item.get("scores", {})
+                status = item.get("status", {})
+                status_long = str((status.get("long") if isinstance(status, dict) else status) or "")
+                if not any(s in status_long.lower() for s in ["finished", "in progress", "half", "end", "over"]):
+                    continue
+                home = (teams.get("home") or {})
+                away = (teams.get("away") or {})
+                home_scores = scores.get("home", {}) if isinstance(scores.get("home"), dict) else {}
+                away_scores = scores.get("away", {}) if isinstance(scores.get("away"), dict) else {}
+                home_score = _to_int_or_none(home_scores.get("total"))
+                away_score = _to_int_or_none(away_scores.get("total"))
+                if home_score is None and away_score is None:
+                    continue
+                match_date_raw = pd.to_datetime(item.get("date"), errors="coerce")
+                home_name = str(home.get("name") or "")
+                away_name = str(away.get("name") or "")
+                if pd.isna(match_date_raw) or not home_name or not away_name:
+                    continue
+                home_name = resolve_team_name(db, home_name, "basketball", "api_basketball")
+                away_name = resolve_team_name(db, away_name, "basketball", "api_basketball")
+                existing = db.query(Fixture).filter(
+                    Fixture.sport == "basketball",
+                    Fixture.match_date == match_date_raw.date(),
+                    Fixture.home_team == home_name,
+                    Fixture.away_team == away_name,
+                ).first()
+                if existing:
+                    existing.home_score = home_score
+                    existing.away_score = away_score
+                    extra = dict(existing.extra or {})
+                    extra["status"] = status_long
+                    extra["live"] = "in progress" in status_long.lower() or "half" in status_long.lower()
+                    extra["quarter"] = status.get("timer") if isinstance(status, dict) else None
+                    existing.extra = extra
+                    updated["basketball"] += 1
+            db.commit()
+        except Exception as exc:
+            updated["errors"].append({"sport": "basketball", "reason": str(exc)})
+
+    return updated

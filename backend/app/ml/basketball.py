@@ -85,8 +85,11 @@ class BasketballEngine:
 
         winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
         spread_conf = min(74, max(52, abs(spread_edge) * 4 + 50))
-        total_pick = "Over" if line_total and projected_total > line_total else "Under" if line_total else "Projected High Total"
-        reason = f"Recent scoring profile projects {home_team} {home_avg:.1f}, {away_team} {away_avg:.1f}; model win edge {home_win_prob:.1%}."
+        # Always produce a readable total pick — use standard NBA/basketball line of 220.5 as default
+        default_line = line_total or 220.5
+        total_pick = f"Over {default_line}" if projected_total > default_line else f"Under {default_line}"
+        total_conf = round(min(68, max(54, abs(projected_total - default_line) * 0.8 + 54)), 1)
+        reason = f"Recent scoring projects {home_team} {home_avg:.1f} pts, {away_team} {away_avg:.1f} pts; model win edge {home_win_prob:.1%}. Combined projection: {projected_total:.1f} vs line {default_line}."
         base_meta = {
             "summary": "Basketball engine compares recent points for/against, model win probability, projected total, and spread edge.",
             "factors": [
@@ -104,7 +107,7 @@ class BasketballEngine:
         return [
             {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**base_meta, "market_logic": "Moneyline chooses the side with the stronger win probability after recent scoring and model edge are blended.", "private": f}},
             {"market": "Point Spread", "pick": spread_line, "confidence": round(spread_conf, 1), "edge_score": round(spread_conf, 1), "risk_level": _risk(spread_conf), "reasoning": reason, "engine_meta": {**base_meta, "market_logic": "Point spread uses projected point margin plus home-court adjustment.", "private": {**f, "spread_edge": spread_edge}}},
-            {"market": "Total Points", "pick": total_pick, "confidence": 58.0, "edge_score": 58.0, "risk_level": "Medium", "reasoning": f"Projected combined points: {projected_total:.1f}.", "engine_meta": {**base_meta, "market_logic": "Total points compares the projected combined score with the available line when a line is present.", "private": {**f, "projected_total": projected_total}}},
+            {"market": "Total Points", "pick": total_pick, "confidence": total_conf, "edge_score": total_conf, "risk_level": _risk(total_conf), "reasoning": f"Projected combined points: {projected_total:.1f} vs line {default_line}. {home_team} avg {home_avg:.1f}, {away_team} avg {away_avg:.1f}.", "engine_meta": {**base_meta, "market_logic": "Total points compares the projected combined score with the standard line.", "private": {**f, "projected_total": projected_total}}},
         ]
 
 
