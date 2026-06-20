@@ -201,6 +201,9 @@ def generate_today_predictions(db: Session) -> int:
     Render free tier memory limits (512 MB). Heavy ML model imports (xgboost,
     lightgbm, joblib model bundles) are avoided entirely.
     """
+    # Lazy import to avoid loading heavy ML deps at module level
+    from app.ml.generic import GenericSportEngine  # noqa
+
     today_ref = date.today()
     raw_fixtures = (
         db.query(Fixture)
