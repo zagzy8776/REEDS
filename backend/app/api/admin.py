@@ -10,7 +10,7 @@ from app.db.session import get_db
 from app.ml.backtest import walk_forward_backtest
 from app.ml.train import train_basketball_model, train_soccer_model
 from app.scraper.api_clients import ApiFootballClient
-from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events, sync_live_scores
+from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events, load_football_csv, load_basketball_csv, sync_live_scores
 from app.services.data_quality import upsert_team_alias
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
@@ -229,7 +229,8 @@ def coverage_seed(db: Session = Depends(get_db)):
 
 @router.post("/train", dependencies=[Depends(require_admin)])
 def train(db: Session = Depends(get_db)):
-    data = dataframe_from_db(db)
+    # Load ALL history for training - no date cap
+    data = dataframe_from_db(db, max_age_days=None)
     trained, skipped = [], []
     for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
         try:
@@ -240,6 +241,41 @@ def train(db: Session = Depends(get_db)):
             skipped.append({"sport": sport, "reason": str(exc)})
     return {"status": "trained", "trained": trained, "skipped": skipped}
 
+
+@router.post("/ingest-historical", dependencies=[Depends(require_admin)])
+def ingest_historical(league: str | None = None, db: Session = Depends(get_db)):
+    """Load local historical CSVs from data/raw into the Render DB for training."""
+    from pathlib import Path
+    import os
+    root = Path(__file__).resolve().parents[2] / "data" / "raw"
+    if not root.exists():
+        return {"status": "error", "detail": f"data/raw not found at {root}"}
+    loaded = {"soccer": 0, "basketball": 0, "errors": []}
+    league_filter = (league or "").lower()
+    for dirpath, _, filenames in os.walk(root):
+        skip = False
+        if league_filter:
+            if league_filter not in dirpath.lower():
+                skip = True
+        if skip:
+            continue
+        for fname in filenames:
+            if not fname.lower().endswith(".csv"):
+                continue
+            fpath = Path(dirpath) / fname
+            folder = Path(dirpath).name.lower()
+            sport = "basketball" if "basketball" in folder or "basketball" in fname.lower() else "soccer"
+            inferred_league = Path(dirpath).name
+            try:
+                if sport == "basketball":
+                    n = load_basketball_csv(db, str(fpath), league=inferred_league)
+                    loaded["basketball"] += n
+                else:
+                    n = load_football_csv(db, str(fpath), league=inferred_league)
+                    loaded["soccer"] += n
+            except Exception as exc:  # noqa: BLE001
+                loaded["errors"].append({"file": str(fpath), "reason": str(exc)})
+    return {"status": "done", "loaded": loaded}
 
 @router.post("/sync-scores", dependencies=[Depends(require_admin)])
 def sync_scores(db: Session = Depends(get_db)):

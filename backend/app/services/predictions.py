@@ -115,15 +115,18 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
     return item
 
 
-def dataframe_from_db(db: Session, max_age_days: int = 180) -> pd.DataFrame:
-    """Load fixtures into a DataFrame, limited to recent history.
+def dataframe_from_db(db: Session, max_age_days: int | None = 180) -> pd.DataFrame:
+    """Load fixtures into a DataFrame.
 
     Args:
-        max_age_days: Maximum age of fixtures to load (default 6 months).
-                      Reduced for Render free tier (512 MB RAM) to prevent OOM.
+        max_age_days: Cut-off in days. Pass None to load all history (for training).
+                      Defaults to 180 days for prediction serving to avoid OOM on free tier.
     """
-    cutoff = date.today() - timedelta(days=max_age_days)
-    rows = db.query(Fixture).filter(func.date(Fixture.match_date) >= cutoff).limit(3000).all()
+    rows = db.query(Fixture)
+    if max_age_days is not None:
+        cutoff = date.today() - timedelta(days=max_age_days)
+        rows = rows.filter(func.date(Fixture.match_date) >= cutoff)
+    rows = rows.limit(120000).all()
     return pd.DataFrame([{
         "id": r.id,
         "sport": r.sport,
