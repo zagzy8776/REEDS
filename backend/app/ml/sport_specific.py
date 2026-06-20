@@ -222,3 +222,94 @@ class BaseballEngine:
             over_under = "Over" if projected_total >= threshold else "Under"
             items.append({"market": "Total Runs", "pick": f"{over_under} {threshold}", "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Recent baseball scoring profile projects about {projected_total:.1f} total runs.", "engine_meta": {**meta, "market_logic": "Total runs read blends both teams' recent scoring and runs allowed."}})
         return items
+
+
+class AmericanFootballEngine:
+    """Dedicated engine for American football (NFL/CFL/NCAA)."""
+
+    def predict(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
+        tk = RecentFormToolkit("american_football", history, fixture)
+        home = tk.home
+        away = tk.away
+        home_form = tk.team_summary(home, 10)
+        away_form = tk.team_summary(away, 10)
+        h2h_home_rate = tk.h2h_win_rate()
+        league_hint = tk.league_hint()
+
+        scoring_avg = (home_form["for_avg"] + away_form["for_avg"]) / 2 if home_form["for_avg"] or away_form["for_avg"] else 23.0
+        spread_edge = (home_form["margin"] - away_form["margin"]) + 2.5  # home field ~2.5 pts
+        edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.32 + (h2h_home_rate - 0.5) * 0.12 + (spread_edge / 60)
+        home_win_prob = _bounded_probability(0.50 + edge, 0.30, 0.76)
+        winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
+        spread_conf = round(min(72, max(54, abs(spread_edge) * 3 + 54)), 1)
+        projected_total = round((home_form["for_avg"] + away_form["for_avg"] + home_form["against_avg"] + away_form["against_avg"]) / 2, 1) if home_form["for_avg"] else round(scoring_avg * 2, 1)
+        total_line = 45.5
+        over_under = "Over" if projected_total >= total_line else "Under"
+
+        meta = {
+            "summary": "American football engine blends recent point differential, scoring profile, home-field edge, and head-to-head.",
+            "model_label": "American football dedicated read",
+            "factors": [
+                {"label": "Home point margin", "value": round(home_form["margin"], 2), "note": f"Last {home_form['games']} games"},
+                {"label": "Away point margin", "value": round(away_form["margin"], 2), "note": f"Last {away_form['games']} games"},
+                {"label": "Projected spread", "value": f"{spread_edge:+.1f}", "note": "Positive favours home"},
+                {"label": "Head-to-head", "value": f"{h2h_home_rate:.0%} home-side", "note": "Direct matchup history"},
+                {"label": "Projected total", "value": round(projected_total, 1), "note": "Combined estimated points"},
+            ],
+            "probabilities": {"home_win": round(home_win_prob, 4), "away_win": round(1 - home_win_prob, 4)},
+            "projection": {"spread_edge": round(spread_edge, 1), "projected_total": round(projected_total, 1)},
+        }
+        spread_pick = f"Home {spread_edge:+.1f}" if spread_edge >= 0 else f"Away {abs(spread_edge):+.1f}"
+        reason = f"American football read leans {'Home Win' if home_win_prob >= 0.5 else 'Away Win'}: margin edge {spread_edge:+.1f}, H2H {h2h_home_rate:.0%}, projected total {projected_total:.1f}."
+        return [
+            {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**meta, "market_logic": "Moneyline blends win form, point margin, H2H, and home-field edge."}},
+            {"market": "Point Spread", "pick": spread_pick, "confidence": spread_conf, "edge_score": spread_conf, "risk_level": _risk(spread_conf), "reasoning": f"Spread follows projected point margin of {spread_edge:+.1f} with home-field adjustment.", "engine_meta": {**meta, "market_logic": "Spread uses recent scoring margin and home-field boost."}},
+            {"market": "Total Points", "pick": f"{over_under} {total_line}", "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Projected combined points {projected_total:.1f} vs line {total_line}.", "engine_meta": {**meta, "market_logic": "Total blends both teams' recent points for and allowed."}},
+        ]
+
+
+class HockeyEngine:
+    """Dedicated engine for ice hockey (NHL/KHL/IIHF)."""
+
+    def predict(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
+        tk = RecentFormToolkit("hockey", history, fixture)
+        home = tk.home
+        away = tk.away
+        home_form = tk.team_summary(home, 12)
+        away_form = tk.team_summary(away, 12)
+        h2h_home_rate = tk.h2h_win_rate()
+        league_hint = tk.league_hint()
+
+        goal_diff = home_form["margin"] - away_form["margin"]
+        edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.30 + goal_diff * 0.06 + (h2h_home_rate - 0.5) * 0.12 + 0.04
+        home_win_prob = _bounded_probability(0.50 + edge, 0.30, 0.76)
+        winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
+
+        projected_goals = round((home_form["for_avg"] + away_form["for_avg"] + home_form["against_avg"] + away_form["against_avg"]) / 2, 1) if home_form["for_avg"] else 5.5
+        total_line = 5.5
+        over_under = "Over" if projected_goals >= total_line else "Under"
+        total_conf = round(min(68, max(54, abs(projected_goals - total_line) * 8 + 54)), 1)
+
+        btts_prob = min(0.78, max(0.42, (home_form["for_avg"] / max(home_form["for_avg"] + 0.1, 1)) * 0.6 + 0.35)) if home_form["for_avg"] else 0.62
+        btts_pick = "BTTS Yes" if btts_prob >= 0.55 else "BTTS No"
+        btts_conf = round(max(btts_prob, 1 - btts_prob) * 100, 1)
+
+        meta = {
+            "summary": "Hockey engine blends recent goals for/against, win form, home ice advantage, and head-to-head.",
+            "model_label": "Hockey dedicated read",
+            "factors": [
+                {"label": "Home goal margin", "value": round(home_form["margin"], 2), "note": f"Last {home_form['games']} games"},
+                {"label": "Away goal margin", "value": round(away_form["margin"], 2), "note": f"Last {away_form['games']} games"},
+                {"label": "Projected goals", "value": projected_goals, "note": "Estimated combined goals"},
+                {"label": "Head-to-head", "value": f"{h2h_home_rate:.0%} home-side", "note": "Direct matchup history"},
+                {"label": "Home ice edge", "value": "+4%", "note": "Standard home-ice advantage"},
+            ],
+            "probabilities": {"home_win": round(home_win_prob, 4), "away_win": round(1 - home_win_prob, 4)},
+            "projection": {"projected_goals": projected_goals, "total_line": total_line},
+        }
+        reason = f"Hockey read leans {'Home Win' if home_win_prob >= 0.5 else 'Away Win'}: goal margin edge {goal_diff:+.2f}, projected {projected_goals:.1f} goals, H2H {h2h_home_rate:.0%}."
+        return [
+            {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**meta, "market_logic": "Moneyline blends win form, goal margin, H2H, and home ice."}},
+            {"market": "Total Points", "pick": f"{over_under} {total_line}", "confidence": total_conf, "edge_score": total_conf, "risk_level": _risk(total_conf), "reasoning": f"Projected {projected_goals:.1f} combined goals vs line {total_line}.", "engine_meta": {**meta, "market_logic": "Goal total uses recent goals for and against for both teams."}},
+            {"market": "Both Teams to Score", "pick": btts_pick, "confidence": btts_conf, "edge_score": btts_conf, "risk_level": _risk(btts_conf), "reasoning": f"Both teams score probability estimated at {btts_prob:.0%} from recent scoring form.", "engine_meta": {**meta, "market_logic": "BTTS uses recent goals-scored rate as a proxy for scoring probability."}},
+        ]
