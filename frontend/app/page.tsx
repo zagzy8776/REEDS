@@ -8,7 +8,7 @@ export default async function Home() {
   const [allPicks, status, fixtures, stats] = await Promise.all([
     getTodayPredictions(),
     getFixtureStatus(),
-    getFixtures({ scope: "upcoming", limit: "24" }),
+    getFixtures({ scope: "all", limit: "24" }),
     getStats(),
   ]);
   const picks = allPicks.slice(0, 3);

@@ -141,6 +141,10 @@ _LEAGUE_SPORT_HINTS: list[tuple[str, str]] = [
     ("mls", "soccer"), ("usl", "soccer"), ("eredivisie", "soccer"),
     ("primera division", "soccer"), ("j league", "soccer"),
     ("a-league", "soccer"), ("a league", "soccer"),
+    # Spanish clubs that appear as league names in provider data
+    ("valencia", "soccer"), ("real madrid", "soccer"), ("barcelona", "soccer"),
+    ("atletico", "soccer"), ("sevilla", "soccer"), ("villarreal", "soccer"),
+    ("real betis", "soccer"), ("athletic", "soccer"), ("real sociedad", "soccer"),
     # Basketball signals
     ("nba", "basketball"), ("euroleague", "basketball"), ("eurocup", "basketball"),
     ("wnba", "basketball"), ("nbl", "basketball"), ("bbl", "basketball"),
