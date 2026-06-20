@@ -205,6 +205,21 @@ def generate_today_predictions(db: Session) -> int:
     from app.ml.generic import GenericSportEngine  # noqa
 
     today_ref = date.today()
+    PRIORITY_LEAGUES = {
+        "FIFA World Cup", "UEFA Champions League", "UEFA Europa League",
+        "UEFA European Championship", "Copa America", "Africa Cup of Nations",
+        "NBA", "NFL", "IPL",
+    }
+    priority_fixtures = (
+        db.query(Fixture)
+        .filter(
+            func.date(Fixture.match_date) == today_ref,
+            Fixture.home_score == None,
+            Fixture.away_score == None,
+            Fixture.league.in_(PRIORITY_LEAGUES),
+        )
+        .all()
+    )
     raw_fixtures = (
         db.query(Fixture)
         .filter(
@@ -216,16 +231,18 @@ def generate_today_predictions(db: Session) -> int:
         .limit(60)
         .all()
     )
-    if not raw_fixtures:
+    if not raw_fixtures and not priority_fixtures:
         return 0
-    # Take a diverse sample across sports: max 10 per sport, 40 total
     by_sport: dict[str, list[Fixture]] = {}
     for fx in raw_fixtures:
         by_sport.setdefault(fx.sport, []).append(fx)
     fixtures = []
     for sport in sorted(by_sport.keys()):
         fixtures.extend(by_sport[sport][:10])
-    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:40]
+    # Always include priority league fixtures (World Cup, CL, NBA, etc)
+    seen_ids = {fx.id for fx in fixtures}
+    fixtures = [fx for fx in priority_fixtures if fx.id not in seen_ids] + fixtures
+    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:50]
     generic_engine = GenericSportEngine()
     # Pass empty DataFrame so GenericSportEngine uses its fallback (no history needed)
     empty_history = pd.DataFrame()
