@@ -120,16 +120,15 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
     return item
 
 
-def dataframe_from_db(db: Session, max_age_days: int = 730) -> pd.DataFrame:
+def dataframe_from_db(db: Session, max_age_days: int = 180) -> pd.DataFrame:
     """Load fixtures into a DataFrame, limited to recent history.
 
     Args:
-        max_age_days: Maximum age of fixtures to load (default 2 years).
-                      The full DB could contain 10+ years of CSV data — loading
-                      it all into memory would crash the server.
+        max_age_days: Maximum age of fixtures to load (default 6 months).
+                      Reduced for Render free tier (512 MB RAM) to prevent OOM.
     """
     cutoff = date.today() - timedelta(days=max_age_days)
-    rows = db.query(Fixture).filter(func.date(Fixture.match_date) >= cutoff).all()
+    rows = db.query(Fixture).filter(func.date(Fixture.match_date) >= cutoff).limit(3000).all()
     return pd.DataFrame([{
         "id": r.id,
         "sport": r.sport,
@@ -210,7 +209,7 @@ def generate_today_predictions(db: Session) -> int:
             Fixture.away_score == None,
         )
         .order_by(Fixture.match_date.asc(), Fixture.league.asc())
-        .limit(240)
+        .limit(120)
         .all()
     )
     # Keep the AI board multi-sport even when one sport has many fixtures.
@@ -220,15 +219,16 @@ def generate_today_predictions(db: Session) -> int:
         by_sport.setdefault(fx.sport, []).append(fx)
     fixtures = []
     for sport in sorted(by_sport.keys()):
-        fixtures.extend(by_sport[sport][:30])
-    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:120]
-    soccer_model = active_model(db, "soccer")
-    basketball_model = active_model(db, "basketball")
-    soccer_engine = LoyalEdgeEngine(soccer_model.path if soccer_model else None)
-    basketball_engine = BasketballEngine(basketball_model.path if basketball_model else None)
-    tennis_engine = TennisEngine()
-    cricket_engine = CricketEngine()
-    baseball_engine = BaseballEngine()
+        fixtures.extend(by_sport[sport][:20])
+    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:60]
+    # Lazy-load engines only for sports that have fixtures
+    soccer_model = active_model(db, "soccer") if any(fx.sport == "soccer" for fx in fixtures) else None
+    basketball_model = active_model(db, "basketball") if any(fx.sport == "basketball" for fx in fixtures) else None
+    soccer_engine = LoyalEdgeEngine(soccer_model.path if soccer_model else None) if soccer_model else None
+    basketball_engine = BasketballEngine(basketball_model.path if basketball_model else None) if basketball_model else None
+    tennis_engine = TennisEngine() if any(fx.sport == "tennis" for fx in fixtures) else None
+    cricket_engine = CricketEngine() if any(fx.sport == "cricket" for fx in fixtures) else None
+    baseball_engine = BaseballEngine() if any(fx.sport == "baseball" for fx in fixtures) else None
     generic_engine = GenericSportEngine()
     count = 0
     for fx in fixtures:
