@@ -6,10 +6,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture, OddsSnapshot, Prediction
-from app.ml.basketball import BasketballEngine
-from app.ml.ensemble import LoyalEdgeEngine
-from app.ml.generic import GenericSportEngine
-from app.ml.sport_specific import BaseballEngine, CricketEngine, TennisEngine
 from app.services.model_registry import active_model
 
 
@@ -199,7 +195,12 @@ log = logging.getLogger(__name__)
 
 
 def generate_today_predictions(db: Session) -> int:
-    history = dataframe_from_db(db)
+    """Generate predictions for today's fixtures.
+
+    Uses only the lightweight GenericSportEngine for all sports to stay within
+    Render free tier memory limits (512 MB). Heavy ML model imports (xgboost,
+    lightgbm, joblib model bundles) are avoided entirely.
+    """
     today_ref = date.today()
     raw_fixtures = (
         db.query(Fixture)
@@ -209,49 +210,26 @@ def generate_today_predictions(db: Session) -> int:
             Fixture.away_score == None,
         )
         .order_by(Fixture.match_date.asc(), Fixture.league.asc())
-        .limit(120)
+        .limit(60)
         .all()
     )
-    # Keep the AI board multi-sport even when one sport has many fixtures.
-    # This avoids soccer crowding out basketball/cricket/tennis on free feeds.
+    if not raw_fixtures:
+        return 0
+    # Take a diverse sample across sports: max 10 per sport, 40 total
     by_sport: dict[str, list[Fixture]] = {}
     for fx in raw_fixtures:
         by_sport.setdefault(fx.sport, []).append(fx)
     fixtures = []
     for sport in sorted(by_sport.keys()):
-        fixtures.extend(by_sport[sport][:20])
-    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:60]
-    # Lazy-load model references
-    soccer_model = active_model(db, "soccer") if any(fx.sport == "soccer" for fx in fixtures) else None
-    basketball_model = active_model(db, "basketball") if any(fx.sport == "basketball" for fx in fixtures) else None
-    # Engines work without a model (fallback heuristics), so always instantiate them
-    soccer_engine = LoyalEdgeEngine(soccer_model.path if soccer_model else None)
-    basketball_engine = BasketballEngine(basketball_model.path if basketball_model else None)
-    tennis_engine = TennisEngine() if any(fx.sport == "tennis" for fx in fixtures) else None
-    cricket_engine = CricketEngine() if any(fx.sport == "cricket" for fx in fixtures) else None
-    baseball_engine = BaseballEngine() if any(fx.sport == "baseball" for fx in fixtures) else None
+        fixtures.extend(by_sport[sport][:10])
+    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:40]
     generic_engine = GenericSportEngine()
+    # Pass empty DataFrame so GenericSportEngine uses its fallback (no history needed)
+    empty_history = pd.DataFrame()
     count = 0
     for fx in fixtures:
         try:
-            if fx.sport == "basketball":
-                model_version_id = basketball_model.id if basketball_model else None
-                items = basketball_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
-            elif fx.sport == "soccer":
-                model_version_id = soccer_model.id if soccer_model else None
-                items = soccer_engine.predict_soccer(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
-            elif fx.sport == "tennis":
-                model_version_id = None
-                items = tennis_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league})
-            elif fx.sport == "cricket":
-                model_version_id = None
-                items = cricket_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league})
-            elif fx.sport == "baseball":
-                model_version_id = None
-                items = baseball_engine.predict(history, {"home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league})
-            else:
-                model_version_id = None
-                items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
+            items = generic_engine.predict(empty_history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
             published_indexes = select_public_picks(items)
             fallback_idx = None
             if not published_indexes:
@@ -267,7 +245,7 @@ def generate_today_predictions(db: Session) -> int:
                 version = _next_prediction_version(db, fx.id, item["market"])
                 pred = Prediction(
                     fixture_id=fx.id,
-                    model_version_id=model_version_id,
+                    model_version_id=None,
                     version=version,
                     status="active",
                     **item,
@@ -279,7 +257,7 @@ def generate_today_predictions(db: Session) -> int:
                 db.flush()
                 _capture_odds_snapshot(db, fx, pred, "published" if is_published else "initial")
                 count += 1
-            db.flush()  # flush per-fixture so partial progress is persisted
+            db.flush()
         except Exception:
             log.exception("Failed to generate predictions for fixture %d (%s: %s vs %s)", fx.id, fx.sport, fx.home_team, fx.away_team)
             continue
