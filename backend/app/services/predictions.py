@@ -166,7 +166,7 @@ def _supersede_active_prediction(db: Session, fixture_id: int, market: str) -> N
         "Both Teams to Score": ["BTTS"],
         "Over/Under 2.5": ["Goals"],
     }
-    new_to_old = {v: k for k, v in legacy_markets.items()}
+    new_to_old = {v: k for k, vals in legacy_markets.items() for v in vals}
     old_market = new_to_old.get(market)
     if old_market:
         db.query(Prediction).filter(
@@ -251,8 +251,14 @@ def generate_today_predictions(db: Session) -> int:
                     model_version_id=None,
                     version=version,
                     status="active",
-                    **item,
-                    is_premium=is_published and item["confidence"] >= 70,
+                    market=str(item.get("market", "")),
+                    pick=str(item.get("pick", "")),
+                    confidence=float(item.get("confidence", 0)),
+                    edge_score=float(item.get("edge_score", 0)),
+                    risk_level=str(item.get("risk_level", "Medium")),
+                    reasoning=str(item.get("reasoning", "")),
+                    engine_meta=item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else None,
+                    is_premium=is_published and float(item.get("confidence", 0)) >= 70,
                     is_published=is_published,
                     published_at=datetime.utcnow() if is_published else None,
                 )
@@ -263,6 +269,7 @@ def generate_today_predictions(db: Session) -> int:
             db.flush()
         except Exception:
             log.exception("Failed to generate predictions for fixture %d (%s: %s vs %s)", fx.id, fx.sport, fx.home_team, fx.away_team)
+            db.rollback()
             continue
     db.commit()
     return count

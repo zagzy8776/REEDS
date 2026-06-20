@@ -1,14 +1,17 @@
+import logging
 from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+log = logging.getLogger(__name__)
+
 from app.db.models import BacktestRun, CommunityComment, CommunityPlay, CommunityReaction, Fixture, ModelVersion, OddsSnapshot, Prediction, UserPrediction, WinSlip
 from app.db.session import get_db
 from app.services.community import community_leaderboard, community_overview, fixture_consensus, prediction_social_context, experts_list, win_wall, daily_challenge, follow_user, user_profile
 from app.services.market_metrics import roi_clv_summary
-from app.services.predictions import build_combo, compound_combo_probability
+from app.services.predictions import build_combo, compound_combo_probability, generate_today_predictions
 
 
 router = APIRouter()
@@ -151,6 +154,27 @@ def today(sport: str | None = None, league: str | None = None, market: str | Non
     if risk:
         query = query.filter(Prediction.risk_level == risk)
     rows = query.order_by(Prediction.confidence.desc()).limit(100).all()
+    if not rows:
+        # Self-heal a live-but-empty public board. Production can have fixtures
+        # before the scheduler/admin prediction job has completed. Generate once
+        # from existing upcoming fixtures, then rerun the same filtered query so
+        # customers see AI reads instead of a permanently empty board.
+        upcoming = db.query(Fixture.id).filter(func.date(Fixture.match_date) >= func.current_date(), Fixture.home_score == None, Fixture.away_score == None).first()
+        if upcoming:
+            try:
+                generate_today_predictions(db)
+            except Exception:
+                log.exception("Self-heal prediction generation failed")
+            query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Prediction.status == "active", func.date(Fixture.match_date) >= func.current_date(), Prediction.confidence >= min_confidence)
+            if sport:
+                query = query.filter(Fixture.sport == sport)
+            if league:
+                query = _apply_league_filter(query, league)
+            if market:
+                query = query.filter(Prediction.market == market)
+            if risk:
+                query = query.filter(Prediction.risk_level == risk)
+            rows = query.order_by(Prediction.confidence.desc()).limit(100).all()
     return [serialize_prediction(p, f) for p, f in rows]
 
 

@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -243,6 +244,34 @@ def train(db: Session = Depends(get_db)):
 @router.post("/predict", dependencies=[Depends(require_admin)])
 def predict(db: Session = Depends(get_db)):
     return {"generated": generate_today_predictions(db)}
+
+
+@router.get("/diagnose-predict", dependencies=[Depends(require_admin)])
+def diagnose_predict(db: Session = Depends(get_db)):
+    """Diagnose why predictions are not being generated."""
+    from app.ml.generic import GenericSportEngine
+    today_ref = date.today()
+    raw = db.query(Fixture).filter(
+        func.date(Fixture.match_date) >= today_ref,
+        Fixture.home_score == None,
+        Fixture.away_score == None,
+    ).limit(5).all()
+    sample_items = []
+    if raw:
+        engine = GenericSportEngine()
+        import pandas as pd
+        fx = raw[0]
+        try:
+            items = engine.predict(pd.DataFrame(), {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
+            sample_items = items
+        except Exception as exc:
+            sample_items = [{"error": str(exc)}]
+    return {
+        "today": today_ref.isoformat(),
+        "raw_fixtures_found": len(raw),
+        "sample_fixtures": [{"id": f.id, "sport": f.sport, "home_team": f.home_team, "away_team": f.away_team, "match_date": str(f.match_date)} for f in raw],
+        "sample_engine_output": sample_items,
+    }
 
 
 @router.post("/backtest", dependencies=[Depends(require_admin)])
