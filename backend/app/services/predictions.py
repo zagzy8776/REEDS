@@ -6,7 +6,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture, OddsSnapshot, Prediction
-from app.services.model_registry import active_model
 
 
 PUBLISH_THRESHOLDS = {
@@ -197,12 +196,13 @@ log = logging.getLogger(__name__)
 def generate_today_predictions(db: Session) -> int:
     """Generate predictions for today's fixtures.
 
-    Uses only the lightweight GenericSportEngine for all sports to stay within
-    Render free tier memory limits (512 MB). Heavy ML model imports (xgboost,
-    lightgbm, joblib model bundles) are avoided entirely.
+    Uses LoyalEdgeEngine (Poisson + form + Elo + draw detection) for soccer and
+    GenericSportEngine with real history for all other sports.
+    History capped at 90 days to stay within Render free tier RAM.
     """
-    # Lazy import to avoid loading heavy ML deps at module level
-    from app.ml.generic import GenericSportEngine  # noqa
+    from app.ml.generic import GenericSportEngine
+    from app.ml.ensemble import LoyalEdgeEngine
+    from app.services.model_registry import active_model_path
 
     today_ref = date.today()
     PRIORITY_LEAGUES = {
@@ -239,17 +239,34 @@ def generate_today_predictions(db: Session) -> int:
     fixtures = []
     for sport in sorted(by_sport.keys()):
         fixtures.extend(by_sport[sport][:10])
-    # Always include priority league fixtures (World Cup, CL, NBA, etc)
     seen_ids = {fx.id for fx in fixtures}
     fixtures = [fx for fx in priority_fixtures if fx.id not in seen_ids] + fixtures
     fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:50]
+
+    # Real 90-day history for form/Elo — capped to avoid OOM on free tier
+    history = dataframe_from_db(db, max_age_days=90)
+
+    # Load soccer engine once — falls back gracefully if no model file exists
+    soccer_model_path = active_model_path(db, "soccer")
+    soccer_engine = LoyalEdgeEngine(soccer_model_path)
     generic_engine = GenericSportEngine()
-    # Pass empty DataFrame so GenericSportEngine uses its fallback (no history needed)
-    empty_history = pd.DataFrame()
+
     count = 0
     for fx in fixtures:
         try:
-            items = generic_engine.predict(empty_history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
+            if fx.sport == "soccer":
+                items = soccer_engine.predict_soccer(history, {
+                    "sport": fx.sport,
+                    "home_team": fx.home_team,
+                    "away_team": fx.away_team,
+                    "match_date": fx.match_date,
+                    "league": fx.league,
+                    "home_odds": fx.home_odds,
+                    "draw_odds": fx.draw_odds,
+                    "away_odds": fx.away_odds,
+                })
+            else:
+                items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
             published_indexes = select_public_picks(items)
             fallback_idx = None
             if not published_indexes:
