@@ -361,15 +361,123 @@ def backfill_odds(db: Session = Depends(get_db)):
 
 
 @router.post("/ingest-free", dependencies=[Depends(require_admin)])
-def ingest_free(max_leagues: int = 10, db: Session = Depends(get_db)):
+def ingest_free(max_leagues: int = 20, db: Session = Depends(get_db)):
     """Pull free historical data from football-data.co.uk and OpenFootball.
 
-    No API key needed. Adds 25+ seasons of results + odds across 20+ leagues.
-    Safe to call repeatedly — duplicates are skipped automatically.
+    No API key needed. Adds up to 8 seasons × 20 leagues ≈ 60,000 rows with
+    real Betfair/B365/Pinnacle odds. Safe to call repeatedly — duplicates skipped.
+    After this completes, call /train to retrain the models on the full dataset.
     """
     from app.scraper.free_data import ingest_all_free_sources
     result = ingest_all_free_sources(db, max_leagues=min(max_leagues, 20))
     return {"status": "done", "result": result}
+
+
+@router.post("/train-full", dependencies=[Depends(require_admin)])
+def train_full(db: Session = Depends(get_db)):
+    """One-click full pipeline: ingest free data → train models → backtest → predict.
+
+    This is the recommended first-run command after deployment. Pulls ~60k rows
+    from football-data.co.uk, trains the full XGBoost+LightGBM+RF ensemble,
+    runs walk-forward backtest, generates today's predictions, and backfills odds.
+    Expect this to take 3-8 minutes on Render free tier.
+    """
+    from app.scraper.free_data import ingest_all_free_sources
+    from app.ml.backtest import walk_forward_backtest
+    from app.services.predictions import _backfill_fixture_odds, dataframe_from_db
+    from app.ml.generic import GenericSportEngine
+    from app.ml.ensemble import LoyalEdgeEngine
+    from app.services.model_registry import active_model_path
+
+    report: dict = {
+        "stage": "starting",
+        "free_data": None,
+        "trained": [],
+        "skipped": [],
+        "backtests": [],
+        "generated_predictions": 0,
+        "odds_backfilled": 0,
+    }
+
+    # 1. Ingest free data
+    try:
+        report["free_data"] = ingest_all_free_sources(db, max_leagues=20)
+        report["stage"] = "data_loaded"
+    except Exception as exc:
+        report["free_data"] = {"error": str(exc)}
+
+    # 2. Train models on full history
+    data = dataframe_from_db(db, max_age_days=None)
+    for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
+        try:
+            sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+            result = trainer(sport_data)
+            mv = register_model(db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
+            report["trained"].append({"sport": sport, **result, "active": mv.is_active})
+        except Exception as exc:
+            report["skipped"].append({"sport": sport, "reason": str(exc)})
+
+    report["stage"] = "models_trained"
+
+    # 3. Backtest
+    for sport in ("soccer", "basketball"):
+        try:
+            sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+            result = walk_forward_backtest(sport_data, sport)
+            run = BacktestRun(
+                sport=sport, model_type=result["model_type"],
+                split_strategy=result["split_strategy"],
+                sample_size=result["sample_size"], accuracy=result["accuracy"],
+                brier_score=result["brier_score"], log_loss=result["log_loss"],
+                metrics=result["metrics"],
+            )
+            db.add(run)
+            db.commit()
+            report["backtests"].append({"sport": sport, "accuracy": result["accuracy"], "sample_size": result["sample_size"]})
+        except Exception as exc:
+            report["skipped"].append({"stage": "backtest", "sport": sport, "reason": str(exc)})
+
+    # 4. Generate predictions
+    try:
+        report["generated_predictions"] = generate_today_predictions(db)
+    except Exception as exc:
+        report["skipped"].append({"stage": "predict", "reason": str(exc)})
+
+    # 5. Backfill odds
+    try:
+        history = dataframe_from_db(db, max_age_days=90)
+        soccer_engine = LoyalEdgeEngine(active_model_path(db, "soccer"))
+        generic_engine = GenericSportEngine()
+        today_ref = date.today()
+        missing = db.query(Fixture).filter(
+            func.date(Fixture.match_date) >= today_ref,
+            Fixture.home_odds == None, Fixture.draw_odds == None, Fixture.away_odds == None,
+        ).limit(500).all()
+        backfilled = 0
+        for fx in missing:
+            try:
+                if fx.sport == "soccer":
+                    items = soccer_engine.predict_soccer(history, {
+                        "sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team,
+                        "match_date": fx.match_date, "league": fx.league,
+                        "home_odds": None, "draw_odds": None, "away_odds": None,
+                    })
+                else:
+                    items = generic_engine.predict(history, {
+                        "sport": fx.sport, "home_team": fx.home_team,
+                        "away_team": fx.away_team, "match_date": fx.match_date,
+                    })
+                if _backfill_fixture_odds(db, fx, items):
+                    backfilled += 1
+            except Exception:
+                continue
+        db.commit()
+        report["odds_backfilled"] = backfilled
+    except Exception as exc:
+        report["skipped"].append({"stage": "odds_backfill", "reason": str(exc)})
+
+    report["stage"] = "complete"
+    return {"status": "complete", "report": report}
 
 
 @router.post("/sync-events", dependencies=[Depends(require_admin)])
