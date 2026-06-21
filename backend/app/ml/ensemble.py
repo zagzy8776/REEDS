@@ -77,6 +77,16 @@ class LoyalEdgeEngine:
     def predict_soccer(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
         home_team = normalize_team_name(fixture["home_team"], "soccer")
         away_team = normalize_team_name(fixture["away_team"], "soccer")
+        # Load insider signals if a DB session is available
+        insider: dict = {}
+        db = fixture.get("_db")
+        fixture_id = fixture.get("id")
+        if db and fixture_id:
+            try:
+                from app.services.insider_signals import get_fixture_signals
+                insider = get_fixture_signals(db, fixture_id)
+            except Exception:
+                pass
         f = features_for_fixture(
             history,
             home_team,
@@ -86,6 +96,7 @@ class LoyalEdgeEngine:
             fixture.get("home_odds"),
             fixture.get("draw_odds"),
             fixture.get("away_odds"),
+            insider=insider,
         )
         home_lam = max((f["home_goals_for"] + f["away_goals_against"]) / 2, 0.2)
         away_lam = max((f["away_goals_for"] + f["home_goals_against"]) / 2, 0.2)

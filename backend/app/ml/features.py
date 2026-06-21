@@ -370,6 +370,7 @@ def features_for_fixture(
     home_odds: float | None = None,
     draw_odds: float | None = None,
     away_odds: float | None = None,
+    insider: dict | None = None,
 ) -> dict:
     home_team = normalize_team_name(home_team, "soccer")
     away_team = normalize_team_name(away_team, "soccer")
@@ -605,6 +606,15 @@ def features_for_fixture(
         # --- Set-piece proxy ---
         "home_high_scoring_rate": condition(hh, lambda x: (x["gf"] + x["ga"]) >= 3, 0.45, 10),
         "away_high_scoring_rate": condition(ah, lambda x: (x["gf"] + x["ga"]) >= 3, 0.45, 10),
+        # --- Insider signals (sharp money / weather / injuries / referee) ---
+        "insider_sharp_home_move": float((insider or {}).get("insider_sharp_home_move", 0.0)),
+        "insider_sharp_away_move": float((insider or {}).get("insider_sharp_away_move", 0.0)),
+        "insider_weather_precip":  float((insider or {}).get("insider_weather_precip",  0.0)),
+        "insider_weather_wind":    float((insider or {}).get("insider_weather_wind",    0.0)),
+        "insider_home_injury":     float((insider or {}).get("insider_home_injury",     0.0)),
+        "insider_away_injury":     float((insider or {}).get("insider_away_injury",     0.0)),
+        "insider_referee_cards":   float((insider or {}).get("insider_referee_cards",   3.0)),
+        "insider_public_home_pct": float((insider or {}).get("insider_public_home_pct", 50.0)),
     }
 
 

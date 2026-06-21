@@ -421,6 +421,8 @@ def _get_model_probs(history: pd.DataFrame, fixture: dict) -> dict[str, float] |
                 db.close()
             engine = LoyalEdgeEngine(path)
             items = engine.predict_soccer(history, {
+                "id": fixture.get("id"),
+                "_db": db,
                 "sport": "soccer",
                 "home_team": fixture["home_team"],
                 "away_team": fixture["away_team"],

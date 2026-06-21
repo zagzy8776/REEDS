@@ -344,6 +344,8 @@ def generate_today_predictions(db: Session) -> int:
         try:
             if fx.sport == "soccer":
                 items = soccer_engine.predict_soccer(history, {
+                    "id": fx.id,
+                    "_db": db,
                     "sport": fx.sport,
                     "home_team": fx.home_team,
                     "away_team": fx.away_team,

@@ -173,7 +173,7 @@ def run_daily_learning_pipeline() -> dict:
             log.exception("Daily community prediction settlement failed")
             report["skipped"].append({"stage": "community_settle", "reason": str(exc)})
 
-        data = dataframe_from_db(db)
+        data = dataframe_from_db(db, max_age_days=None)
         # Normalise sport column to lowercase for bulletproof matching
         if "sport" in data.columns:
             data["sport"] = data["sport"].str.lower()

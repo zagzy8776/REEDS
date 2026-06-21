@@ -958,7 +958,7 @@ def diagnose_predict(db: Session = Depends(get_db)):
 
 @router.post("/backtest", dependencies=[Depends(require_admin)])
 def backtest(db: Session = Depends(get_db)):
-    data = dataframe_from_db(db)
+    data = dataframe_from_db(db, max_age_days=None)
     if "sport" in data.columns:
         data["sport"] = data["sport"].str.lower()
     completed, skipped = [], []
