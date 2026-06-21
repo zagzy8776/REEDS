@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 from app.db.models import BacktestRun, CommunityComment, CommunityPlay, CommunityReaction, Fixture, ModelVersion, OddsSnapshot, Prediction, UserPrediction, WinSlip
 from app.db.session import get_db
 from app.services.community import community_leaderboard, community_overview, fixture_consensus, prediction_social_context, experts_list, win_wall, daily_challenge, follow_user, user_profile
-from app.services.market_metrics import roi_clv_summary
+from app.services.market_metrics import roi_clv_summary, yield_by_tier
 from app.services.predictions import build_combo, compound_combo_probability, generate_today_predictions
 
 
@@ -574,6 +574,7 @@ def stats(db: Session = Depends(get_db)):
         "backtests": [{"sport": b.sport, "type": b.model_type, "strategy": b.split_strategy, "accuracy": b.accuracy, "brier_score": b.brier_score, "log_loss": b.log_loss, "sample_size": b.sample_size, "created_at": b.created_at, "metrics": b.metrics} for b in backtests],
         "data_quality": {"odds_snapshots": odds_snapshot_count, "note": "ROI and CLV become meaningful after published and closing odds are captured consistently."},
         "market_proof": roi_clv_summary(db),
+        "yield_tracking": yield_by_tier(db),
         "results": {
             "settled_picks": len(settled),
             "wins": sum(1 for _, _, won in settled if won),

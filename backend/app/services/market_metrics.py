@@ -114,3 +114,83 @@ def roi_clv_summary(db: Session) -> dict:
         ],
         "note": "ROI is calculated as flat 1-unit staking on supported settled markets. CLV requires matching closing odds snapshots.",
     }
+
+
+def yield_by_tier(db: Session) -> dict:
+    """Track win rate and yield per confidence tier for value bet monitoring.
+
+    Tiers based on prediction confidence:
+      Elite:    confidence >= 60%
+      Standard: 52% <= confidence < 60%
+      Sandbox:  confidence < 52%
+
+    Win rate below 55% on Elite tier over 200+ bets = tighten the certainty floor.
+    """
+    from app.db.models import Fixture, Prediction
+
+    rows = (
+        db.query(Prediction, Fixture)
+        .join(Fixture, Prediction.fixture_id == Fixture.id)
+        .filter(
+            Prediction.is_published == True,
+            Fixture.home_score != None,
+            Fixture.away_score != None,
+        )
+        .all()
+    )
+
+    tiers: dict[str, dict] = {
+        "elite":    {"label": "Elite (≥60%)", "bets": 0, "wins": 0, "profit": 0.0, "threshold": 60},
+        "standard": {"label": "Standard (52-59%)", "bets": 0, "wins": 0, "profit": 0.0, "threshold": 52},
+        "sandbox":  {"label": "Sandbox (<52%)", "bets": 0, "wins": 0, "profit": 0.0, "threshold": 0},
+    }
+
+    for pred, fx in rows:
+        won = prediction_won(pred, fx)
+        if won is None:
+            continue
+        snap = latest_snapshot(db, pred.id, "published")
+        odds = selected_decimal_odds(pred, snap) if snap else None
+
+        conf = pred.confidence
+        if conf >= 60:
+            tier_key = "elite"
+        elif conf >= 52:
+            tier_key = "standard"
+        else:
+            tier_key = "sandbox"
+
+        t = tiers[tier_key]
+        t["bets"] += 1
+        t["wins"] += 1 if won else 0
+        if odds:
+            t["profit"] += (odds - 1) if won else -1.0
+
+    result = []
+    for key, t in tiers.items():
+        bets = t["bets"]
+        wins = t["wins"]
+        profit = round(t["profit"], 2)
+        win_rate = round(wins / bets * 100, 1) if bets else 0.0
+        roi = round(profit / bets * 100, 2) if bets else 0.0
+        health = "✅ On track" if win_rate >= 55 and bets >= 20 else ("⚠️ Tighten floor" if win_rate < 50 and bets >= 50 else "📊 Building sample")
+        result.append({
+            "tier":      key,
+            "label":     t["label"],
+            "bets":      bets,
+            "wins":      wins,
+            "win_rate":  win_rate,
+            "profit_units": profit,
+            "roi_pct":   roi,
+            "health":    health,
+            "note":      "Tighten certainty floor if Elite win_rate < 55% over 200+ bets" if key == "elite" else "",
+        })
+
+    return {
+        "yield_by_tier": result,
+        "recommendation": next(
+            (f"⚠️ {t['label']} win rate {t['win_rate']}% below 55% — tighten floor"
+             for t in result if t["tier"] == "elite" and t["win_rate"] < 55 and t["bets"] >= 50),
+            "✅ Elite tier performing within expected range"
+        ),
+    }
