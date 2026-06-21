@@ -591,36 +591,51 @@ def job_status(db: Session = Depends(get_db)):
     """Colab worker polls this every 20s to check if training is needed.
 
     Returns trigger_train=True when:
-    - Soccer model has fewer than 1000 training rows (untrained)
-    - OR a manual retrain was requested via /trigger-train-job
-
-    Colab reacts to trigger_train=True, trains models, uploads, then resets flag.
+    - Manual retrain was requested via /trigger-train-job  (flag file)
+    - Soccer model rows < 1000  (never properly trained)
+    - DB has significantly more completed soccer rows than model was trained on
+      (e.g. new FDCO data downloaded — retrain to use it)
     """
-    from app.db.models import ModelVersion
+    from app.db.models import ModelVersion, Fixture as _Fixture
     import os
 
-    # Check flag file (simple filesystem flag — no DB overhead)
     flag_path = os.path.join(get_settings().model_dir, ".retrain_requested")
+    manual_trigger = os.path.exists(flag_path)
 
-    # Auto-trigger: model too small
     best = (
         db.query(ModelVersion)
         .filter(ModelVersion.sport == "soccer", ModelVersion.is_active == True)
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
-    auto_trigger = not best or best.sample_size < 1000
 
-    # Manual trigger via flag file
-    manual_trigger = os.path.exists(flag_path)
+    current_rows = best.sample_size if best else 0
 
-    trigger = auto_trigger or manual_trigger
+    # Count completed soccer fixtures in DB
+    db_soccer_rows = db.query(_Fixture).filter(
+        _Fixture.sport == "soccer",
+        _Fixture.home_score != None,
+        _Fixture.away_score != None,
+    ).count()
+
+    # Trigger if: no model, model too small, manual flag,
+    # OR DB has 20%+ more rows than model was trained on (new data available)
+    never_trained    = current_rows < 1000
+    new_data_available = db_soccer_rows > current_rows * 1.20
+    trigger = manual_trigger or never_trained or new_data_available
+
     return {
-        "trigger_train":    trigger,
-        "reason":           "model_too_small" if auto_trigger else ("manual_request" if manual_trigger else "none"),
-        "current_rows":     best.sample_size if best else 0,
-        "current_accuracy": round(best.accuracy * 100, 1) if best else 0,
-        "flag_file":        flag_path,
+        "trigger_train":       trigger,
+        "reason":              (
+            "manual_request"    if manual_trigger  else
+            "model_too_small"   if never_trained   else
+            "new_data_available" if new_data_available else
+            "none"
+        ),
+        "current_model_rows":  current_rows,
+        "db_soccer_rows":      db_soccer_rows,
+        "model_accuracy":      round(best.accuracy * 100, 1) if best else 0,
+        "flag_file":           flag_path,
     }
 
 
