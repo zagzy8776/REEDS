@@ -115,7 +115,7 @@ def fit_soccer_platt_calibrator(fixtures: pd.DataFrame, min_train_rows: int = 10
     if not raw_probs:
         raise ValueError("No calibration folds were produced")
 
-    calibrator = LogisticRegression(max_iter=1000, multi_class="ovr")
+    calibrator = LogisticRegression(max_iter=1000, solver="lbfgs")
     calibrator.fit(np.array(raw_probs), np.array(true_labels))
     settings = get_settings()
     Path(settings.model_dir).mkdir(parents=True, exist_ok=True)

@@ -256,3 +256,35 @@ class PushSubscription(Base):
     username: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     fixture_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)  # subscribed fixtures
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class InsiderSignal(Base):
+    """Insider market intelligence — injury news, sharp line movements, weather context.
+
+    Stored per-fixture so the ML feature pipeline can join them at prediction time.
+    signal_type values:
+      injury_home | injury_away   — key player out / doubtful
+      sharp_line_move             — significant closing-line movement toward a side
+      weather                     — wind / rain / extreme heat context
+      referee                     — referee card/foul rate tendencies
+      public_betting              — % of tickets vs money on each side
+    """
+
+    __tablename__ = "insider_signals"
+    __table_args__ = (
+        UniqueConstraint("fixture_id", "signal_type", "source", name="uq_insider_signal"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fixture_id: Mapped[int] = mapped_column(Integer, index=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    signal_type: Mapped[str] = mapped_column(String(40), index=True)
+    # Numeric value (e.g. line move = -0.5, wind_speed_mph = 22, card_rate = 3.4)
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Direction context: "home", "away", "neutral"
+    direction: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Human-readable description e.g. "Haaland doubtful - hamstring"
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source: Mapped[str] = mapped_column(String(80), default="manual")
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)

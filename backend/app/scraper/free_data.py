@@ -306,6 +306,18 @@ def ingest_all_free_sources(db: Session, max_leagues: int = 20) -> dict:
     except Exception as exc:
         report["ipl"] = {"error": str(exc)}
 
+    # --- Rugby ---
+    try:
+        report["rugby"] = ingest_rugby_openfootball(db)
+    except Exception as exc:
+        report["rugby"] = {"error": str(exc)}
+
+    # --- Baseball ---
+    try:
+        report["mlb"] = ingest_mlb_retrosheet(db)
+    except Exception as exc:
+        report["mlb"] = {"error": str(exc)}
+
     return report
 
 
@@ -826,4 +838,138 @@ def ingest_ipl_github(db: Session) -> dict:
         except Exception as exc:
             errors.append(f"ipl_github {url}: {exc}")
 
+    return {"total": total, "errors": errors[:5]}
+
+
+# ===========================================================================
+# RUGBY — Ultimate Rugby / open CSV sources (free)
+# ===========================================================================
+
+_RUGBY_URLS = [
+    # Six Nations + Rugby World Cup results from openfootball-style JSON
+    ("https://raw.githubusercontent.com/openfootball/rugby-union/master/2023/six-nations.json", "Six Nations", "2023"),
+    ("https://raw.githubusercontent.com/openfootball/rugby-union/master/2022/six-nations.json", "Six Nations", "2022"),
+    ("https://raw.githubusercontent.com/openfootball/rugby-union/master/2023/world-cup.json", "Rugby World Cup", "2023"),
+    ("https://raw.githubusercontent.com/openfootball/rugby-union/master/2019/world-cup.json", "Rugby World Cup", "2019"),
+]
+
+# Kaggle-style Super Rugby CSV (public mirror on GitHub)
+_SUPER_RUGBY_CSV = (
+    "https://raw.githubusercontent.com/Brescou/rugby-dataset/main/super_rugby.csv"
+)
+
+
+def ingest_rugby_openfootball(db: Session) -> dict:
+    """Ingest rugby union results from openfootball JSON feeds (free, no key)."""
+    total = 0
+    errors: list[str] = []
+    for url, league, season in _RUGBY_URLS:
+        try:
+            resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            rounds = data.get("rounds", []) or [{"matches": data.get("matches", [])}]
+            for rnd in rounds:
+                for match in rnd.get("matches", []) or []:
+                    try:
+                        parsed_date = pd.to_datetime(match.get("date"), errors="coerce")
+                        if pd.isna(parsed_date):
+                            continue
+                        t1 = match.get("team1", {})
+                        t2 = match.get("team2", {})
+                        home = t1.get("name") or t1.get("code", "")
+                        away = t2.get("name") or t2.get("code", "")
+                        if not home or not away:
+                            continue
+                        score = match.get("score", {})
+                        ft = score.get("ft", [None, None])
+                        fx = Fixture(
+                            sport="rugby",
+                            league=league,
+                            season=season,
+                            match_date=parsed_date.date(),
+                            home_team=resolve_team_name(db, home, "rugby", "openfootball_rugby"),
+                            away_team=resolve_team_name(db, away, "rugby", "openfootball_rugby"),
+                            home_score=_to_int_or_none(ft[0]) if ft and len(ft) > 0 else None,
+                            away_score=_to_int_or_none(ft[1]) if ft and len(ft) > 1 else None,
+                            source="openfootball_rugby",
+                            extra={"round": rnd.get("name")},
+                        )
+                        upsert_fixture(db, fx)
+                        total += 1
+                    except Exception:
+                        continue
+            db.commit()
+        except Exception as exc:
+            errors.append(f"rugby {url}: {exc}")
+    return {"total": total, "errors": errors[:5]}
+
+
+# ===========================================================================
+# MLB — Baseball Reference public season summaries (Retrosheet-style CSVs)
+# ===========================================================================
+
+_MLB_RETRO_BASE = "https://www.retrosheet.org/gamelogs"
+# Mirror: Sean Lahman's Baseball Archive on GitHub
+_MLB_GITHUB_CSV = (
+    "https://raw.githubusercontent.com/chadwickbureau/baseballdatabank/master/core/Games.csv"
+)
+
+
+def ingest_mlb_retrosheet(db: Session) -> dict:
+    """Ingest MLB game logs from the Chadwick Bureau public dataset (free)."""
+    total = 0
+    errors: list[str] = []
+    try:
+        resp = requests.get(_MLB_GITHUB_CSV, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        df = pd.read_csv(StringIO(resp.text), on_bad_lines="skip")
+
+        date_col  = next((c for c in ["date", "Date", "game_date"] if c in df.columns), None)
+        home_col  = next((c for c in ["home_team", "HomeTeam", "HmTm"] if c in df.columns), None)
+        away_col  = next((c for c in ["visiting_team", "AwayTeam", "VisTm"] if c in df.columns), None)
+        hs_col    = next((c for c in ["home_runs_scored", "HmRuns", "R_home"] if c in df.columns), None)
+        as_col    = next((c for c in ["visitor_runs_scored", "VisRuns", "R_vis"] if c in df.columns), None)
+        yr_col    = next((c for c in ["year_id", "year", "Year"] if c in df.columns), None)
+
+        if not all([date_col, home_col, away_col]):
+            return {"total": 0, "errors": ["MLB CSV missing required columns"]}
+
+        for _, row in df.iterrows():
+            try:
+                year = _to_int_or_none(row.get(yr_col)) if yr_col else None
+                if year and year < 2010:
+                    continue
+                parsed_date = pd.to_datetime(str(row[date_col]), errors="coerce")
+                if pd.isna(parsed_date):
+                    continue
+                home = str(row[home_col]).strip()
+                away = str(row[away_col]).strip()
+                if not home or home == "nan":
+                    continue
+                hs = _to_int_or_none(row.get(hs_col)) if hs_col else None
+                as_ = _to_int_or_none(row.get(as_col)) if as_col else None
+                if hs is None or as_ is None:
+                    continue
+                fx = Fixture(
+                    sport="baseball",
+                    league="MLB",
+                    season=str(parsed_date.year),
+                    match_date=parsed_date.date(),
+                    home_team=resolve_team_name(db, home, "baseball", "mlb_retrosheet"),
+                    away_team=resolve_team_name(db, away, "baseball", "mlb_retrosheet"),
+                    home_score=hs,
+                    away_score=as_,
+                    source="mlb_retrosheet",
+                    extra={"season": str(parsed_date.year)},
+                )
+                upsert_fixture(db, fx)
+                total += 1
+            except Exception:
+                continue
+        db.commit()
+    except Exception as exc:
+        errors.append(f"mlb_retrosheet: {exc}")
     return {"total": total, "errors": errors[:5]}

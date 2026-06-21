@@ -12,7 +12,7 @@ if __name__ == "__main__":
     init_db()
     db = SessionLocal()
     try:
-        data = dataframe_from_db(db)
+        data = dataframe_from_db(db, max_age_days=None)
         result = fit_soccer_platt_calibrator(data[data.get("sport", "soccer") == "soccer"].copy())
         print({"calibrated": result})
     finally:

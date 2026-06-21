@@ -12,7 +12,7 @@ from app.services.predictions import dataframe_from_db, generate_today_predictio
 init_db()
 db = SessionLocal()
 try:
-    data = dataframe_from_db(db)
+    data = dataframe_from_db(db, max_age_days=None)
     trained, skipped = [], []
     for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
         try:
