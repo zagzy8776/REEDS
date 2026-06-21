@@ -341,31 +341,27 @@ def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league:
 
 @router.get("/fixtures/status")
 def fixtures_status(db: Session = Depends(get_db)):
-    total = db.query(Fixture).count()
-    upcoming = db.query(Fixture).filter(func.date(Fixture.match_date) >= func.current_date()).count()
     today = db.query(Fixture).filter(func.date(Fixture.match_date) == func.current_date()).count()
-    results = db.query(Fixture).filter(func.date(Fixture.match_date) < func.current_date()).count()
-    with_scores = db.query(Fixture).filter(Fixture.home_score != None, Fixture.away_score != None).count()
-    with_odds = db.query(Fixture).filter((Fixture.home_odds != None) | (Fixture.draw_odds != None) | (Fixture.away_odds != None)).count()
-    latest = db.query(Fixture).order_by(Fixture.match_date.desc()).first()
-    api_sources = ["api_football", "api_basketball", "apifootball_com", "football_data_org", "sportmonks", "allsportsapi", "thesportsdb"]
-    api_rows = db.query(Fixture).filter(Fixture.source.in_(api_sources)).count()
-    sample_rows = db.query(Fixture).filter(Fixture.source == "sample").count()
+    upcoming = db.query(Fixture).filter(func.date(Fixture.match_date) > func.current_date()).count()
+    with_odds = db.query(Fixture).filter(
+        (Fixture.home_odds != None) | (Fixture.draw_odds != None) | (Fixture.away_odds != None)
+    ).count()
+    live = db.query(Fixture).filter(
+        func.date(Fixture.match_date) == func.current_date(),
+        Fixture.home_score != None,
+        Fixture.away_score != None,
+    ).count()
     sports = db.query(Fixture.sport).distinct().all()
+    api_sources = ["api_football", "api_basketball", "apifootball_com", "football_data_org", "sportmonks", "allsportsapi", "thesportsdb"]
+    has_live_feed = db.query(Fixture).filter(Fixture.source.in_(api_sources)).count() > 0
     return {
-        "checked_at": datetime.utcnow(),
-        "total": total,
-        "upcoming": upcoming,
+        "feed_status": "active" if has_live_feed else "connecting",
         "today": today,
-        "results": results,
-        "with_scores": with_scores,
+        "upcoming": upcoming,
+        "live_now": live,
         "with_odds": with_odds,
-        "api_rows": api_rows,
-        "sample_rows": sample_rows,
-        "sports": [row[0] for row in sports],
-        "latest_match_date": latest.match_date if latest else None,
-        "feed_health": "empty" if total == 0 else "needs_live_api" if api_rows == 0 else "active",
-        "public_note": "If this says empty or needs_live_api, add API keys on Render and run live ingestion/scheduler. No secret values are exposed here.",
+        "sports_covered": [row[0] for row in sports],
+        "checked_at": datetime.utcnow(),
     }
 
 

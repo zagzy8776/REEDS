@@ -838,19 +838,40 @@ def _canonical_sport_from_odds_key(sport_key: str) -> str:
 def refresh_odds_from_the_odds_api(db: Session, api_key: str | None, sport_keys: list[str]) -> dict:
     """Fetch current h2h odds from The Odds API and update matching fixtures.
 
-    This is called by the scheduler every 15 minutes alongside score sync so
-    live odds are kept fresh while a game is in progress. Works for all sports
-    configured in THE_ODDS_API_SPORT_KEYS (soccer, NBA, NFL, NHL, MLB, tennis…).
+    Auto-discovers all available in-season sport keys from the API when the
+    configured list is short (≤ 6 keys), so a minimal Render config still gets
+    full coverage. Works for soccer, NBA, NFL, NHL, MLB, tennis, cricket, rugby…
     """
 
-    if not api_key or not sport_keys:
+    if not api_key:
         return {"updated": 0, "sports_checked": []}
 
     client = TheOddsApiClient(api_key)
+
+    # Auto-discover all available sports when the configured list is small
+    effective_keys = list(sport_keys or [])
+    if len(effective_keys) <= 6:
+        try:
+            all_sports = client.sports()
+            if isinstance(all_sports, list):
+                discovered = [
+                    s["key"] for s in all_sports
+                    if isinstance(s, dict) and s.get("active") and s.get("key")
+                ]
+                if discovered:
+                    # Merge: keep configured keys + add discovered ones
+                    known = set(effective_keys)
+                    effective_keys = effective_keys + [k for k in discovered if k not in known]
+        except Exception:  # noqa: BLE001
+            pass  # fall back to configured keys only
+
+    if not effective_keys:
+        return {"updated": 0, "sports_checked": []}
+
     updated_total = 0
     sports_checked: list[str] = []
 
-    for sport_key in sport_keys:
+    for sport_key in effective_keys:
         canonical_sport = _canonical_sport_from_odds_key(sport_key)
         try:
             payload = client.h2h_odds(sport_key)
