@@ -1,7 +1,8 @@
 from datetime import date, timedelta
+import threading
 
 import pandas as pd
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -375,14 +376,29 @@ def ingest_free(max_leagues: int = 20, db: Session = Depends(get_db)):
 
 
 @router.post("/train-full", dependencies=[Depends(require_admin)])
-def train_full(db: Session = Depends(get_db)):
+def train_full(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """One-click full pipeline: ingest free data → train models → backtest → predict.
 
-    This is the recommended first-run command after deployment. Pulls ~60k rows
-    from football-data.co.uk, trains the full XGBoost+LightGBM+RF ensemble,
-    runs walk-forward backtest, generates today's predictions, and backfills odds.
-    Expect this to take 3-8 minutes on Render free tier.
+    Runs as a background task and returns immediately — training takes 5-15 min.
+    Poll GET /api/stats/backtest to see when new models appear.
     """
+    def _run_pipeline():
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            _train_full_pipeline(_db)
+        finally:
+            _db.close()
+
+    background_tasks.add_task(_run_pipeline)
+    return {
+        "status": "started",
+        "message": "Training pipeline running in background. Poll /api/stats/backtest to track progress.",
+        "stages": ["ingest_free_data", "train_soccer", "train_basketball", "train_tennis", "train_nfl", "train_nhl", "train_cricket", "backtest", "predict", "backfill_odds"],
+    }
+
+
+def _train_full_pipeline(db: Session) -> dict:
     from app.scraper.free_data import ingest_all_free_sources
     from app.ml.backtest import walk_forward_backtest
     from app.services.predictions import _backfill_fixture_odds, dataframe_from_db
