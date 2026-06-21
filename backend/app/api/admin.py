@@ -586,7 +586,63 @@ def sync_events(db: Session = Depends(get_db)):
     return {"synced": result}
 
 
-@router.post("/upload-model", dependencies=[Depends(require_admin)])
+@router.get("/job-status", dependencies=[Depends(require_admin)])
+def job_status(db: Session = Depends(get_db)):
+    """Colab worker polls this every 20s to check if training is needed.
+
+    Returns trigger_train=True when:
+    - Soccer model has fewer than 1000 training rows (untrained)
+    - OR a manual retrain was requested via /trigger-train-job
+
+    Colab reacts to trigger_train=True, trains models, uploads, then resets flag.
+    """
+    from app.db.models import ModelVersion
+    import os
+
+    # Check flag file (simple filesystem flag — no DB overhead)
+    flag_path = os.path.join(get_settings().model_dir, ".retrain_requested")
+
+    # Auto-trigger: model too small
+    best = (
+        db.query(ModelVersion)
+        .filter(ModelVersion.sport == "soccer", ModelVersion.is_active == True)
+        .order_by(ModelVersion.trained_at.desc())
+        .first()
+    )
+    auto_trigger = not best or best.sample_size < 1000
+
+    # Manual trigger via flag file
+    manual_trigger = os.path.exists(flag_path)
+
+    trigger = auto_trigger or manual_trigger
+    return {
+        "trigger_train":    trigger,
+        "reason":           "model_too_small" if auto_trigger else ("manual_request" if manual_trigger else "none"),
+        "current_rows":     best.sample_size if best else 0,
+        "current_accuracy": round(best.accuracy * 100, 1) if best else 0,
+        "flag_file":        flag_path,
+    }
+
+
+@router.post("/trigger-train-job", dependencies=[Depends(require_admin)])
+def trigger_train_job():
+    """Set the retrain flag — Colab worker will pick this up within 20 seconds."""
+    import os
+    flag_path = os.path.join(get_settings().model_dir, ".retrain_requested")
+    os.makedirs(os.path.dirname(flag_path), exist_ok=True)
+    with open(flag_path, "w") as f:
+        f.write("1")
+    return {"status": "flag_set", "message": "Colab worker will start training within 20 seconds."}
+
+
+@router.post("/clear-train-flag", dependencies=[Depends(require_admin)])
+def clear_train_flag():
+    """Called by Colab after training completes to reset the trigger flag."""
+    import os
+    flag_path = os.path.join(get_settings().model_dir, ".retrain_requested")
+    if os.path.exists(flag_path):
+        os.remove(flag_path)
+    return {"status": "flag_cleared"}
 async def upload_model(
     request: Request,
     db: Session = Depends(get_db),
