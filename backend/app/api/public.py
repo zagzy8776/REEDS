@@ -292,41 +292,56 @@ async def post_win_slip(request: Request, db: Session = Depends(get_db)):
 @router.get("/value-bets")
 def value_bets(
     sport: str | None = None,
+    tier: str = "elite",
     min_edge: float = 1.04,
     db: Session = Depends(get_db),
 ):
-    """Live value bets — SportyBet odds vs our model's predicted probabilities.
+    """Live value bets — SportyBet odds vs LOYAL EDGE model probabilities.
 
-    Returns only fixtures where the model finds a mathematical edge over the
-    bookmaker's fair (overround-stripped) probabilities. Includes Kelly Criterion
-    stake sizing. Edge minimum defaults to 4% (value_score > 1.04).
+    tier=elite    → only EPL/CL/La Liga etc, model ≥60% confident, live-verified (default)
+    tier=standard → all leagues, model ≥52% confident
+    tier=all      → everything including sandbox
+
+    Returns overround-stripped fair probabilities, proxy-xG signals,
+    Kelly Criterion stake sizing, and live odds verification status.
     """
     from app.services.value_bets import run_value_scan
     sports = [sport] if sport else None
-    return run_value_scan(db, sports=sports, min_edge=max(1.01, min(min_edge, 1.50)))
+    return run_value_scan(db, sports=sports, tier=tier, verify_live=(tier == "elite"))
 
 
 @router.get("/value-bets/explain")
 def value_bets_explain():
-    """Explains the value betting methodology used by LOYAL EDGE."""
+    """Four-layer methodology used by LOYAL EDGE value detection."""
     return {
-        "methodology": "LOYAL EDGE Value Detection",
-        "steps": [
-            "Fetch upcoming fixtures and odds from bookmakers",
-            "Strip bookmaker overround to find fair (zero-vig) probabilities",
-            "Run our ML model (trained on 60k+ historical matches) to get predicted probabilities",
-            "Calculate value score: model_probability × bookmaker_odds",
-            "Flag selections where value_score > 1.04 (4% positive expected value)",
-            "Size recommended stake using fractional Kelly Criterion (0.25× full Kelly)",
-        ],
-        "overround_example": {
-            "bookmaker_odds": {"home": 2.00, "draw": 3.40, "away": 4.00},
-            "raw_implied": {"home": "50.0%", "draw": "29.4%", "away": "25.0%"},
-            "total_implied": "104.4% (4.4% is the bookmaker margin)",
-            "fair_probabilities": {"home": "47.9%", "draw": "28.2%", "away": "23.9%"},
+        "methodology": "LOYAL EDGE Value Detection — 4-Layer Protection",
+        "layers": {
+            "1_certainty_floor": {
+                "description": "Model must be ≥60% confident for elite picks, ≥52% for standard. Eliminates high-edge/low-probability underdogs that lose 3 out of 4.",
+                "elite_threshold": "≥60% model probability AND ≥5% edge",
+                "standard_threshold": "≥52% model probability AND ≥4% edge",
+            },
+            "2_proxy_xg": {
+                "description": "Scorelines lie. We adjust model probabilities using proxy-xG metrics built from historical data: clean sheet rate, failed-to-score rate, goal diff momentum.",
+                "signals": ["goals_per_game", "clean_sheet_rate", "failed_to_score_rate", "btts_rate", "gd_momentum_last5_vs_last15"],
+            },
+            "3_live_verification": {
+                "description": "Before serving an elite pick, we re-ping SportyBet to confirm odds haven't moved. Stale cached odds from scheduler runs are caught and dropped.",
+                "when": "Applied to all elite picks at request time",
+            },
+            "4_elite_sandbox_split": {
+                "description": "Elite board = EPL, La Liga, Serie A, Bundesliga, Champions League, NBA, NFL only. Obscure leagues go to sandbox tab.",
+                "elite_leagues": sorted(list({"Premier League","La Liga","Serie A","Bundesliga","Ligue 1","Champions League","Europa League","NBA","NFL","MLB","NHL"})),
+            },
         },
-        "kelly_criterion": "f* = (b×p - q) / b, scaled by 0.25 (fractional Kelly). Never exceeds 5% of bankroll.",
-        "responsible_note": "Value bets identify mathematical edges. They do not guarantee wins. Always stake within your means.",
+        "overround_example": {
+            "bookmaker_odds":     {"home": 2.00, "draw": 3.40, "away": 4.00},
+            "raw_implied_total":  "104.4% (4.4% is the bookmaker margin)",
+            "fair_probabilities": {"home": "47.9%", "draw": "28.2%", "away": "23.9%"},
+            "value_condition":    "model_prob × bookmaker_odds > 1.05 for elite picks",
+        },
+        "kelly_criterion":    "f* = (b×p − q) / b × 0.25 (fractional Kelly). Never exceeds 5% of bankroll.",
+        "responsible_note":   "Value bets identify mathematical edges. They do not guarantee wins. Always stake within your means.",
     }
 
 
