@@ -18,6 +18,23 @@ def _condition_rate(hist: list[dict], predicate, default: float, window: int | N
     return sum(1 for x in rows if predicate(x)) / len(rows) if rows else default
 
 
+def _ema_dict(hist: list[dict], key: str, default: float, window: int = 5, alpha: float | None = None) -> float:
+    """Exponential moving average — recent matches weighted more heavily.
+
+    alpha defaults to 2/(window+1) (standard EMA span).
+    Higher alpha = more weight on recent games.
+    """
+    rows = hist[-window * 2:] if hist else []  # look back 2× window for stability
+    if not rows:
+        return default
+    a = alpha if alpha else 2.0 / (window + 1)
+    ema = float(rows[0].get(key, default))
+    for r in rows[1:]:
+        v = float(r.get(key, default))
+        ema = a * v + (1 - a) * ema
+    return round(ema, 4)
+
+
 def _elo_expected(a: float, b: float) -> float:
     return 1 / (1 + 10 ** ((b - a) / 400))
 
@@ -28,21 +45,41 @@ def _update_elo(a: float, b: float, score_a: float, k: float = 24) -> tuple[floa
     return a + k * (score_a - expected_a), b + k * ((1 - score_a) - expected_b)
 
 
-# --- New: H2H tracker for head-to-head records ---
+# --- H2H tracker — venue-aware ---
 def _update_h2h(h2h: dict, home: str, away: str, hs: int, aas: int) -> None:
+    """Track H2H results including venue-specific outcomes."""
     key = tuple(sorted((home, away)))
     if key not in h2h:
-        h2h[key] = {"home_wins": 0, "away_wins": 0, "draws": 0, "total": 0, "home_goals": 0, "away_goals": 0}
-    h2h[key]["total"] += 1
+        h2h[key] = {
+            "home_wins": 0, "away_wins": 0, "draws": 0, "total": 0,
+            "home_goals": 0, "away_goals": 0,
+            # Venue-specific: when 'home' was actually at home
+            "venue_home_wins": 0, "venue_away_wins": 0, "venue_draws": 0, "venue_total": 0,
+            # Last 3 meetings
+            "last3_home_goals": [], "last3_away_goals": [],
+        }
+    r = h2h[key]
+    r["total"] += 1
     if hs > aas:
-        if key[0] == home:
-            h2h[key]["home_wins"] += 1
-        else:
-            h2h[key]["away_wins"] += 1
+        r["home_wins" if key[0] == home else "away_wins"] += 1
     elif hs == aas:
-        h2h[key]["draws"] += 1
-    h2h[key]["home_goals"] += hs
-    h2h[key]["away_goals"] += aas
+        r["draws"] += 1
+    r["home_goals"] += hs
+    r["away_goals"] += aas
+    # Venue tracking (home = actual home team)
+    r["venue_total"] += 1
+    if hs > aas:
+        r["venue_home_wins"] += 1
+    elif hs == aas:
+        r["venue_draws"] += 1
+    else:
+        r["venue_away_wins"] += 1
+    # Rolling last-3
+    r["last3_home_goals"].append(hs)
+    r["last3_away_goals"].append(aas)
+    if len(r["last3_home_goals"]) > 3:
+        r["last3_home_goals"] = r["last3_home_goals"][-3:]
+        r["last3_away_goals"] = r["last3_away_goals"][-3:]
 
 
 def _h2h_features(h2h: dict, home: str, away: str) -> dict:
@@ -58,11 +95,24 @@ def _h2h_features(h2h: dict, home: str, away: str) -> dict:
     total = record["total"]
     home_wins = record["home_wins"] if key[0] == home else record["away_wins"]
     away_wins = record["away_wins"] if key[0] == home else record["home_wins"]
+    # Venue-adjusted rates
+    vt = record.get("venue_total", 0)
+    h_venue_wr = record.get("venue_home_wins", 0) / vt if vt >= 2 else 0.50
+    a_venue_wr = record.get("venue_away_wins", 0) / vt if vt >= 2 else 0.25
+    # Last-3 average goals
+    l3h = record.get("last3_home_goals", [])
+    l3a = record.get("last3_away_goals", [])
+    l3h_avg = sum(l3h) / len(l3h) if l3h else 1.3
+    l3a_avg = sum(l3a) / len(l3a) if l3a else 1.1
     return {
-        "h2h_home_win_rate": home_wins / total,
-        "h2h_draw_rate": record["draws"] / total,
-        "h2h_away_win_rate": away_wins / total,
-        "h2h_avg_total_goals": (record["home_goals"] + record["away_goals"]) / total,
+        "h2h_home_win_rate":       home_wins / total,
+        "h2h_draw_rate":           record["draws"] / total,
+        "h2h_away_win_rate":       away_wins / total,
+        "h2h_avg_total_goals":     (record["home_goals"] + record["away_goals"]) / total,
+        "h2h_home_venue_win_rate": h_venue_wr,
+        "h2h_away_venue_win_rate": a_venue_wr,
+        "h2h_last3_home_goals":    l3h_avg,
+        "h2h_last3_away_goals":    l3a_avg,
     }
 
 
@@ -184,6 +234,7 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
         h2h_feats = _h2h_features(h2h_tracker, home, away)
 
         rows.append({
+            # --- Core form ---
             "home_form_points": _avg_dict(hh, "points", 1.2),
             "away_form_points": _avg_dict(ah, "points", 1.2),
             "home_form_points_3": _avg_dict(hh, "points", 1.2, 3),
@@ -196,6 +247,16 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
             "away_draw_rate_5": _rate_dict(ah, "result", "D", 0.28, 5),
             "home_loss_rate_5": _rate_dict(hh, "result", "L", 0.34, 5),
             "away_loss_rate_5": _rate_dict(ah, "result", "L", 0.40, 5),
+            # --- EMA-weighted form (recent matches matter more) ---
+            "home_ema_form_5":  _ema_dict(hh, "points", 1.2, window=5),
+            "away_ema_form_5":  _ema_dict(ah, "points", 1.2, window=5),
+            "home_ema_form_10": _ema_dict(hh, "points", 1.2, window=10),
+            "away_ema_form_10": _ema_dict(ah, "points", 1.2, window=10),
+            "home_ema_goals_for":     _ema_dict(hh, "gf", 1.3, window=5),
+            "away_ema_goals_for":     _ema_dict(ah, "gf", 1.1, window=5),
+            "home_ema_goals_against": _ema_dict(hh, "ga", 1.2, window=5),
+            "away_ema_goals_against": _ema_dict(ah, "ga", 1.3, window=5),
+            # --- Scoring / conceding ---
             "home_goals_for": _avg_dict(hh, "gf", 1.3),
             "home_goals_against": _avg_dict(hh, "ga", 1.2),
             "away_goals_for": _avg_dict(ah, "gf", 1.1),
@@ -212,44 +273,69 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
             "away_failed_score_rate_5": _condition_rate(ah, lambda x: x["gf"] == 0, 0.30, 5),
             "home_unbeaten_rate_10": _condition_rate(hh, lambda x: x["result"] != "L", 0.62, 10),
             "away_unbeaten_rate_10": _condition_rate(ah, lambda x: x["result"] != "L", 0.55, 10),
+            # --- Elo ---
             "home_elo": normalized_home_elo,
             "away_elo": normalized_away_elo,
             "elo_diff": normalized_home_elo - normalized_away_elo,
+            "home_elo_home_only": home_elo_h * league_difficulty,
+            "away_elo_away_only": away_elo_a * league_difficulty,
+            "elo_diff_venue": (home_elo_h - away_elo_a) * league_difficulty,
+            # --- League / season context ---
             "league_strength": league_difficulty,
-            "home_implied": _implied_prob(r.get("home_odds")),
-            "draw_implied": _implied_prob(r.get("draw_odds")),
-            "away_implied": _implied_prob(r.get("away_odds")),
-            "odds_margin": _odds_margin(r.get("home_odds"), r.get("draw_odds"), r.get("away_odds")),
-
-            # --- NEW FEATURES ---
-            "home_form_vs_season": home_season_avg - 1.2,  # positive = better than average
+            "home_form_vs_season": home_season_avg - 1.2,
             "away_form_vs_season": away_season_avg - 1.2,
+            # --- Streaks ---
             "home_streak_len": min(home_current_streak_len, 10),
             "away_streak_len": min(away_current_streak_len, 10),
             "home_streak_winning": 1 if home_streak_type == "W" else 0,
             "away_streak_winning": 1 if away_streak_type == "W" else 0,
             "home_streak_losing": 1 if home_streak_type == "L" else 0,
             "away_streak_losing": 1 if away_streak_type == "L" else 0,
-            "home_elo_home_only": home_elo_h * league_difficulty,
-            "away_elo_away_only": away_elo_a * league_difficulty,
-            "h2h_home_win_rate": h2h_feats["h2h_home_win_rate"],
-            "h2h_draw_rate": h2h_feats["h2h_draw_rate"],
-            "h2h_away_win_rate": h2h_feats["h2h_away_win_rate"],
-            "h2h_avg_total_goals": h2h_feats["h2h_avg_total_goals"],
-            "home_scoring_consistency": _condition_rate(hh, lambda x: x["gf"] >= 1, 0.65, 5),  # scored in last 5?
+            # --- H2H (standard + venue-adjusted) ---
+            "h2h_home_win_rate":       h2h_feats["h2h_home_win_rate"],
+            "h2h_draw_rate":           h2h_feats["h2h_draw_rate"],
+            "h2h_away_win_rate":       h2h_feats["h2h_away_win_rate"],
+            "h2h_avg_total_goals":     h2h_feats["h2h_avg_total_goals"],
+            "h2h_home_venue_win_rate": h2h_feats.get("h2h_home_venue_win_rate", 0.50),
+            "h2h_away_venue_win_rate": h2h_feats.get("h2h_away_venue_win_rate", 0.25),
+            "h2h_last3_home_goals":    h2h_feats.get("h2h_last3_home_goals", 1.3),
+            "h2h_last3_away_goals":    h2h_feats.get("h2h_last3_away_goals", 1.1),
+            # --- Consistency ---
+            "home_scoring_consistency": _condition_rate(hh, lambda x: x["gf"] >= 1, 0.65, 5),
             "away_scoring_consistency": _condition_rate(ah, lambda x: x["gf"] >= 1, 0.60, 5),
             "home_conceding_consistency": _condition_rate(hh, lambda x: x["ga"] >= 1, 0.55, 5),
             "away_conceding_consistency": _condition_rate(ah, lambda x: x["ga"] >= 1, 0.60, 5),
+            # --- Last match ---
             "last_match_home_goals": hh[-1]["gf"] if hh else 1.3,
             "last_match_away_goals": ah[-1]["gf"] if ah else 1.1,
             "last_match_home_conceded": hh[-1]["ga"] if hh else 1.2,
             "last_match_away_conceded": ah[-1]["ga"] if ah else 1.3,
+            # --- Momentum ---
             "home_goal_diff_momentum": (
-                sum(x["gd"] for x in hh[-3:]) / 3 if len(hh) >= 3 else sum(x["gd"] for x in hh) / max(len(hh), 1)
+                sum(x["gd"] for x in hh[-3:]) / 3 if len(hh) >= 3
+                else sum(x["gd"] for x in hh) / max(len(hh), 1)
             ),
             "away_goal_diff_momentum": (
-                sum(x["gd"] for x in ah[-3:]) / 3 if len(ah) >= 3 else sum(x["gd"] for x in ah) / max(len(ah), 1)
+                sum(x["gd"] for x in ah[-3:]) / 3 if len(ah) >= 3
+                else sum(x["gd"] for x in ah) / max(len(ah), 1)
             ),
+            # --- Rest days (days since last match — proxy from row index gap) ---
+            "home_rest_days": 4.0,   # populated in features_for_fixture; default to avg
+            "away_rest_days": 4.0,
+            "home_back_to_back": 0,
+            "away_back_to_back": 0,
+            "rest_advantage": 0.0,
+            # --- Market signals ---
+            "home_implied": _implied_prob(r.get("home_odds")),
+            "draw_implied": _implied_prob(r.get("draw_odds")),
+            "away_implied": _implied_prob(r.get("away_odds")),
+            "odds_margin": _odds_margin(r.get("home_odds"), r.get("draw_odds"), r.get("away_odds")),
+            "sharp_home_move": 0.0,   # populated from odds snapshot history in features_for_fixture
+            "sharp_away_move": 0.0,
+            "clv_home_signal": 0.0,
+            # --- Set-piece / high-scoring proxy ---
+            "home_high_scoring_rate": _condition_rate(hh, lambda x: (x["gf"] + x["ga"]) >= 3, 0.45, 10),
+            "away_high_scoring_rate": _condition_rate(ah, lambda x: (x["gf"] + x["ga"]) >= 3, 0.45, 10),
         })
         y.append(normalize_result(hs, aas))
         home_entry = {"gf": hs, "ga": aas, "gd": hs - aas, "points": 3 if hs > aas else 1 if hs == aas else 0, "result": "W" if hs > aas else "D" if hs == aas else "L"}
@@ -396,7 +482,28 @@ def features_for_fixture(
     home_season_avg = compute_season_avg(hh)
     away_season_avg = compute_season_avg(ah)
 
+    # Rest days — days since last match for each team
+    def _rest_days(team: str) -> float:
+        if hist.empty or fixture_date is None:
+            return 4.0
+        hn = normalize_team_name(team, "soccer")
+        norm_home = hist.home_team.map(lambda x: normalize_team_name(str(x), "soccer"))
+        norm_away = hist.away_team.map(lambda x: normalize_team_name(str(x), "soccer"))
+        mask = (norm_home == hn) | (norm_away == hn)
+        team_games = hist[mask].copy()
+        if team_games.empty:
+            return 4.0
+        last_date = pd.to_datetime(team_games["match_date"].max(), errors="coerce")
+        cutoff = pd.to_datetime(fixture_date, errors="coerce")
+        if pd.isna(last_date) or pd.isna(cutoff):
+            return 4.0
+        return min(float((cutoff - last_date).days), 14.0)
+
+    home_rest = _rest_days(home_team)
+    away_rest = _rest_days(away_team)
+
     return {
+        # --- Core form ---
         "home_form_points": avg(hh, "points", 1.2),
         "away_form_points": avg(ah, "points", 1.2),
         "home_form_points_3": avg(hh, "points", 1.2, 3),
@@ -409,6 +516,16 @@ def features_for_fixture(
         "away_draw_rate_5": rate(ah, "result", "D", 0.28, 5),
         "home_loss_rate_5": rate(hh, "result", "L", 0.34, 5),
         "away_loss_rate_5": rate(ah, "result", "L", 0.40, 5),
+        # --- EMA form ---
+        "home_ema_form_5":  _ema_dict(hh, "points", 1.2, window=5),
+        "away_ema_form_5":  _ema_dict(ah, "points", 1.2, window=5),
+        "home_ema_form_10": _ema_dict(hh, "points", 1.2, window=10),
+        "away_ema_form_10": _ema_dict(ah, "points", 1.2, window=10),
+        "home_ema_goals_for":     _ema_dict(hh, "gf", 1.3, window=5),
+        "away_ema_goals_for":     _ema_dict(ah, "gf", 1.1, window=5),
+        "home_ema_goals_against": _ema_dict(hh, "ga", 1.2, window=5),
+        "away_ema_goals_against": _ema_dict(ah, "ga", 1.3, window=5),
+        # --- Scoring / conceding ---
         "home_goals_for": avg(hh, "gf", 1.3),
         "home_goals_against": avg(hh, "ga", 1.2),
         "away_goals_for": avg(ah, "gf", 1.1),
@@ -425,44 +542,69 @@ def features_for_fixture(
         "away_failed_score_rate_5": condition(ah, lambda x: x["gf"] == 0, 0.30, 5),
         "home_unbeaten_rate_10": condition(hh, lambda x: x["result"] != "L", 0.62, 10),
         "away_unbeaten_rate_10": condition(ah, lambda x: x["result"] != "L", 0.55, 10),
+        # --- Elo ---
         "home_elo": normalized_home_elo,
         "away_elo": normalized_away_elo,
         "elo_diff": normalized_home_elo - normalized_away_elo,
+        "home_elo_home_only": home_elo_h * league_difficulty,
+        "away_elo_away_only": away_elo_a * league_difficulty,
+        "elo_diff_venue": (home_elo_h - away_elo_a) * league_difficulty,
+        # --- League / season ---
         "league_strength": league_difficulty,
-        "home_implied": _implied_prob(home_odds),
-        "draw_implied": _implied_prob(draw_odds),
-        "away_implied": _implied_prob(away_odds),
-        "odds_margin": _odds_margin(home_odds, draw_odds, away_odds),
-
-        # --- NEW FEATURES ---
         "home_form_vs_season": home_season_avg - 1.2,
         "away_form_vs_season": away_season_avg - 1.2,
+        # --- Streaks ---
         "home_streak_len": min(home_streak_len, 10),
         "away_streak_len": min(away_streak_len, 10),
         "home_streak_winning": 1 if home_streak_type == "W" else 0,
         "away_streak_winning": 1 if away_streak_type == "W" else 0,
         "home_streak_losing": 1 if home_streak_type == "L" else 0,
         "away_streak_losing": 1 if away_streak_type == "L" else 0,
-        "home_elo_home_only": home_elo_h * league_difficulty,
-        "away_elo_away_only": away_elo_a * league_difficulty,
-        "h2h_home_win_rate": h2h_feats["h2h_home_win_rate"],
-        "h2h_draw_rate": h2h_feats["h2h_draw_rate"],
-        "h2h_away_win_rate": h2h_feats["h2h_away_win_rate"],
-        "h2h_avg_total_goals": h2h_feats["h2h_avg_total_goals"],
+        # --- H2H (standard + venue) ---
+        "h2h_home_win_rate":       h2h_feats.get("h2h_home_win_rate", 0.50),
+        "h2h_draw_rate":           h2h_feats.get("h2h_draw_rate", 0.25),
+        "h2h_away_win_rate":       h2h_feats.get("h2h_away_win_rate", 0.25),
+        "h2h_avg_total_goals":     h2h_feats.get("h2h_avg_total_goals", 2.5),
+        "h2h_home_venue_win_rate": h2h_feats.get("h2h_home_venue_win_rate", 0.50),
+        "h2h_away_venue_win_rate": h2h_feats.get("h2h_away_venue_win_rate", 0.25),
+        "h2h_last3_home_goals":    h2h_feats.get("h2h_last3_home_goals", 1.3),
+        "h2h_last3_away_goals":    h2h_feats.get("h2h_last3_away_goals", 1.1),
+        # --- Consistency ---
         "home_scoring_consistency": condition(hh, lambda x: x["gf"] >= 1, 0.65, 5),
         "away_scoring_consistency": condition(ah, lambda x: x["gf"] >= 1, 0.60, 5),
         "home_conceding_consistency": condition(hh, lambda x: x["ga"] >= 1, 0.55, 5),
         "away_conceding_consistency": condition(ah, lambda x: x["ga"] >= 1, 0.60, 5),
+        # --- Last match ---
         "last_match_home_goals": hh[-1]["gf"] if hh else 1.3,
         "last_match_away_goals": ah[-1]["gf"] if ah else 1.1,
         "last_match_home_conceded": hh[-1]["ga"] if hh else 1.2,
         "last_match_away_conceded": ah[-1]["ga"] if ah else 1.3,
+        # --- Momentum ---
         "home_goal_diff_momentum": (
-            sum(x["gd"] for x in hh[-3:]) / 3 if len(hh) >= 3 else sum(x["gd"] for x in hh) / max(len(hh), 1)
+            sum(x["gd"] for x in hh[-3:]) / 3 if len(hh) >= 3
+            else sum(x["gd"] for x in hh) / max(len(hh), 1)
         ),
         "away_goal_diff_momentum": (
-            sum(x["gd"] for x in ah[-3:]) / 3 if len(ah) >= 3 else sum(x["gd"] for x in ah) / max(len(ah), 1)
+            sum(x["gd"] for x in ah[-3:]) / 3 if len(ah) >= 3
+            else sum(x["gd"] for x in ah) / max(len(ah), 1)
         ),
+        # --- Rest days / fatigue ---
+        "home_rest_days":    home_rest,
+        "away_rest_days":    away_rest,
+        "home_back_to_back": 1 if home_rest <= 2 else 0,
+        "away_back_to_back": 1 if away_rest <= 2 else 0,
+        "rest_advantage":    round(home_rest - away_rest, 1),
+        # --- Market signals ---
+        "home_implied":   _implied_prob(home_odds),
+        "draw_implied":   _implied_prob(draw_odds),
+        "away_implied":   _implied_prob(away_odds),
+        "odds_margin":    _odds_margin(home_odds, draw_odds, away_odds),
+        "sharp_home_move": 0.0,
+        "sharp_away_move": 0.0,
+        "clv_home_signal": 0.0,
+        # --- Set-piece proxy ---
+        "home_high_scoring_rate": condition(hh, lambda x: (x["gf"] + x["ga"]) >= 3, 0.45, 10),
+        "away_high_scoring_rate": condition(ah, lambda x: (x["gf"] + x["ga"]) >= 3, 0.45, 10),
     }
 
 
