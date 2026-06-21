@@ -314,14 +314,19 @@ def action_model_status():
         return f"❌ {e}", _get_log()
 
 
-def action_trigger_live_ingest():
-    """Tell Render to pull today's live fixtures from its API feeds."""
+def action_wake_render():
+    """Ping Render's /api/wake to keep it alive and sync live scores."""
     try:
-        res = requests.post(f"{RENDER_URL}/api/admin/ingest-live",
-                            headers={"x-admin-key": ADMIN_KEY}, timeout=120)
-        msg = f"Status {res.status_code}: {res.text[:300]}"
+        resp = requests.get(f"{RENDER_URL}/api/wake", timeout=30)
+        if resp.ok:
+            d = resp.json()
+            msg = (f"✅ Render is awake\n"
+                   f"  scores synced: {d.get('scores_synced', {})}\n"
+                   f"  predictions generated: {d.get('generated', 0)}")
+        else:
+            msg = f"⚠️  Render returned {resp.status_code}"
     except Exception as e:
-        msg = f"❌ {e}"
+        msg = f"❌ Could not reach Render: {e}"
     _log(msg)
     return msg, _get_log()
 
@@ -407,7 +412,7 @@ Trains all sport models directly against Neon and pushes them live to Render.
         btn_db     = gr.Button("🔍 Check DB",          variant="secondary")
         btn_status = gr.Button("📈 Model Status",      variant="secondary")
         btn_log    = gr.Button("🔃 Refresh Log",       variant="secondary")
-        btn_live   = gr.Button("📡 Ingest Live Fixtures (Render)", variant="secondary")
+        btn_wake   = gr.Button("🌐 Wake Render",       variant="secondary")
 
     # Row 2 — data ingestion
     gr.Markdown("### 📥 Ingest Historical Data (runs directly against Neon — no Render needed)")
@@ -429,7 +434,7 @@ Trains all sport models directly against Neon and pushes them live to Render.
     btn_db.click(action_check_db,           outputs=[result_box, log_box])
     btn_status.click(action_model_status,   outputs=[result_box, log_box])
     btn_log.click(action_refresh_log,       outputs=[log_box])
-    btn_live.click(action_trigger_live_ingest, outputs=[result_box, log_box])
+    btn_wake.click(action_wake_render,      outputs=[result_box, log_box])
     btn_ingest.click(action_ingest_free,    inputs=[ingest_slider], outputs=[result_box, log_box])
     btn_train.click(action_train,           outputs=[result_box, log_box])
     btn_poll.click(action_toggle_poll,      outputs=[result_box, log_box])
