@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+import pandas as pd
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -406,8 +407,10 @@ def train_full(db: Session = Depends(get_db)):
     except Exception as exc:
         report["free_data"] = {"error": str(exc)}
 
-    # 2. Train models on full history
+    # 2. Train models on full history — soccer, basketball, + all other sports
     data = dataframe_from_db(db, max_age_days=None)
+    from app.ml.train import train_generic_sport_model
+
     for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
         try:
             sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
@@ -417,6 +420,17 @@ def train_full(db: Session = Depends(get_db)):
         except Exception as exc:
             report["skipped"].append({"sport": sport, "reason": str(exc)})
 
+    # Generic binary model for all other sports with enough data
+    for sport in ("tennis", "american_football", "hockey", "cricket", "rugby", "baseball"):
+        try:
+            sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else pd.DataFrame()
+            if sport_data.empty:
+                continue
+            result = train_generic_sport_model(sport_data, sport)
+            mv = register_model(db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
+            report["trained"].append({"sport": sport, **result, "active": mv.is_active})
+        except Exception as exc:
+            report["skipped"].append({"sport": sport, "reason": str(exc)})
     report["stage"] = "models_trained"
 
     # 3. Backtest

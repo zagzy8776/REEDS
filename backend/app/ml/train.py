@@ -480,3 +480,184 @@ def train_basketball_model(fixtures: pd.DataFrame) -> dict:
         "model_type": model_type_str,
         "split": "chronological_70_30_ensemble",
     }
+
+
+# ---------------------------------------------------------------------------
+# Generic binary sport trainer (tennis, american_football, hockey, cricket)
+# Uses the same features as basketball: win rate, margin, elo, h2h
+# ---------------------------------------------------------------------------
+
+GENERIC_SPORT_FEATURES = [
+    "home_win_rate", "away_win_rate",
+    "home_margin", "away_margin",
+    "home_margin_5", "away_margin_5",
+    "home_elo", "away_elo", "elo_diff",
+    "h2h_home_win_rate",
+    "home_streak_len", "away_streak_len",
+    "home_streak_wins", "away_streak_wins",
+    "home_for_avg", "away_for_avg",
+    "home_against_avg", "away_against_avg",
+    "home_implied", "away_implied",
+]
+
+
+def _build_generic_features(fixtures: pd.DataFrame, sport: str) -> tuple[pd.DataFrame, pd.Series]:
+    """Build binary win/loss features for any sport using score-based metrics."""
+    from app.utils.team_names import normalize_team_name
+
+    df = fixtures.copy()
+    if "sport" in df.columns:
+        df = df[df["sport"] == sport]
+    df = df.sort_values("match_date").copy()
+
+    rows, y = [], []
+    team_hist: dict[str, list] = {}
+    team_elo: dict[str, float] = {}
+    h2h: dict[tuple, dict] = {}
+
+    def _elo_update(ra, rb, score_a, k=20):
+        ea = 1 / (1 + 10 ** ((rb - ra) / 400))
+        return ra + k * (score_a - ea), rb + k * ((1 - score_a) - (1 - ea))
+
+    for _, r in df.iterrows():
+        if pd.isna(r.get("home_score")) or pd.isna(r.get("away_score")):
+            continue
+        home = normalize_team_name(str(r["home_team"]), sport)
+        away = normalize_team_name(str(r["away_team"]), sport)
+        hs, as_ = float(r["home_score"]), float(r["away_score"])
+        home_won = 1 if hs > as_ else 0
+
+        hh = team_hist.get(home, [])[-10:]
+        ah = team_hist.get(away, [])[-10:]
+        h_elo = team_elo.get(home, 1500.0)
+        a_elo = team_elo.get(away, 1500.0)
+
+        def wrate(hist):
+            return sum(x["w"] for x in hist) / len(hist) if hist else 0.5
+
+        def margin_avg(hist, n=None):
+            sample = hist[-n:] if n else hist
+            return sum(x["m"] for x in sample) / len(sample) if sample else 0.0
+
+        def for_avg(hist):
+            return sum(x["f"] for x in hist) / len(hist) if hist else 0.0
+
+        def against_avg(hist):
+            return sum(x["a"] for x in hist) / len(hist) if hist else 0.0
+
+        # H2H
+        key = tuple(sorted((home, away)))
+        h2h_rec = h2h.get(key, {"home_w": 0, "total": 0})
+        h2h_rate = (h2h_rec["home_w"] / h2h_rec["total"]) if h2h_rec["total"] >= 2 else 0.5
+
+        # Streak
+        def streak(hist):
+            if not hist:
+                return 0, 0
+            last = hist[-1]["w"]
+            n = 0
+            for x in reversed(hist):
+                if x["w"] == last:
+                    n += 1
+                else:
+                    break
+            return n, int(last)
+
+        h_sl, h_sw = streak(hh)
+        a_sl, a_sw = streak(ah)
+
+        rows.append({
+            "home_win_rate": wrate(hh),
+            "away_win_rate": wrate(ah),
+            "home_margin": margin_avg(hh),
+            "away_margin": margin_avg(ah),
+            "home_margin_5": margin_avg(hh, 5),
+            "away_margin_5": margin_avg(ah, 5),
+            "home_elo": h_elo,
+            "away_elo": a_elo,
+            "elo_diff": h_elo - a_elo,
+            "h2h_home_win_rate": h2h_rate,
+            "home_streak_len": min(h_sl, 10),
+            "away_streak_len": min(a_sl, 10),
+            "home_streak_wins": h_sw,
+            "away_streak_wins": a_sw,
+            "home_for_avg": for_avg(hh),
+            "away_for_avg": for_avg(ah),
+            "home_against_avg": against_avg(hh),
+            "away_against_avg": against_avg(ah),
+            "home_implied": (1 / float(r["home_odds"])) if r.get("home_odds") and float(r["home_odds"]) > 0 else 0.0,
+            "away_implied": (1 / float(r["away_odds"])) if r.get("away_odds") and float(r["away_odds"]) > 0 else 0.0,
+        })
+        y.append(home_won)
+
+        entry_h = {"w": home_won, "m": hs - as_, "f": hs, "a": as_}
+        entry_a = {"w": 1 - home_won, "m": as_ - hs, "f": as_, "a": hs}
+        team_hist.setdefault(home, []).append(entry_h)
+        team_hist.setdefault(away, []).append(entry_a)
+        team_elo[home], team_elo[away] = _elo_update(h_elo, a_elo, home_won)
+
+        if key not in h2h:
+            h2h[key] = {"home_w": 0, "total": 0}
+        h2h[key]["total"] += 1
+        if (key[0] == home and home_won) or (key[0] == away and not home_won):
+            h2h[key]["home_w"] += 1
+
+    return pd.DataFrame(rows).fillna(0), pd.Series(y)
+
+
+def train_generic_sport_model(fixtures: pd.DataFrame, sport: str) -> dict:
+    """Train a binary classifier for any sport with score data.
+
+    Works for tennis, american_football, hockey, cricket, rugby, etc.
+    Requires at least min_training_rows completed fixtures for the sport.
+    """
+    settings = get_settings()
+
+    X, y = _build_generic_features(fixtures, sport)
+    if len(X) < settings.min_training_rows:
+        raise ValueError(f"Need at least {settings.min_training_rows} rows for {sport}, got {len(X)}")
+
+    X = X.reindex(columns=GENERIC_SPORT_FEATURES, fill_value=0)
+    split_index = max(int(len(X) * 0.7), settings.min_training_rows)
+    if split_index >= len(X):
+        split_index = len(X) - max(10, int(len(X) * 0.15))
+    X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+    y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
+
+    if len(X_test) < 5:
+        raise ValueError(f"Test set too small ({len(X_test)}) for {sport}")
+
+    labels = [0, 1]
+    factories = [(n, f) for n, f in _build_model_factories() if n != "gradient_boosting"]
+
+    if len(X) >= 60000:
+        result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, sport)
+    else:
+        result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=10)
+
+    Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
+    model_type_str = "+".join(result["model_types"])
+    path = f"{settings.model_dir}/{sport}_ensemble_{model_type_str}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.joblib"
+
+    bundle = {
+        "models": result["models"],
+        "meta_learner": result["meta_learner"],
+        "features": GENERIC_SPORT_FEATURES,
+        "model_types": result["model_types"],
+        "weights": result["weights"],
+        "accuracy": result["accuracy"],
+        "sample_size": len(X),
+        "sport": sport,
+        "split": "chronological_70_30_ensemble",
+        "labels": labels,
+    }
+    joblib.dump(bundle, path)
+
+    return {
+        "path": path,
+        "accuracy": result["accuracy"],
+        "sample_size": len(X),
+        "model_type": model_type_str,
+        "sport": sport,
+        "split": "chronological_70_30_ensemble",
+    }

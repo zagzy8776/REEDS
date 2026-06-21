@@ -162,6 +162,23 @@ def run_daily_learning_pipeline() -> dict:
                 log.exception("Daily %s training failed", sport)
                 report["skipped"].append({"stage": "train", "sport": sport, "reason": str(exc)})
 
+        # Train generic binary models for all other sports with enough data
+        try:
+            from app.ml.train import train_generic_sport_model
+            for sport in ("tennis", "american_football", "hockey", "cricket", "rugby", "baseball"):
+                try:
+                    sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else None
+                    if sport_data is None or sport_data.empty:
+                        continue
+                    result = train_generic_sport_model(sport_data, sport)
+                    mv = register_model(db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
+                    report["trained"].append({"sport": sport, **result, "active": mv.is_active})
+                except Exception as exc:  # noqa: BLE001
+                    report["skipped"].append({"stage": "train", "sport": sport, "reason": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Generic sport training failed")
+            report["skipped"].append({"stage": "train_generic", "reason": str(exc)})
+
         try:
             soccer_data = data[data["sport"] == "soccer"].copy() if "sport" in data.columns else data.copy()
             report["calibrated"] = fit_soccer_platt_calibrator(soccer_data)
