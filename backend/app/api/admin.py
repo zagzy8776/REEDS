@@ -253,6 +253,8 @@ def train(db: Session = Depends(get_db)):
             for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
                 try:
                     sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+                    # Pass only completed fixtures so trainers see the real row count
+                    sport_data = sport_data[sport_data["home_score"].notna() & sport_data["away_score"].notna()].copy()
                     result = trainer(sport_data)
                     register_model(_db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
                 except Exception as exc:
@@ -261,6 +263,10 @@ def train(db: Session = Depends(get_db)):
                 try:
                     sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else None
                     if sport_data is None or sport_data.empty:
+                        continue
+                    # Pass only completed fixtures
+                    sport_data = sport_data[sport_data["home_score"].notna() & sport_data["away_score"].notna()].copy()
+                    if sport_data.empty:
                         continue
                     result = train_generic_sport_model(sport_data, sport)
                     register_model(_db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
@@ -503,6 +509,8 @@ def _train_full_pipeline(db: Session) -> dict:
     for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
         try:
             sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+            # Pass only completed fixtures so trainers see the real row count
+            sport_data = sport_data[sport_data["home_score"].notna() & sport_data["away_score"].notna()].copy()
             result = trainer(sport_data)
             mv = register_model(db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
             report["trained"].append({"sport": sport, **result, "active": mv.is_active})
@@ -513,6 +521,10 @@ def _train_full_pipeline(db: Session) -> dict:
     for sport in ("tennis", "american_football", "hockey", "cricket", "rugby", "baseball"):
         try:
             sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else pd.DataFrame()
+            if sport_data.empty:
+                continue
+            # Pass only completed fixtures
+            sport_data = sport_data[sport_data["home_score"].notna() & sport_data["away_score"].notna()].copy()
             if sport_data.empty:
                 continue
             result = train_generic_sport_model(sport_data, sport)
