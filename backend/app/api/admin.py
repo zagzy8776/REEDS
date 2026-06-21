@@ -1,5 +1,8 @@
 from datetime import date, timedelta
+import logging
 import threading
+
+log = logging.getLogger(__name__)
 
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
@@ -231,18 +234,43 @@ def coverage_seed(db: Session = Depends(get_db)):
 
 @router.post("/train", dependencies=[Depends(require_admin)])
 def train(db: Session = Depends(get_db)):
-    # Load ALL history for training - no date cap
-    data = dataframe_from_db(db, max_age_days=None)
-    trained, skipped = [], []
-    for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
+    """Train models in a background thread — returns immediately, no timeout.
+
+    Trains soccer + basketball + all other sports with enough data.
+    Poll GET /api/admin/training-status or GET /api/stats/backtest to see results.
+    """
+    import threading
+    from app.db.session import SessionLocal
+
+    def _run():
+        _db = SessionLocal()
         try:
-            sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
-            result = trainer(sport_data)
-            mv = register_model(db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
-            trained.append({"sport": sport, **result, "active": mv.is_active})
-        except ValueError as exc:
-            skipped.append({"sport": sport, "reason": str(exc)})
-    return {"status": "trained", "trained": trained, "skipped": skipped}
+            data = dataframe_from_db(_db, max_age_days=None)
+            from app.ml.train import train_generic_sport_model
+            for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
+                try:
+                    sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+                    result = trainer(sport_data)
+                    register_model(_db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
+                except Exception as exc:
+                    log.exception("Background train failed for %s: %s", sport, exc)
+            for sport in ("tennis", "american_football", "hockey", "cricket", "rugby", "baseball"):
+                try:
+                    sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else None
+                    if sport_data is None or sport_data.empty:
+                        continue
+                    result = train_generic_sport_model(sport_data, sport)
+                    register_model(_db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
+                except Exception as exc:
+                    log.exception("Background train failed for %s: %s", sport, exc)
+        finally:
+            _db.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {
+        "status": "training_started",
+        "message": "Training all sports in background. Poll /api/admin/training-status to see when complete.",
+    }
 
 
 @router.post("/ingest-historical", dependencies=[Depends(require_admin)])
