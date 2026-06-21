@@ -888,15 +888,13 @@ def predict(db: Session = Depends(get_db)):
 
 @router.post("/refresh-signals", dependencies=[Depends(require_admin)])
 def refresh_signals(days_ahead: int = 3, db: Session = Depends(get_db)):
-    """Refresh insider signals for upcoming fixtures.
-
-    Refreshes: sharp line moves, weather forecasts, injury flags, referee card rates,
-    and public betting percentages. Call this after ingesting new odds or fixtures.
-    """
+    """Refresh insider signals + line efficiency for upcoming fixtures."""
     from app.services.insider_signals import refresh_insider_signals
+    from app.services.market_intelligence import refresh_line_efficiency
     settings = get_settings()
-    result = refresh_insider_signals(db, odds_api_key=settings.the_odds_api_key, days_ahead=days_ahead)
-    return {"status": "done", "signals_refreshed": result}
+    signals = refresh_insider_signals(db, odds_api_key=settings.the_odds_api_key, days_ahead=days_ahead)
+    line_eff = refresh_line_efficiency(db, days_ahead=days_ahead)
+    return {"status": "done", "signals": signals, "line_efficiency": line_eff}
 
 
 @router.post("/add-signal", dependencies=[Depends(require_admin)])

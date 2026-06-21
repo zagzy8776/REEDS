@@ -409,32 +409,35 @@ def refresh_insider_signals(
 def get_fixture_signals(db: Session, fixture_id: int) -> dict:
     """Return a flat feature dict from all InsiderSignal rows for a fixture.
 
-    Keys match the feature names expected by the ML feature pipeline:
-      insider_sharp_home_move  — home-side implied prob line move (+ = sharpening)
-      insider_sharp_away_move  — away-side line move
-      insider_weather_precip   — precipitation mm
-      insider_weather_wind     — wind km/h
-      insider_home_injury      — severity of home key player injury (0–1)
-      insider_away_injury      — severity of away key player injury (0–1)
-      insider_referee_cards    — avg cards/match for assigned referee
-      insider_public_home_pct  — % of public bets on home side
+    Merges insider signals + line efficiency market intelligence signals.
     """
-    signals = (
-        db.query(InsiderSignal)
-        .filter(InsiderSignal.fixture_id == fixture_id)
-        .all()
-    )
-
+    # ── Line efficiency (market intelligence) ────────────────────────────
+    from app.services.market_intelligence import build_line_efficiency_features
     features: dict[str, float] = {
         "insider_sharp_home_move": 0.0,
         "insider_sharp_away_move": 0.0,
+        "insider_clv_home":        0.0,
+        "insider_steam":           0.0,
+        "insider_opening_home_prob": 0.0,
         "insider_weather_precip":  0.0,
         "insider_weather_wind":    0.0,
         "insider_home_injury":     0.0,
         "insider_away_injury":     0.0,
-        "insider_referee_cards":   3.0,   # league average default
+        "insider_referee_cards":   3.0,
         "insider_public_home_pct": 50.0,
     }
+    # Overlay line efficiency
+    features.update(build_line_efficiency_features(db, fixture_id))
+
+    # ── Other insider signals (weather, injuries, referee, public betting) ─
+    signals = (
+        db.query(InsiderSignal)
+        .filter(
+            InsiderSignal.fixture_id == fixture_id,
+            InsiderSignal.signal_type.notin_(["sharp_line_move"]),  # already handled above
+        )
+        .all()
+    )
 
     for sig in signals:
         v = sig.value or 0.0

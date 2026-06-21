@@ -105,14 +105,17 @@ FEATURES = [
     "home_high_scoring_rate",   # % games with 3+ goals (proxy for set-piece value)
     "away_high_scoring_rate",
     # --- Insider signals (sharp money, weather, injuries, referee) ---
-    "insider_sharp_home_move",  # closing-line value — home side
-    "insider_sharp_away_move",  # closing-line value — away side
-    "insider_weather_precip",   # precipitation mm (high = fewer goals)
-    "insider_weather_wind",     # wind speed km/h (high = fewer goals)
-    "insider_home_injury",      # key player injury severity 0-1 (home)
-    "insider_away_injury",      # key player injury severity 0-1 (away)
-    "insider_referee_cards",    # referee avg cards/match
-    "insider_public_home_pct",  # % of public bets on home side
+    "insider_sharp_home_move",   # home implied prob move open→close
+    "insider_sharp_away_move",   # away implied prob move open→close
+    "insider_clv_home",          # closing-line value proxy
+    "insider_steam",             # 1 = rapid line move (<2h, ≥3%)
+    "insider_opening_home_prob", # opening implied prob for home
+    "insider_weather_precip",    # precipitation mm
+    "insider_weather_wind",      # wind speed km/h
+    "insider_home_injury",       # key player injury severity 0-1
+    "insider_away_injury",       # key player injury severity 0-1
+    "insider_referee_cards",     # referee avg cards/match
+    "insider_public_home_pct",   # % of public bets on home side
 ]
 
 BASKETBALL_FEATURES = [
