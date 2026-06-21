@@ -196,6 +196,75 @@ def _capture_odds_snapshot(db: Session, fx: Fixture, pred: Prediction, phase: st
 log = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Model-implied odds derivation
+# ---------------------------------------------------------------------------
+
+def _prob_to_decimal_odds(prob: float, margin: float = 0.05) -> float | None:
+    """Convert a probability to decimal odds with a small vigorish margin.
+
+    Example: 52% probability → 1/0.52 * (1 - 0.05) ≈ 1.83
+    Returns None for zero/invalid probabilities.
+    """
+    try:
+        p = float(prob)
+        if p <= 0 or p > 1:
+            return None
+        return round((1.0 / p) * (1.0 - margin), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _backfill_fixture_odds(db: Session, fx: Fixture, items: list[dict]) -> bool:
+    """Write model-implied odds back to the fixture when no bookmaker odds exist.
+
+    Looks for the 1X2/Moneyline item in the engine output, extracts win/draw/loss
+    probabilities from engine_meta, converts to decimal odds, and stores them on
+    the fixture row. Clearly marked as odds_source='model_implied' in extra so the
+    frontend can distinguish them from real bookmaker odds.
+
+    Returns True if odds were written.
+    """
+    if fx.home_odds is not None or fx.draw_odds is not None or fx.away_odds is not None:
+        return False  # real bookmaker odds already present — don't overwrite
+
+    # Find probability data from 1X2 or Moneyline item
+    probs: dict | None = None
+    for item in items:
+        market = str(item.get("market", "")).lower()
+        if market in {"1x2", "moneyline"}:
+            meta = item.get("engine_meta") or {}
+            probs = meta.get("probabilities") or {}
+            break
+
+    if not probs:
+        return False
+
+    # Soccer: home_win / draw / away_win
+    home_p = probs.get("home_win")
+    draw_p = probs.get("draw")
+    away_p = probs.get("away_win")
+
+    # Basketball/other sports: home_win / away_win (no draw)
+    if home_p is None:
+        home_p = probs.get("home_win")
+    if away_p is None:
+        away_p = probs.get("away_win")
+
+    if not home_p and not away_p:
+        return False
+
+    fx.home_odds = _prob_to_decimal_odds(home_p)
+    fx.draw_odds = _prob_to_decimal_odds(draw_p) if draw_p else None
+    fx.away_odds = _prob_to_decimal_odds(away_p)
+
+    extra = dict(fx.extra or {})
+    extra["odds_source"] = "model_implied"
+    extra["odds_note"] = "Fair-value odds derived from model probabilities. Not bookmaker prices."
+    fx.extra = extra
+    return True
+
+
 def generate_today_predictions(db: Session) -> int:
     """Generate predictions for today's and upcoming fixtures.
 
@@ -292,6 +361,9 @@ def generate_today_predictions(db: Session) -> int:
                 fallback_item = choose_provisional_public_pick(items)
                 if fallback_item:
                     fallback_idx = items.index(fallback_item) if fallback_item in items else None
+
+            # Backfill model-implied odds onto fixture if no bookmaker odds exist
+            _backfill_fixture_odds(db, fx, items)
             for idx, item in enumerate(items):
                 item = explain_prediction_item(item, fx)
                 is_published = idx in published_indexes or idx == fallback_idx
