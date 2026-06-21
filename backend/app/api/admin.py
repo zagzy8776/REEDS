@@ -360,6 +360,28 @@ def backfill_odds(db: Session = Depends(get_db)):
     return {"backfilled": backfilled, "errors": errors, "total_checked": len(fixtures)}
 
 
+@router.post("/ingest-free", dependencies=[Depends(require_admin)])
+def ingest_free(max_leagues: int = 10, db: Session = Depends(get_db)):
+    """Pull free historical data from football-data.co.uk and OpenFootball.
+
+    No API key needed. Adds 25+ seasons of results + odds across 20+ leagues.
+    Safe to call repeatedly — duplicates are skipped automatically.
+    """
+    from app.scraper.free_data import ingest_all_free_sources
+    result = ingest_all_free_sources(db, max_leagues=min(max_leagues, 20))
+    return {"status": "done", "result": result}
+
+
+@router.post("/sync-events", dependencies=[Depends(require_admin)])
+def sync_events(db: Session = Depends(get_db)):
+    """Manually trigger live event sync (goals, cards, lineups) for in-progress matches."""
+    from app.services.live_events import sync_live_events
+    settings = get_settings()
+    key = settings.api_football_key or settings.api_sports_key
+    result = sync_live_events(db, key)
+    return {"synced": result}
+
+
 @router.post("/predict", dependencies=[Depends(require_admin)])
 def predict(db: Session = Depends(get_db)):
     return {"generated": generate_today_predictions(db)}

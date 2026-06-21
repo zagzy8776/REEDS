@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin, public
+from app.api import admin, public, live
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import init_db
@@ -22,6 +22,7 @@ app.add_middleware(
 )
 app.include_router(public.router, prefix="/api")
 app.include_router(admin.router, prefix="/api/admin")
+app.include_router(live.router, prefix="/api")
 
 
 @app.on_event("startup")
