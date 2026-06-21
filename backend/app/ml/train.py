@@ -33,69 +33,77 @@ try:
 except Exception:
     optuna = None
 
-# Full feature list including all new features from features.py
+try:
+    from sklearn.neural_network import MLPClassifier
+    _has_mlp = True
+except Exception:
+    _has_mlp = False
+
+# Full feature list — v3 with EMA form, venue H2H, CLV, rest, market signals
 FEATURES = [
-    "home_form_points",
-    "away_form_points",
-    "home_form_points_3",
-    "away_form_points_3",
-    "home_form_points_5",
-    "away_form_points_5",
-    "home_win_rate_5",
-    "away_win_rate_5",
-    "home_draw_rate_5",
-    "away_draw_rate_5",
-    "home_loss_rate_5",
-    "away_loss_rate_5",
-    "home_goals_for",
-    "home_goals_against",
-    "away_goals_for",
-    "away_goals_against",
-    "home_home_goals_for",
-    "home_home_goals_against",
-    "away_away_goals_for",
-    "away_away_goals_against",
-    "home_goal_diff",
-    "away_goal_diff",
-    "home_clean_sheet_rate_5",
-    "away_clean_sheet_rate_5",
-    "home_failed_score_rate_5",
-    "away_failed_score_rate_5",
-    "home_unbeaten_rate_10",
-    "away_unbeaten_rate_10",
-    "home_elo",
-    "away_elo",
-    "elo_diff",
+    # --- Core form (simple averages) ---
+    "home_form_points", "away_form_points",
+    "home_form_points_3", "away_form_points_3",
+    "home_form_points_5", "away_form_points_5",
+    "home_win_rate_5", "away_win_rate_5",
+    "home_draw_rate_5", "away_draw_rate_5",
+    "home_loss_rate_5", "away_loss_rate_5",
+    # --- EMA-weighted form (exponential — recent games weighted more) ---
+    "home_ema_form_5", "away_ema_form_5",
+    "home_ema_form_10", "away_ema_form_10",
+    "home_ema_goals_for", "away_ema_goals_for",
+    "home_ema_goals_against", "away_ema_goals_against",
+    # --- Scoring / conceding ---
+    "home_goals_for", "home_goals_against",
+    "away_goals_for", "away_goals_against",
+    "home_home_goals_for", "home_home_goals_against",
+    "away_away_goals_for", "away_away_goals_against",
+    "home_goal_diff", "away_goal_diff",
+    "home_clean_sheet_rate_5", "away_clean_sheet_rate_5",
+    "home_failed_score_rate_5", "away_failed_score_rate_5",
+    "home_unbeaten_rate_10", "away_unbeaten_rate_10",
+    # --- Elo ratings ---
+    "home_elo", "away_elo", "elo_diff",
+    "home_elo_home_only", "away_elo_away_only",
+    "elo_diff_venue",          # home_elo_home_only - away_elo_away_only
+    # --- League & season context ---
     "league_strength",
-    "home_implied",
-    "draw_implied",
-    "away_implied",
-    "odds_margin",
-    # New features
-    "home_form_vs_season",
-    "away_form_vs_season",
-    "home_streak_len",
-    "away_streak_len",
-    "home_streak_winning",
-    "away_streak_winning",
-    "home_streak_losing",
-    "away_streak_losing",
-    "home_elo_home_only",
-    "away_elo_away_only",
-    "h2h_home_win_rate",
-    "h2h_draw_rate",
-    "h2h_away_win_rate",
+    "home_form_vs_season", "away_form_vs_season",
+    # --- Streaks ---
+    "home_streak_len", "away_streak_len",
+    "home_streak_winning", "away_streak_winning",
+    "home_streak_losing", "away_streak_losing",
+    # --- H2H (standard) ---
+    "h2h_home_win_rate", "h2h_draw_rate", "h2h_away_win_rate",
     "h2h_avg_total_goals",
-    "home_scoring_consistency",
-    "away_scoring_consistency",
-    "home_conceding_consistency",
-    "away_conceding_consistency",
-    "last_match_home_goals",
-    "last_match_away_goals",
-    "last_match_home_conceded",
-    "last_match_away_conceded",
-    "home_goal_diff_momentum",
-    "away_goal_diff_momentum",
+    # --- H2H venue-adjusted (home wins when playing at home specifically) ---
+    "h2h_home_venue_win_rate",   # home team win rate in H2H when at home
+    "h2h_away_venue_win_rate",   # away team win rate in H2H when away
+    "h2h_last3_home_goals",      # avg home goals in last 3 H2H meetings
+    "h2h_last3_away_goals",      # avg away goals in last 3 H2H meetings
+    # --- Scoring consistency ---
+    "home_scoring_consistency", "away_scoring_consistency",
+    "home_conceding_consistency", "away_conceding_consistency",
+    # --- Last match indicators ---
+    "last_match_home_goals", "last_match_away_goals",
+    "last_match_home_conceded", "last_match_away_conceded",
+    # --- Momentum ---
+    "home_goal_diff_momentum", "away_goal_diff_momentum",
+    # --- Rest days / fatigue (new) ---
+    "home_rest_days",       # days since last match
+    "away_rest_days",
+    "home_back_to_back",    # 1 if < 3 days rest
+    "away_back_to_back",
+    "rest_advantage",       # home_rest - away_rest (positive = home fresher)
+    # --- Market / odds signals (CLV + overround) ---
+    "home_implied", "draw_implied", "away_implied",
+    "odds_margin",
+    "sharp_home_move",      # odds shortened since open (line movement toward home)
+    "sharp_away_move",      # odds shortened toward away
+    "clv_home_signal",      # closing line value signal (pre-match only)
+    # --- Set-piece / dead-ball proxy ---
+    "home_high_scoring_rate",   # % games with 3+ goals (proxy for set-piece value)
+    "away_high_scoring_rate",
 ]
 
 BASKETBALL_FEATURES = [
@@ -197,6 +205,19 @@ def _build_model_factories():
             border_count=params.get("border_count", 128) if params else 128,
             verbose=False,
             random_seed=42,
+        )))
+    # Lightweight Neural Net — fast on CPU, good at non-linear interactions
+    if _has_mlp:
+        factories.append(("neural_net", lambda params=None: MLPClassifier(
+            hidden_layer_sizes=params.get("hidden_layer_sizes", (128, 64, 32)) if params else (128, 64, 32),
+            activation="relu",
+            solver="adam",
+            alpha=params.get("alpha", 0.001) if params else 0.001,
+            learning_rate_init=params.get("learning_rate_init", 0.001) if params else 0.001,
+            max_iter=300,
+            early_stopping=True,
+            validation_fraction=0.1,
+            random_state=42,
         )))
     return factories
 
