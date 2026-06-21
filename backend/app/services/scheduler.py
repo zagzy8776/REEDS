@@ -174,6 +174,9 @@ def run_daily_learning_pipeline() -> dict:
             report["skipped"].append({"stage": "community_settle", "reason": str(exc)})
 
         data = dataframe_from_db(db)
+        # Normalise sport column to lowercase for bulletproof matching
+        if "sport" in data.columns:
+            data["sport"] = data["sport"].str.lower()
 
         for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
             try:
@@ -236,6 +239,16 @@ def run_daily_learning_pipeline() -> dict:
         except Exception as exc:  # noqa: BLE001
             log.exception("Daily prediction generation failed")
             report["skipped"].append({"stage": "predict", "reason": str(exc)})
+
+        # Refresh insider signals (sharp money, weather, injuries, referee) for upcoming fixtures
+        try:
+            from app.services.insider_signals import refresh_insider_signals
+            insider_result = refresh_insider_signals(db, odds_api_key=settings.the_odds_api_key)
+            report["insider_signals"] = insider_result
+            log.info("Insider signals refreshed: %s", insider_result)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Insider signal refresh failed")
+            report["skipped"].append({"stage": "insider_signals", "reason": str(exc)})
 
         # Backfill model-implied odds on any fixture still missing odds after ingestion
         try:

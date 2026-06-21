@@ -104,6 +104,15 @@ FEATURES = [
     # --- Set-piece / dead-ball proxy ---
     "home_high_scoring_rate",   # % games with 3+ goals (proxy for set-piece value)
     "away_high_scoring_rate",
+    # --- Insider signals (sharp money, weather, injuries, referee) ---
+    "insider_sharp_home_move",  # closing-line value — home side
+    "insider_sharp_away_move",  # closing-line value — away side
+    "insider_weather_precip",   # precipitation mm (high = fewer goals)
+    "insider_weather_wind",     # wind speed km/h (high = fewer goals)
+    "insider_home_injury",      # key player injury severity 0-1 (home)
+    "insider_away_injury",      # key player injury severity 0-1 (away)
+    "insider_referee_cards",    # referee avg cards/match
+    "insider_public_home_pct",  # % of public bets on home side
 ]
 
 BASKETBALL_FEATURES = [
@@ -327,7 +336,7 @@ def _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trial
     # Meta-learner: LogisticRegression on model out-of-fold predictions
     # This learns which models to trust for which classes
     stacked = np.column_stack(all_probas)
-    meta = LogisticRegression(max_iter=1000, multi_class="multinomial", C=1.0)
+    meta = LogisticRegression(max_iter=1000, C=1.0)
     meta.fit(stacked, y_test)
 
     # Blend: 70% weighted average + 30% meta-learner
