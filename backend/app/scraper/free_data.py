@@ -503,25 +503,60 @@ _NBA_GITHUB_SEASONS = [
 
 
 def ingest_nba_github(db: Session) -> dict:
-    """Pull NBA team game results from GitHub CSVs (free, no key)."""
+    """Pull NBA game scores from GitHub CSVs (free, no key).
+    
+    Tries multiple GitHub sources with different column layouts.
+    """
     total = 0
     errors: list[str] = []
 
-    # Primary: NocturneBear game-level data
-    for url in _NBA_GAME_URLS:
+    # Multiple URL patterns for different NBA CSV formats on GitHub
+    nba_urls = [
+        "https://raw.githubusercontent.com/NocturneBear/NBA-Data-2010-2024/main/Regular_Season/regular_season_game_logs.csv",
+        "https://raw.githubusercontent.com/NocturneBear/NBA-Data-2010-2024/main/Playoffs/play_off_game_logs.csv",
+    ]
+
+    for url in nba_urls:
         try:
             resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code == 404:
                 continue
             resp.raise_for_status()
             df = pd.read_csv(StringIO(resp.text), on_bad_lines="skip")
+            df = df.dropna(how="all")
 
-            # Detect column layout
-            date_col = next((c for c in ["GAME_DATE", "game_date", "Date", "date"] if c in df.columns), None)
-            home_col = next((c for c in ["HOME_TEAM", "home_team", "HomeTeam"] if c in df.columns), None)
-            away_col = next((c for c in ["AWAY_TEAM", "away_team", "VisitorTeam", "AwayTeam"] if c in df.columns), None)
-            hs_col = next((c for c in ["HOME_PTS", "home_pts", "PTS_home", "HomePTS"] if c in df.columns), None)
-            as_col = next((c for c in ["AWAY_PTS", "away_pts", "PTS_away", "AwayPTS", "VisitorPTS"] if c in df.columns), None)
+            # Detect columns
+            date_col  = next((c for c in ["GAME_DATE","game_date","Date","date"] if c in df.columns), None)
+            home_col  = next((c for c in ["HOME_TEAM","home_team","HomeTeam","MATCHUP"] if c in df.columns), None)
+            away_col  = next((c for c in ["AWAY_TEAM","away_team","VisitorTeam","AwayTeam"] if c in df.columns), None)
+            hs_col    = next((c for c in ["HOME_PTS","home_pts","PTS_home","HomePTS","PTS"] if c in df.columns), None)
+            as_col    = next((c for c in ["AWAY_PTS","away_pts","PTS_away","AwayPTS","VISITOR_PTS"] if c in df.columns), None)
+
+            # Handle per-team MATCHUP format (e.g. "LAL vs. BOS" / "LAL @ BOS")
+            if home_col == "MATCHUP" and hs_col == "PTS":
+                game_id_col = next((c for c in ["GAME_ID","game_id"] if c in df.columns), None)
+                team_col    = next((c for c in ["TEAM_ABBREVIATION","TEAM_NAME"] if c in df.columns), None)
+                if game_id_col and team_col:
+                    rows_built = []
+                    for gid, grp in df.groupby(game_id_col):
+                        if len(grp) < 2:
+                            continue
+                        home_row = grp[grp["MATCHUP"].str.contains(" vs\\.", na=False)]
+                        away_row = grp[grp["MATCHUP"].str.contains(" @ ", na=False)]
+                        if home_row.empty or away_row.empty:
+                            continue
+                        h = home_row.iloc[0]
+                        a = away_row.iloc[0]
+                        rows_built.append({
+                            "match_date": h.get(date_col or "GAME_DATE"),
+                            "home_team":  str(h.get(team_col, "")),
+                            "away_team":  str(a.get(team_col, "")),
+                            "home_score": h.get("PTS"),
+                            "away_score": a.get("PTS"),
+                        })
+                    df = pd.DataFrame(rows_built)
+                    date_col = "match_date"; home_col = "home_team"
+                    away_col = "away_team";  hs_col   = "home_score"; as_col = "away_score"
 
             if not all([date_col, home_col, away_col]):
                 continue
@@ -532,8 +567,13 @@ def ingest_nba_github(db: Session) -> dict:
                     if pd.isna(parsed_date):
                         continue
                     home = str(row[home_col]).strip()
-                    away = str(row[away_col]).strip()
-                    if not home or home == "nan":
+                    away = str(row.get(away_col, "")).strip() if away_col else ""
+                    if not home or home == "nan" or not away or away == "nan":
+                        continue
+                    hs = _to_int_or_none(row.get(hs_col)) if hs_col else None
+                    as_ = _to_int_or_none(row.get(as_col)) if as_col else None
+                    # Only ingest rows with actual scores
+                    if hs is None or as_ is None:
                         continue
                     fx = Fixture(
                         sport="basketball",
@@ -542,8 +582,8 @@ def ingest_nba_github(db: Session) -> dict:
                         match_date=parsed_date.date(),
                         home_team=resolve_team_name(db, home, "basketball", "nba_github"),
                         away_team=resolve_team_name(db, away, "basketball", "nba_github"),
-                        home_score=_to_int_or_none(row.get(hs_col)) if hs_col else None,
-                        away_score=_to_int_or_none(row.get(as_col)) if as_col else None,
+                        home_score=hs,
+                        away_score=as_,
                         source="nba_github",
                         extra={"season": str(parsed_date.year)},
                     )
