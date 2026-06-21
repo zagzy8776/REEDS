@@ -1,0 +1,35 @@
+name: Deploy HF Space
+
+# Automatically pushes huggingface_space/ changes to the HF Space
+# whenever you push to main. That way you never need to manually
+# `cd huggingface_space && git push space master` again.
+on:
+  push:
+    branches: [main]
+    paths: ['huggingface_space/**']
+
+jobs:
+  deploy:
+    name: Sync huggingface_space → HF Space
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push huggingface_space/ to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Navigate into the huggingface_space subfolder (it's itself a git repo)
+          cd huggingface_space
+
+          # Configure git with the HF token for auth
+          git remote set-url space https://Zagzy:${HF_TOKEN}@huggingface.co/spaces/Zagzy/reeds-ml-worker
+
+          # Push latest
+          git push space master
+
+          # Reset URL to avoid leaking token in git remote output
+          git remote set-url space https://huggingface.co/spaces/Zagzy/reeds-ml-worker
