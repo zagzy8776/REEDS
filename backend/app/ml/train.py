@@ -353,8 +353,8 @@ def _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels: li
     if RandomForestClassifier is None:
         raise ValueError("RandomForestClassifier is unavailable")
     model = RandomForestClassifier(
-        n_estimators=220 if sport == "soccer" else 250,
-        max_depth=28 if sport == "soccer" else None,
+        n_estimators=300 if sport == "soccer" else 280,
+        max_depth=30 if sport == "soccer" else None,
         min_samples_leaf=2 if sport == "soccer" else 1,
         max_features="sqrt",
         class_weight="balanced",
@@ -400,7 +400,8 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
 
     # Train ensemble with available models. For very large public-history imports,
     # use a fast RF path so training finishes reliably on local/Render machines.
-    if len(X) >= 60000:
+    # Threshold lowered to 15k to avoid OOM on Render's 512MB free tier.
+    if len(X) >= 15000:
         result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, "soccer")
     else:
         result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=15)
@@ -410,12 +411,10 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
     path = f"{settings.model_dir}/soccer_ensemble_{model_type_str}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.joblib"
 
     calibrator_path = None
-    if len(X) >= 60000:
-        # Calibration retrains another forest and becomes too expensive after
-        # mass public-data imports. Keep the existing calibrator active until a
-        # dedicated sampled calibration job is added.
+    if len(X) >= 15000:
+        # Calibration also memory-intensive — skip on large datasets
         calibrator_path = None
-    elif len(X) >= max(settings.min_training_rows, 1000):
+    elif len(X) >= max(settings.min_training_rows, 500):
         try:
             calibrator_path = fit_soccer_platt_calibrator(fixtures, min_train_rows=max(settings.min_training_rows, 1000))["path"]
         except ValueError:
@@ -472,7 +471,7 @@ def train_basketball_model(fixtures: pd.DataFrame) -> dict:
     # Remove multi-class only models for basketball (binary classification)
     factories = [(n, f) for n, f in factories if n != "gradient_boosting"]
 
-    if len(X) >= 60000:
+    if len(X) >= 15000:
         result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, "basketball")
     else:
         result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=10)
