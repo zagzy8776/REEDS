@@ -123,7 +123,10 @@ def normalize_result(home_score: int, away_score: int) -> int:
 
 
 def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    df = fixtures[fixtures.get("sport", "soccer") == "soccer"].sort_values("match_date").copy()
+    if "sport" in fixtures.columns:
+        df = fixtures[fixtures["sport"] == "soccer"].sort_values("match_date").copy()
+    else:
+        df = fixtures.sort_values("match_date").copy()
     rows, y = [], []
     team_hist: dict[str, list[dict]] = {}
     team_home_hist: dict[str, list[dict]] = {}
@@ -284,7 +287,12 @@ def features_for_fixture(
 ) -> dict:
     home_team = normalize_team_name(home_team, "soccer")
     away_team = normalize_team_name(away_team, "soccer")
-    hist = history[history.get("sport", "soccer") == "soccer"].sort_values("match_date") if not history.empty else history
+    if not history.empty and "sport" in history.columns:
+        hist = history[history["sport"] == "soccer"].sort_values("match_date")
+    elif not history.empty:
+        hist = history.sort_values("match_date")
+    else:
+        hist = history
     if not hist.empty and fixture_date is not None:
         cutoff = pd.to_datetime(fixture_date, errors="coerce")
         if not pd.isna(cutoff):
@@ -459,7 +467,10 @@ def features_for_fixture(
 
 
 def build_basketball_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-    df = fixtures[fixtures.get("sport", "basketball") == "basketball"].sort_values("match_date").copy()
+    if "sport" in fixtures.columns:
+        df = fixtures[fixtures["sport"] == "basketball"].sort_values("match_date").copy()
+    else:
+        df = fixtures.sort_values("match_date").copy()
     rows, y = [], []
     team_hist: dict[str, list[dict]] = {}
     team_elo: dict[str, float] = {}
@@ -561,7 +572,12 @@ def build_basketball_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.
 def basketball_features_for_fixture(history: pd.DataFrame, home_team: str, away_team: str, fixture_date=None) -> dict:
     home_team = normalize_team_name(home_team, "basketball")
     away_team = normalize_team_name(away_team, "basketball")
-    hist = history[history.get("sport", "basketball") == "basketball"].sort_values("match_date") if not history.empty else history
+    if not history.empty and "sport" in history.columns:
+        hist = history[history["sport"] == "basketball"].sort_values("match_date")
+    elif not history.empty:
+        hist = history.sort_values("match_date")
+    else:
+        hist = history
     cutoff = pd.to_datetime(fixture_date, errors="coerce") if fixture_date is not None else None
     if not hist.empty and cutoff is not None and not pd.isna(cutoff):
         hist = hist[pd.to_datetime(hist["match_date"], errors="coerce") < cutoff]

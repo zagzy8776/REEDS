@@ -10,7 +10,7 @@ from app.db.session import get_db
 from app.ml.backtest import walk_forward_backtest
 from app.ml.train import train_basketball_model, train_soccer_model
 from app.scraper.api_clients import ApiFootballClient
-from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events, load_football_csv, load_basketball_csv, sync_live_scores
+from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events, load_football_csv, load_basketball_csv, sync_live_scores, refresh_odds_from_the_odds_api
 from app.services.data_quality import upsert_team_alias
 from app.services.model_registry import register_model
 from app.services.predictions import dataframe_from_db, generate_today_predictions
@@ -234,7 +234,8 @@ def train(db: Session = Depends(get_db)):
     trained, skipped = [], []
     for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
         try:
-            result = trainer(data)
+            sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+            result = trainer(sport_data)
             mv = register_model(db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
             trained.append({"sport": sport, **result, "active": mv.is_active})
         except ValueError as exc:
@@ -287,6 +288,20 @@ def sync_scores(db: Session = Depends(get_db)):
     return {"synced": result}
 
 
+@router.post("/refresh-odds", dependencies=[Depends(require_admin)])
+def refresh_odds(db: Session = Depends(get_db)):
+    """Refresh live odds from The Odds API for all configured sport keys.
+
+    Call this manually when you want to force-refresh odds without waiting for
+    the 15-minute scheduler cycle. Works for soccer, NBA, NFL, NHL, MLB, tennis, etc.
+    """
+    settings = get_settings()
+    if not settings.the_odds_api_key:
+        return {"error": "THE_ODDS_API_KEY not configured", "updated": 0}
+    result = refresh_odds_from_the_odds_api(db, settings.the_odds_api_key, settings.odds_api_sport_keys)
+    return {"refreshed": result}
+
+
 @router.post("/predict", dependencies=[Depends(require_admin)])
 def predict(db: Session = Depends(get_db)):
     return {"generated": generate_today_predictions(db)}
@@ -326,7 +341,8 @@ def backtest(db: Session = Depends(get_db)):
     completed, skipped = [], []
     for sport in ("soccer", "basketball"):
         try:
-            result = walk_forward_backtest(data[data.get("sport", sport) == sport].copy(), sport)
+            sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+            result = walk_forward_backtest(sport_data, sport)
             run = BacktestRun(
                 sport=sport,
                 model_type=result["model_type"],

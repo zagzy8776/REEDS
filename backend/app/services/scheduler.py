@@ -12,7 +12,7 @@ from app.db.session import SessionLocal
 from app.ml.backtest import walk_forward_backtest
 from app.ml.calibration import fit_soccer_platt_calibrator
 from app.ml.train import train_basketball_model, train_soccer_model
-from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events, sync_live_scores
+from app.scraper.loaders import ingest_allsportsapi_events, ingest_api_basketball_games, ingest_api_football_fixtures, ingest_apifootball_com_events, ingest_football_data_org_matches, ingest_sportmonks_football_fixtures, ingest_thesportsdb_events, sync_live_scores, refresh_odds_from_the_odds_api
 from app.services.community import settle_user_predictions
 from app.services.coverage_seed import ensure_multisport_showcase
 from app.services.model_registry import register_model
@@ -154,7 +154,8 @@ def run_daily_learning_pipeline() -> dict:
 
         for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
             try:
-                result = trainer(data)
+                sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+                result = trainer(sport_data)
                 mv = register_model(db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
                 report["trained"].append({"sport": sport, **result, "active": mv.is_active})
             except Exception as exc:  # noqa: BLE001 - scheduler must log and continue safely
@@ -162,14 +163,16 @@ def run_daily_learning_pipeline() -> dict:
                 report["skipped"].append({"stage": "train", "sport": sport, "reason": str(exc)})
 
         try:
-            report["calibrated"] = fit_soccer_platt_calibrator(data[data.get("sport", "soccer") == "soccer"].copy())
+            soccer_data = data[data["sport"] == "soccer"].copy() if "sport" in data.columns else data.copy()
+            report["calibrated"] = fit_soccer_platt_calibrator(soccer_data)
         except Exception as exc:  # noqa: BLE001
             log.exception("Daily soccer calibration failed")
             report["skipped"].append({"stage": "calibrate", "sport": "soccer", "reason": str(exc)})
 
         for sport in ("soccer", "basketball"):
             try:
-                result = walk_forward_backtest(data[data.get("sport", sport) == sport].copy(), sport)
+                sport_data = data[data["sport"] == sport].copy() if "sport" in data.columns else data.copy()
+                result = walk_forward_backtest(sport_data, sport)
                 run = BacktestRun(
                     sport=sport,
                     model_type=result["model_type"],
@@ -241,6 +244,14 @@ def start_scheduler() -> BackgroundScheduler:
                 settings.api_football_key or settings.api_sports_key,
                 settings.api_basketball_key or settings.api_sports_key,
             )
+            # Also refresh odds for all configured sports from The Odds API
+            if settings.the_odds_api_key:
+                odds_result = refresh_odds_from_the_odds_api(
+                    db,
+                    settings.the_odds_api_key,
+                    settings.odds_api_sport_keys,
+                )
+                result["odds_refreshed"] = odds_result.get("updated", 0)
             log.info("Score sync: %s", result)
         except Exception:
             log.exception("Score sync job failed")

@@ -90,11 +90,16 @@ def upsert_fixture(db: Session, fixture: Fixture) -> None:
         existing.season = fixture.season
         existing.home_score = fixture.home_score
         existing.away_score = fixture.away_score
-        existing.home_odds = fixture.home_odds
-        existing.draw_odds = fixture.draw_odds
-        existing.away_odds = fixture.away_odds
-        existing.source = fixture.source
-        existing.extra = fixture.extra
+        if fixture.home_odds is not None:
+            existing.home_odds = fixture.home_odds
+        if fixture.draw_odds is not None:
+            existing.draw_odds = fixture.draw_odds
+        if fixture.away_odds is not None:
+            existing.away_odds = fixture.away_odds
+        if fixture.source:
+            existing.source = fixture.source
+        if fixture.extra is not None:
+            existing.extra = fixture.extra
     else:
         db.add(fixture)
 
@@ -802,3 +807,130 @@ def sync_live_scores(db: Session, football_key: str | None, basketball_key: str 
             updated["errors"].append({"sport": "basketball", "reason": str(exc)})
 
     return updated
+
+
+# ---------------------------------------------------------------------------
+# The Odds API live odds refresh
+# ---------------------------------------------------------------------------
+
+# Map from The Odds API sport_key prefix to our canonical sport name
+_ODDS_API_SPORT_MAP: dict[str, str] = {
+    "soccer_": "soccer",
+    "basketball_": "basketball",
+    "americanfootball_": "american_football",
+    "baseball_": "baseball",
+    "icehockey_": "hockey",
+    "tennis_": "tennis",
+    "rugbyleague_": "rugby",
+    "rugbyunion_": "rugby",
+    "mma_": "mma",
+    "cricket_": "cricket",
+}
+
+
+def _canonical_sport_from_odds_key(sport_key: str) -> str:
+    for prefix, sport in _ODDS_API_SPORT_MAP.items():
+        if sport_key.startswith(prefix):
+            return sport
+    return "soccer"
+
+
+def refresh_odds_from_the_odds_api(db: Session, api_key: str | None, sport_keys: list[str]) -> dict:
+    """Fetch current h2h odds from The Odds API and update matching fixtures.
+
+    This is called by the scheduler every 15 minutes alongside score sync so
+    live odds are kept fresh while a game is in progress. Works for all sports
+    configured in THE_ODDS_API_SPORT_KEYS (soccer, NBA, NFL, NHL, MLB, tennis…).
+    """
+
+    if not api_key or not sport_keys:
+        return {"updated": 0, "sports_checked": []}
+
+    client = TheOddsApiClient(api_key)
+    updated_total = 0
+    sports_checked: list[str] = []
+
+    for sport_key in sport_keys:
+        canonical_sport = _canonical_sport_from_odds_key(sport_key)
+        try:
+            payload = client.h2h_odds(sport_key)
+        except Exception:  # noqa: BLE001
+            continue
+
+        events = payload if isinstance(payload, list) else []
+        if not events:
+            continue
+
+        sports_checked.append(sport_key)
+        for event in events:
+            try:
+                commence_time = pd.to_datetime(event.get("commence_time"), errors="coerce")
+                if pd.isna(commence_time):
+                    continue
+                match_date = commence_time.date()
+                home = str(event.get("home_team") or "")
+                away = str(event.get("away_team") or "")
+                if not home or not away:
+                    continue
+
+                home_odds_val: float | None = None
+                draw_odds_val: float | None = None
+                away_odds_val: float | None = None
+
+                for bookmaker in event.get("bookmakers", []) or []:
+                    for market in bookmaker.get("markets", []) or []:
+                        if str(market.get("key", "")).lower() != "h2h":
+                            continue
+                        for outcome in market.get("outcomes", []) or []:
+                            name = str(outcome.get("name") or "")
+                            price = _to_float_or_none(outcome.get("price"))
+                            norm_home = normalize_team_name(home, canonical_sport)
+                            norm_away = normalize_team_name(away, canonical_sport)
+                            norm_name = normalize_team_name(name, canonical_sport)
+                            if norm_name == norm_home:
+                                home_odds_val = price
+                            elif norm_name == norm_away:
+                                away_odds_val = price
+                            elif name.lower() == "draw":
+                                draw_odds_val = price
+                        if home_odds_val or draw_odds_val or away_odds_val:
+                            break
+                    if home_odds_val or draw_odds_val or away_odds_val:
+                        break
+
+                if not any([home_odds_val, draw_odds_val, away_odds_val]):
+                    continue
+
+                # Find and update the matching fixture
+                home_resolved = resolve_team_name(db, home, canonical_sport, "the_odds_api")
+                away_resolved = resolve_team_name(db, away, canonical_sport, "the_odds_api")
+                existing = (
+                    db.query(Fixture)
+                    .filter(
+                        Fixture.sport == canonical_sport,
+                        Fixture.match_date == match_date,
+                        Fixture.home_team == home_resolved,
+                        Fixture.away_team == away_resolved,
+                    )
+                    .first()
+                )
+                if existing:
+                    if home_odds_val is not None:
+                        existing.home_odds = home_odds_val
+                    if draw_odds_val is not None:
+                        existing.draw_odds = draw_odds_val
+                    if away_odds_val is not None:
+                        existing.away_odds = away_odds_val
+                    extra = dict(existing.extra or {})
+                    extra["odds_source"] = "the_odds_api"
+                    existing.extra = extra
+                    updated_total += 1
+            except Exception:  # noqa: BLE001
+                continue
+
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+
+    return {"updated": updated_total, "sports_checked": sports_checked}

@@ -58,7 +58,7 @@ class GenericSportEngine:
         home = normalize_team_name(fixture["home_team"], sport)
         away = normalize_team_name(fixture["away_team"], sport)
 
-        df = history[history.get("sport", sport) == sport].copy() if not history.empty else pd.DataFrame()
+        df = history[history["sport"] == sport].copy() if (not history.empty and "sport" in history.columns) else (history.copy() if not history.empty else pd.DataFrame())
 
         home_wr = away_wr = 0.50
         home_margin = away_margin = 0.0

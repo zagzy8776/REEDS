@@ -144,7 +144,12 @@ def serialize_prediction(p: Prediction, f: Fixture) -> dict:
 
 @router.get("/predictions/today")
 def today(sport: str | None = None, league: str | None = None, market: str | None = None, risk: str | None = None, min_confidence: float = 0, db: Session = Depends(get_db)):
-    query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Prediction.status == "active", func.date(Fixture.match_date) >= func.current_date(), Prediction.confidence >= min_confidence)
+    query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(
+        Prediction.is_published == True,
+        Prediction.status == "active",
+        func.date(Fixture.match_date) >= func.current_date(),
+        Prediction.confidence >= min_confidence,
+    )
     if sport:
         query = query.filter(Fixture.sport == sport)
     if league:
@@ -155,11 +160,8 @@ def today(sport: str | None = None, league: str | None = None, market: str | Non
         query = query.filter(Prediction.risk_level == risk)
     rows = query.order_by(Prediction.confidence.desc()).limit(100).all()
     if not rows:
-        # Self-heal a live-but-empty public board. Production can have fixtures
-        # before the scheduler/admin prediction job has completed. Generate once
-        # from existing upcoming fixtures, then rerun the same filtered query so
-        # customers see AI reads instead of a permanently empty board.
-        upcoming = db.query(Fixture.id).filter(func.date(Fixture.match_date) >= func.current_date(), Fixture.home_score == None, Fixture.away_score == None).first()
+        # Self-heal: generate predictions for upcoming + live fixtures if board is empty
+        upcoming = db.query(Fixture.id).filter(func.date(Fixture.match_date) >= func.current_date()).first()
         if upcoming:
             try:
                 generate_today_predictions(db)

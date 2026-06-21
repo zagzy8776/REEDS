@@ -355,7 +355,10 @@ def _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels: li
 
 def train_soccer_model(fixtures: pd.DataFrame) -> dict:
     settings = get_settings()
-    fixtures = fixtures[fixtures.get("sport", "soccer") == "soccer"].sort_values("match_date").copy()
+    if "sport" in fixtures.columns:
+        fixtures = fixtures[fixtures["sport"] == "soccer"].sort_values("match_date").copy()
+    else:
+        fixtures = fixtures.sort_values("match_date").copy()
     X, y = build_soccer_features(fixtures)
     if len(X) < settings.min_training_rows:
         raise ValueError(f"Need at least {settings.min_training_rows} rows, got {len(X)}")
@@ -425,7 +428,10 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
 
 def train_basketball_model(fixtures: pd.DataFrame) -> dict:
     settings = get_settings()
-    fixtures = fixtures[fixtures.get("sport", "basketball") == "basketball"].sort_values("match_date").copy()
+    if "sport" in fixtures.columns:
+        fixtures = fixtures[fixtures["sport"] == "basketball"].sort_values("match_date").copy()
+    else:
+        fixtures = fixtures.sort_values("match_date").copy()
     X, y = build_basketball_features(fixtures)
     if len(X) < settings.min_training_rows:
         raise ValueError(f"Need at least {settings.min_training_rows} basketball rows, got {len(X)}")

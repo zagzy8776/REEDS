@@ -80,6 +80,12 @@ class TheOddsApiClient:
             params["bookmakers"] = bookmakers
         return self.http.get(f"{self.base_url}/sports/{sport_key}/odds", params=params).json()
 
+    def sports(self) -> list:
+        """Return list of available sport keys from the API."""
+        if not self.api_key:
+            return []
+        return self.http.get(f"{self.base_url}/sports", params={"apiKey": self.api_key, "all": "true"}).json()
+
 
 class ApiFootballComClient:
     """apifootball.com adapter. This is different from API-SPORTS API-Football."""

@@ -197,8 +197,10 @@ log = logging.getLogger(__name__)
 
 
 def generate_today_predictions(db: Session) -> int:
-    """Generate predictions for today's fixtures.
+    """Generate predictions for today's and upcoming fixtures.
 
+    Covers both pre-match (no score yet) and live in-progress fixtures so
+    odds and predictions stay visible while a game is being played.
     Uses LoyalEdgeEngine (Poisson + form + Elo + draw detection) for soccer and
     GenericSportEngine with real history for all other sports.
     History capped at 90 days to stay within Render free tier RAM.
@@ -217,23 +219,37 @@ def generate_today_predictions(db: Session) -> int:
         db.query(Fixture)
         .filter(
             func.date(Fixture.match_date) == today_ref,
-            Fixture.home_score == None,
-            Fixture.away_score == None,
             Fixture.league.in_(PRIORITY_LEAGUES),
         )
         .all()
     )
+
+    # Include pre-match AND live in-progress fixtures (score may exist but game is ongoing)
     raw_fixtures = (
         db.query(Fixture)
         .filter(
             func.date(Fixture.match_date) >= today_ref,
-            Fixture.home_score == None,
-            Fixture.away_score == None,
         )
         .order_by(Fixture.match_date.asc(), Fixture.league.asc())
-        .limit(60)
+        .limit(120)
         .all()
     )
+
+    # Separate: pre-match (no score) + live (score set but status is live)
+    def _is_live(fx: Fixture) -> bool:
+        extra = fx.extra if isinstance(fx.extra, dict) else {}
+        return bool(extra.get("live")) or str(extra.get("status", "")).upper() in {
+            "1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT", "IN PROGRESS", "HALF TIME",
+        }
+
+    def _needs_prediction(fx: Fixture) -> bool:
+        # Always generate for pre-match; also generate/refresh for live games
+        if fx.home_score is None and fx.away_score is None:
+            return True
+        return _is_live(fx)
+
+    raw_fixtures = [fx for fx in raw_fixtures if _needs_prediction(fx)]
+
     if not raw_fixtures and not priority_fixtures:
         return 0
     by_sport: dict[str, list[Fixture]] = {}
