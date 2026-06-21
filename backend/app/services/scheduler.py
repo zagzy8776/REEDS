@@ -78,6 +78,20 @@ def run_daily_learning_pipeline() -> dict:
         if csv_count:
             log.info("Seeded %d historical CSV rows into database", csv_count)
 
+        # Pull free multi-sport data (football-data.co.uk, tennis, NBA, NFL, NHL, IPL)
+        # Only runs when the DB has fewer than 5000 rows to avoid re-downloading every day
+        from app.db.models import Fixture as _Fixture
+        fixture_count = db.query(_Fixture).count()
+        if fixture_count < 5000:
+            try:
+                from app.scraper.free_data import ingest_all_free_sources
+                free_result = ingest_all_free_sources(db, max_leagues=20)
+                log.info("Free data ingestion: %s", {k: v.get("total", 0) if isinstance(v, dict) else v for k, v in free_result.items()})
+                report["free_data_seeded"] = True
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Free data ingestion failed")
+                report["skipped"].append({"stage": "free_data", "reason": str(exc)})
+
         dates = _date_window(settings.live_ingest_days)
         football_key = settings.api_football_key or settings.api_sports_key
         basketball_key = settings.api_basketball_key or settings.api_sports_key

@@ -376,26 +376,29 @@ def ingest_free(max_leagues: int = 20, db: Session = Depends(get_db)):
 
 
 @router.post("/train-full", dependencies=[Depends(require_admin)])
-def train_full(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def train_full(db: Session = Depends(get_db)):
     """One-click full pipeline: ingest free data → train models → backtest → predict.
 
-    Runs as a background task and returns immediately — training takes 5-15 min.
-    Poll GET /api/stats/backtest to see when new models appear.
+    Schedules the pipeline to run immediately via the app's built-in scheduler.
+    Returns instantly. Poll GET /api/stats/backtest to see when new models appear.
     """
-    def _run_pipeline():
-        from app.db.session import SessionLocal
-        _db = SessionLocal()
-        try:
-            _train_full_pipeline(_db)
-        finally:
-            _db.close()
-
-    background_tasks.add_task(_run_pipeline)
-    return {
-        "status": "started",
-        "message": "Training pipeline running in background. Poll /api/stats/backtest to track progress.",
-        "stages": ["ingest_free_data", "train_soccer", "train_basketball", "train_tennis", "train_nfl", "train_nhl", "train_cricket", "backtest", "predict", "backfill_odds"],
-    }
+    from datetime import datetime, timedelta
+    try:
+        # Re-use the existing scheduler instance to run the pipeline immediately
+        from app.services.scheduler import run_daily_learning_pipeline
+        import threading
+        t = threading.Thread(target=run_daily_learning_pipeline, daemon=True)
+        t.start()
+        return {
+            "status": "started",
+            "message": "Full training pipeline started in background thread. Poll /api/stats/backtest to see results as each sport trains.",
+            "started_at": datetime.utcnow().isoformat(),
+            "stages": ["ingest_free_data", "train_soccer", "train_basketball",
+                       "train_tennis", "train_nfl", "train_nhl", "train_cricket",
+                       "backtest", "predict", "backfill_odds"],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 def _train_full_pipeline(db: Session) -> dict:
