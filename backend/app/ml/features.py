@@ -609,6 +609,9 @@ def features_for_fixture(
         # --- Insider signals (sharp money / weather / injuries / referee) ---
         "insider_sharp_home_move": float((insider or {}).get("insider_sharp_home_move", 0.0)),
         "insider_sharp_away_move": float((insider or {}).get("insider_sharp_away_move", 0.0)),
+        "insider_clv_home":        float((insider or {}).get("insider_clv_home",        0.0)),
+        "insider_steam":           float((insider or {}).get("insider_steam",           0.0)),
+        "insider_opening_home_prob": float((insider or {}).get("insider_opening_home_prob", 0.0)),
         "insider_weather_precip":  float((insider or {}).get("insider_weather_precip",  0.0)),
         "insider_weather_wind":    float((insider or {}).get("insider_weather_wind",    0.0)),
         "insider_home_injury":     float((insider or {}).get("insider_home_injury",     0.0)),
