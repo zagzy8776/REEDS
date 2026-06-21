@@ -339,7 +339,7 @@ def _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trial
     # Meta-learner: LogisticRegression on model out-of-fold predictions
     # This learns which models to trust for which classes
     stacked = np.column_stack(all_probas)
-    meta = LogisticRegression(max_iter=1000, C=1.0)
+    meta = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs")
     meta.fit(stacked, y_test)
 
     # Blend: 70% weighted average + 30% meta-learner

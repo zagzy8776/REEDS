@@ -268,9 +268,12 @@ def action_train():
                 if done < 200:
                     line = f"⏩ {sport.upper()}: skipped ({done:,} rows)"
                     _log(line); logs.append(line); continue
-                _log(f"🏋️  Training {sport} ({done:,} rows)...")
+                # Pass only completed fixtures — trainers skip null-score rows
+                # internally anyway, but this surfaces the real count early.
+                d_completed = d[d["home_score"].notna() & d["away_score"].notna()].copy()
+                _log(f"🏋️  Training {sport} ({done:,} completed rows)...")
                 t0 = time.time()
-                r = trainer(d)
+                r = trainer(d_completed)
                 elapsed = int(time.time() - t0)
                 register_model(db, sport, r["model_type"], r["path"],
                                r["accuracy"], r["sample_size"])
@@ -293,9 +296,11 @@ def action_train():
                 if done < 200:
                     line = f"⏩ {sport.upper()}: skipped ({done:,} rows)"
                     _log(line); logs.append(line); continue
-                _log(f"🏋️  Training {sport} ({done:,} rows)...")
+                # Pass only completed fixtures to avoid spurious low row count
+                d_completed = d[d["home_score"].notna() & d["away_score"].notna()].copy()
+                _log(f"🏋️  Training {sport} ({done:,} completed rows)...")
                 t0 = time.time()
-                r = train_generic_sport_model(d, sport)
+                r = train_generic_sport_model(d_completed, sport)
                 elapsed = int(time.time() - t0)
                 register_model(db, sport, r["model_type"], r["path"],
                                r["accuracy"], r["sample_size"])
