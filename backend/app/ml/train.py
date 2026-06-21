@@ -147,8 +147,12 @@ def _time_series_split(X, y, n_splits=5):
         yield train_idx, test_idx
 
 
-def _build_model_factories():
-    """Return list of (name, factory) tuples for available model types."""
+def _build_model_factories(binary: bool = False):
+    """Return list of (name, factory) tuples for available model types.
+    
+    binary=True for 2-class problems (basketball, tennis, etc.)
+    binary=False for 3-class problems (soccer 1X2)
+    """
     factories = []
     if RandomForestClassifier is not None:
         factories.append(("random_forest", lambda params=None: RandomForestClassifier(
@@ -170,7 +174,9 @@ def _build_model_factories():
             random_state=42,
         )))
     if XGBClassifier is not None:
-        factories.append(("xgboost", lambda params=None: XGBClassifier(
+        _xgb_objective = "binary:logistic" if binary else "multi:softprob"
+        _xgb_metric    = "logloss"          if binary else "mlogloss"
+        factories.append(("xgboost", lambda params=None, _obj=_xgb_objective, _met=_xgb_metric: XGBClassifier(
             n_estimators=params.get("n_estimators", 200) if params else 200,
             max_depth=params.get("max_depth", 6) if params else 6,
             learning_rate=params.get("learning_rate", 0.1) if params else 0.1,
@@ -178,8 +184,8 @@ def _build_model_factories():
             reg_lambda=params.get("reg_lambda", 1.0) if params else 1.0,
             subsample=params.get("subsample", 0.8) if params else 0.8,
             colsample_bytree=params.get("colsample_bytree", 0.8) if params else 0.8,
-            objective="multi:softprob",
-            eval_metric="mlogloss",
+            objective=_obj,
+            eval_metric=_met,
             random_state=42,
             verbosity=0,
         )))
@@ -467,8 +473,8 @@ def train_basketball_model(fixtures: pd.DataFrame) -> dict:
         raise ValueError(f"Test set too small ({len(X_test)}), need more data")
 
     labels = [0, 1]
-    factories = _build_model_factories()
-    # Remove multi-class only models for basketball (binary classification)
+    factories = _build_model_factories(binary=True)
+    # Remove gradient_boosting for binary (sklearn GB handles it but slower)
     factories = [(n, f) for n, f in factories if n != "gradient_boosting"]
 
     if len(X) >= 15000:
@@ -545,6 +551,9 @@ def _build_generic_features(fixtures: pd.DataFrame, sport: str) -> tuple[pd.Data
         home = normalize_team_name(str(r["home_team"]), sport)
         away = normalize_team_name(str(r["away_team"]), sport)
         hs, as_ = float(r["home_score"]), float(r["away_score"])
+        # Skip draws for binary classification (hs == as_ is ambiguous)
+        if hs == as_:
+            continue
         home_won = 1 if hs > as_ else 0
 
         hh = team_hist.get(home, [])[-10:]
@@ -648,7 +657,7 @@ def train_generic_sport_model(fixtures: pd.DataFrame, sport: str) -> dict:
         raise ValueError(f"Test set too small ({len(X_test)}) for {sport}")
 
     labels = [0, 1]
-    factories = [(n, f) for n, f in _build_model_factories() if n != "gradient_boosting"]
+    factories = [(n, f) for n, f in _build_model_factories(binary=True) if n != "gradient_boosting"]
 
     if len(X) >= 60000:
         result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, sport)
