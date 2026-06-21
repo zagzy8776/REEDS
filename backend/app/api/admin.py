@@ -246,6 +246,9 @@ def train(db: Session = Depends(get_db)):
         _db = SessionLocal()
         try:
             data = dataframe_from_db(_db, max_age_days=None)
+            # Normalise sport column to lowercase for bulletproof matching
+            if "sport" in data.columns:
+                data["sport"] = data["sport"].str.lower()
             from app.ml.train import train_generic_sport_model
             for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
                 try:
@@ -371,6 +374,7 @@ def backfill_odds(db: Session = Depends(get_db)):
         try:
             if fx.sport == "soccer":
                 items = soccer_engine.predict_soccer(history, {
+                    "id": fx.id, "_db": db,
                     "sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team,
                     "match_date": fx.match_date, "league": fx.league,
                     "home_odds": None, "draw_odds": None, "away_odds": None,
@@ -491,6 +495,9 @@ def _train_full_pipeline(db: Session) -> dict:
 
     # 2. Train models on full history — soccer, basketball, + all other sports
     data = dataframe_from_db(db, max_age_days=None)
+    # Normalise sport column to lowercase for bulletproof matching
+    if "sport" in data.columns:
+        data["sport"] = data["sport"].str.lower()
     from app.ml.train import train_generic_sport_model
 
     for sport, trainer in (("soccer", train_soccer_model), ("basketball", train_basketball_model)):
@@ -554,6 +561,7 @@ def _train_full_pipeline(db: Session) -> dict:
             try:
                 if fx.sport == "soccer":
                     items = soccer_engine.predict_soccer(history, {
+                        "id": fx.id, "_db": db,
                         "sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team,
                         "match_date": fx.match_date, "league": fx.league,
                         "home_odds": None, "draw_odds": None, "away_odds": None,
@@ -658,6 +666,9 @@ def clear_train_flag():
     if os.path.exists(flag_path):
         os.remove(flag_path)
     return {"status": "flag_cleared"}
+
+
+@router.post("/upload-model", dependencies=[Depends(require_admin)])
 async def upload_model(
     request: Request,
     db: Session = Depends(get_db),
@@ -719,6 +730,9 @@ async def upload_model(
         "active":       mv.is_active,
         "path":         str(dest),
     }
+
+
+@router.post("/download-models", dependencies=[Depends(require_admin)])
 def download_models(payload: dict | None = None, db: Session = Depends(get_db)):
     """Download the latest trained model artifacts from GitHub Releases.
 
@@ -733,7 +747,7 @@ def download_models(payload: dict | None = None, db: Session = Depends(get_db)):
     from pathlib import Path
 
     settings = get_settings()
-    github_repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")
+    github_repo = settings.github_repo
     github_token = os.environ.get("GITHUB_TOKEN", "")
 
     headers = {"Accept": "application/vnd.github+json"}
@@ -822,7 +836,8 @@ def trigger_github_training(db: Session = Depends(get_db)):
     import requests as _req
     import os
 
-    github_repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")
+    settings = get_settings()
+    github_repo = settings.github_repo
     github_token = os.environ.get("GITHUB_TOKEN", "")
 
     if not github_token:
@@ -852,6 +867,9 @@ def trigger_github_training(db: Session = Depends(get_db)):
         return {"status": "error", "code": resp.status_code, "detail": resp.text}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/scan-value", dependencies=[Depends(require_admin)])
 def scan_value(sport: str | None = None, min_edge: float = 1.04, db: Session = Depends(get_db)):
     """Scrape SportyBet and run the value betting engine immediately.
 
@@ -866,6 +884,48 @@ def scan_value(sport: str | None = None, min_edge: float = 1.04, db: Session = D
 @router.post("/predict", dependencies=[Depends(require_admin)])
 def predict(db: Session = Depends(get_db)):
     return {"generated": generate_today_predictions(db)}
+
+
+@router.post("/refresh-signals", dependencies=[Depends(require_admin)])
+def refresh_signals(days_ahead: int = 3, db: Session = Depends(get_db)):
+    """Refresh insider signals for upcoming fixtures.
+
+    Refreshes: sharp line moves, weather forecasts, injury flags, referee card rates,
+    and public betting percentages. Call this after ingesting new odds or fixtures.
+    """
+    from app.services.insider_signals import refresh_insider_signals
+    settings = get_settings()
+    result = refresh_insider_signals(db, odds_api_key=settings.the_odds_api_key, days_ahead=days_ahead)
+    return {"status": "done", "signals_refreshed": result}
+
+
+@router.post("/add-signal", dependencies=[Depends(require_admin)])
+async def add_insider_signal(request: Request, db: Session = Depends(get_db)):
+    """Manually add an insider signal for a fixture.
+
+    Body JSON:
+      fixture_id, signal_type, value, direction, description, source (optional)
+
+    signal_type options:
+      injury_home | injury_away | sharp_line_move | weather | referee | public_betting
+    """
+    from app.services.insider_signals import _upsert_signal
+    payload = await request.json()
+    fixture_id  = int(payload["fixture_id"])
+    signal_type = str(payload["signal_type"])
+    value       = float(payload.get("value") or 0)
+    direction   = str(payload.get("direction", "neutral"))
+    description = str(payload.get("description", ""))
+    source      = str(payload.get("source", "admin"))
+
+    fx = db.query(Fixture).filter(Fixture.id == fixture_id).first()
+    if not fx:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+
+    _upsert_signal(db, fixture_id, fx.sport, signal_type, source,
+                   value=value, direction=direction, description=description)
+    db.commit()
+    return {"status": "signal_added", "fixture_id": fixture_id, "signal_type": signal_type}
 
 
 @router.get("/diagnose-predict", dependencies=[Depends(require_admin)])
@@ -899,6 +959,8 @@ def diagnose_predict(db: Session = Depends(get_db)):
 @router.post("/backtest", dependencies=[Depends(require_admin)])
 def backtest(db: Session = Depends(get_db)):
     data = dataframe_from_db(db)
+    if "sport" in data.columns:
+        data["sport"] = data["sport"].str.lower()
     completed, skipped = [], []
     for sport in ("soccer", "basketball"):
         try:
