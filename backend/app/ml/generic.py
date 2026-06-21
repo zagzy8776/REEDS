@@ -53,7 +53,6 @@ class GenericSportEngine:
 
         # --- Form heuristic for rugby, volleyball, handball, mma, etc. ---
         return self._heuristic(history, fixture, sport)
-
     def _heuristic(self, history: pd.DataFrame, fixture: dict, sport: str) -> list[dict]:
         home = normalize_team_name(fixture["home_team"], sport)
         away = normalize_team_name(fixture["away_team"], sport)
