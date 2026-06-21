@@ -586,7 +586,68 @@ def sync_events(db: Session = Depends(get_db)):
     return {"synced": result}
 
 
-@router.post("/download-models", dependencies=[Depends(require_admin)])
+@router.post("/upload-model", dependencies=[Depends(require_admin)])
+async def upload_model(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Receive a trained .joblib model file from local machine or GitHub Actions.
+
+    Accepts multipart/form-data with:
+      - model: the .joblib file
+      - sport: sport name (soccer, basketball, tennis...)
+      - model_type: e.g. random_forest_fast
+      - accuracy: float as string
+      - sample_size: int as string
+
+    Saves the file to MODEL_DIR and registers it in the database.
+    """
+    import shutil
+    from pathlib import Path
+
+    settings = get_settings()
+    form = await request.form()
+
+    sport       = str(form.get("sport", "soccer"))
+    model_type  = str(form.get("model_type", "uploaded"))
+    accuracy    = float(form.get("accuracy", 0))
+    sample_size = int(form.get("sample_size", 0))
+    model_file  = form.get("model")
+
+    if not model_file:
+        raise HTTPException(status_code=400, detail="model file required")
+
+    Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
+    filename = model_file.filename or f"{sport}_uploaded.joblib"
+    dest = Path(settings.model_dir) / filename
+
+    # Save file
+    with open(dest, "wb") as f:
+        content = await model_file.read()
+        f.write(content)
+
+    # Verify it's a valid joblib bundle
+    try:
+        import joblib
+        bundle = joblib.load(str(dest))
+        # Use bundle metadata if available
+        accuracy    = float(bundle.get("accuracy", accuracy))
+        sample_size = int(bundle.get("sample_size", sample_size))
+        model_type  = "+".join(bundle.get("model_types", [model_type]))
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Invalid model file: {exc}")
+
+    mv = register_model(db, sport, model_type, str(dest), accuracy, sample_size)
+    return {
+        "status": "uploaded",
+        "sport":        sport,
+        "model_type":   model_type,
+        "accuracy":     round(accuracy * 100, 1),
+        "sample_size":  sample_size,
+        "active":       mv.is_active,
+        "path":         str(dest),
+    }
 def download_models(payload: dict | None = None, db: Session = Depends(get_db)):
     """Download the latest trained model artifacts from GitHub Releases.
 
