@@ -1,0 +1,201 @@
+name: Train ML Models
+
+# Triggers:
+# 1. Manual click in GitHub Actions UI
+# 2. Webhook from Render admin endpoint (repository_dispatch)
+# 3. Weekly schedule (Sunday 2am UTC — before the scheduler seeds data at 3am)
+on:
+  workflow_dispatch:
+    inputs:
+      sports:
+        description: 'Sports to train (comma-separated, or "all")'
+        required: false
+        default: 'all'
+  repository_dispatch:
+    types: [train-models]
+  schedule:
+    - cron: '0 2 * * 0'   # Sunday 2am UTC
+
+jobs:
+  train:
+    name: Train all sport models
+    runs-on: ubuntu-latest   # 2-core vCPU, 7GB RAM — free tier
+    timeout-minutes: 180     # 3 hours max
+
+    env:
+      DATABASE_URL:   ${{ secrets.DATABASE_URL }}
+      MODEL_DIR:      data/models
+      MIN_TRAINING_ROWS: 200
+      APP_ENV:        production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+        working-directory: .
+
+      - name: Create model output directory
+        run: mkdir -p backend/data/models
+
+      - name: Run full free-data ingestion
+        working-directory: backend
+        run: |
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, ".")
+          os.environ.setdefault("DATABASE_URL", os.environ["DATABASE_URL"])
+          os.environ.setdefault("MODEL_DIR", "data/models")
+          os.environ.setdefault("MIN_TRAINING_ROWS", "200")
+
+          from app.db.session import SessionLocal, init_db
+          init_db()
+          db = SessionLocal()
+          try:
+              from app.scraper.free_data import ingest_all_free_sources
+              print("Starting free data ingestion (all 21 leagues, 8 seasons)...")
+              result = ingest_all_free_sources(db, max_leagues=21)
+              for source, r in result.items():
+                  total = r.get("total", 0) if isinstance(r, dict) else r
+                  print(f"  {source}: {total} rows loaded")
+          finally:
+              db.close()
+          print("Data ingestion complete.")
+          EOF
+
+      - name: Train all sport models
+        working-directory: backend
+        run: |
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, ".")
+          os.environ.setdefault("DATABASE_URL", os.environ["DATABASE_URL"])
+          os.environ.setdefault("MODEL_DIR", "data/models")
+          os.environ.setdefault("MIN_TRAINING_ROWS", "200")
+
+          from app.db.session import SessionLocal, init_db
+          from app.services.predictions import dataframe_from_db
+          from app.ml.train import train_soccer_model, train_basketball_model, train_generic_sport_model
+          from app.services.model_registry import register_model
+          import json
+
+          init_db()
+          db = SessionLocal()
+          results = []
+          errors = []
+
+          try:
+              print("Loading training data from database...")
+              data = dataframe_from_db(db, max_age_days=None)
+              print(f"Total rows loaded: {len(data)}")
+              if "sport" in data.columns:
+                  print("Rows per sport:")
+                  for sport, count in data.groupby("sport").size().items():
+                      print(f"  {sport}: {count}")
+
+              # --- Soccer (primary model) ---
+              try:
+                  print("\nTraining soccer model...")
+                  soccer_data = data[data["sport"] == "soccer"].copy()
+                  print(f"  Soccer rows: {len(soccer_data)}")
+                  result = train_soccer_model(soccer_data)
+                  mv = register_model(db, "soccer", result["model_type"], result["path"],
+                                      result["accuracy"], result["sample_size"])
+                  print(f"  Soccer: {result['accuracy']:.1%} acc on {result['sample_size']} rows -> {result['path']}")
+                  results.append({"sport": "soccer", **result, "active": mv.is_active})
+              except Exception as e:
+                  print(f"  Soccer training FAILED: {e}")
+                  errors.append({"sport": "soccer", "error": str(e)})
+
+              # --- Basketball ---
+              try:
+                  print("\nTraining basketball model...")
+                  bball_data = data[data["sport"] == "basketball"].copy()
+                  print(f"  Basketball rows: {len(bball_data)}")
+                  result = train_basketball_model(bball_data)
+                  mv = register_model(db, "basketball", result["model_type"], result["path"],
+                                      result["accuracy"], result["sample_size"])
+                  print(f"  Basketball: {result['accuracy']:.1%} acc on {result['sample_size']} rows")
+                  results.append({"sport": "basketball", **result, "active": mv.is_active})
+              except Exception as e:
+                  print(f"  Basketball training FAILED: {e}")
+                  errors.append({"sport": "basketball", "error": str(e)})
+
+              # --- Other sports (tennis, NFL, NHL, cricket, rugby, baseball) ---
+              for sport in ("tennis", "american_football", "hockey", "cricket", "rugby", "baseball"):
+                  try:
+                      sport_data = data[data["sport"] == sport].copy()
+                      if len(sport_data) < 200:
+                          print(f"\n  {sport}: only {len(sport_data)} rows — skipping (need 200+)")
+                          continue
+                      print(f"\nTraining {sport} model ({len(sport_data)} rows)...")
+                      result = train_generic_sport_model(sport_data, sport)
+                      mv = register_model(db, sport, result["model_type"], result["path"],
+                                          result["accuracy"], result["sample_size"])
+                      print(f"  {sport}: {result['accuracy']:.1%} acc on {result['sample_size']} rows")
+                      results.append({"sport": sport, **result, "active": mv.is_active})
+                  except Exception as e:
+                      print(f"  {sport} training FAILED: {e}")
+                      errors.append({"sport": sport, "error": str(e)})
+
+          finally:
+              db.close()
+
+          # Write summary
+          summary = {"trained": results, "errors": errors}
+          with open("data/models/training_summary.json", "w") as f:
+              json.dump(summary, f, indent=2, default=str)
+
+          print(f"\n=== TRAINING COMPLETE ===")
+          print(f"Trained: {len(results)} models")
+          print(f"Errors:  {len(errors)}")
+          for r in results:
+              print(f"  {r['sport']}: {r.get('accuracy', 0):.1%} on {r.get('sample_size', 0)} rows")
+
+          if errors:
+              print("Errors:")
+              for e in errors:
+                  print(f"  {e['sport']}: {e['error']}")
+          EOF
+
+      - name: List trained model files
+        run: ls -lh backend/data/models/
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-models-${{ github.run_number }}
+          path: backend/data/models/
+          retention-days: 30   # keep 30 days
+
+      - name: Create GitHub Release with models
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: models-v${{ github.run_number }}
+          name: "Trained Models — Run ${{ github.run_number }}"
+          body: |
+            Auto-trained model bundle from GitHub Actions.
+            - Runner: ubuntu-latest (2-core, 7GB RAM)
+            - Trigger: ${{ github.event_name }}
+            - Commit: ${{ github.sha }}
+          files: backend/data/models/*.joblib
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Render to download new models
+        run: |
+          curl -s -X POST \
+            -H "x-admin-key: ${{ secrets.ADMIN_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"run_number": "${{ github.run_number }}"}' \
+            https://reeds-phj1.onrender.com/api/admin/download-models || true
+        continue-on-error: true   # don't fail the workflow if Render is asleep

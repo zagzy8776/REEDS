@@ -586,7 +586,140 @@ def sync_events(db: Session = Depends(get_db)):
     return {"synced": result}
 
 
-@router.post("/scan-value", dependencies=[Depends(require_admin)])
+@router.post("/download-models", dependencies=[Depends(require_admin)])
+def download_models(payload: dict | None = None, db: Session = Depends(get_db)):
+    """Download the latest trained model artifacts from GitHub Releases.
+
+    Called automatically by the GitHub Actions train.yml workflow after
+    training completes. Also callable manually to pull a specific run.
+
+    Requires GITHUB_REPO env var (e.g. 'zagzy8776/REEDS') to be set on Render.
+    """
+    import requests as _req
+    import tempfile
+    import os
+    from pathlib import Path
+
+    settings = get_settings()
+    github_repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+
+    headers = {"Accept": "application/vnd.github+json"}
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    # Get latest release tagged models-v*
+    try:
+        releases_url = f"https://api.github.com/repos/{github_repo}/releases"
+        resp = _req.get(releases_url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        releases = resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub API error: {exc}")
+
+    # Find the latest models release
+    model_releases = [r for r in releases if str(r.get("tag_name", "")).startswith("models-v")]
+    if not model_releases:
+        return {"status": "no_models_release", "message": "No model releases found on GitHub yet. Run the train workflow first."}
+
+    latest = model_releases[0]  # sorted newest first
+    assets = latest.get("assets", [])
+    joblib_assets = [a for a in assets if a["name"].endswith(".joblib")]
+
+    if not joblib_assets:
+        return {"status": "no_joblib_assets", "release": latest["tag_name"],
+                "message": "Release found but no .joblib files attached."}
+
+    Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
+    downloaded = []
+    errors = []
+
+    for asset in joblib_assets:
+        try:
+            dl_url = asset["browser_download_url"]
+            fname = asset["name"]
+            dest = Path(settings.model_dir) / fname
+
+            dl_resp = _req.get(dl_url, headers=headers, timeout=120, stream=True)
+            dl_resp.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in dl_resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            downloaded.append(str(dest))
+        except Exception as exc:
+            errors.append({"file": asset["name"], "error": str(exc)})
+
+    if not downloaded:
+        return {"status": "download_failed", "errors": errors}
+
+    # Re-register all downloaded models in the DB
+    from app.ml.train import FEATURES, BASKETBALL_FEATURES
+    registered = []
+    for path in downloaded:
+        try:
+            import joblib as _jl
+            bundle = _jl.load(path)
+            sport = bundle.get("sport") or (
+                "basketball" if "basketball" in path else "soccer"
+            )
+            acc = float(bundle.get("accuracy", 0.0))
+            rows = int(bundle.get("sample_size", 0))
+            mv = register_model(db, sport, "+".join(bundle.get("model_types", ["rf"])), path, acc, rows)
+            registered.append({"sport": sport, "accuracy": round(acc * 100, 1), "rows": rows, "active": mv.is_active})
+        except Exception as exc:
+            errors.append({"file": path, "error": str(exc)})
+
+    return {
+        "status": "success",
+        "release": latest["tag_name"],
+        "downloaded": len(downloaded),
+        "registered": registered,
+        "errors": errors,
+    }
+
+
+@router.post("/trigger-training", dependencies=[Depends(require_admin)])
+def trigger_github_training(db: Session = Depends(get_db)):
+    """Trigger the GitHub Actions training workflow via repository_dispatch.
+
+    This kicks off the full train.yml workflow on GitHub's 2-core/7GB runners.
+    Training completes in ~3 minutes and auto-notifies Render when done.
+
+    Requires GITHUB_REPO and GITHUB_TOKEN environment variables on Render.
+    """
+    import requests as _req
+    import os
+
+    github_repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+
+    if not github_token:
+        return {
+            "status": "no_token",
+            "message": "GITHUB_TOKEN not set on Render. Add it in Render dashboard → Environment Variables.",
+            "manual_trigger": f"https://github.com/{github_repo}/actions/workflows/train.yml",
+        }
+
+    try:
+        resp = _req.post(
+            f"https://api.github.com/repos/{github_repo}/dispatches",
+            headers={
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json",
+            },
+            json={"event_type": "train-models"},
+            timeout=15,
+        )
+        if resp.status_code == 204:
+            return {
+                "status": "triggered",
+                "message": "GitHub Actions training workflow triggered. Check progress at GitHub Actions tab.",
+                "actions_url": f"https://github.com/{github_repo}/actions",
+                "eta": "~3-5 minutes for full training on 7GB GitHub runner",
+            }
+        return {"status": "error", "code": resp.status_code, "detail": resp.text}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 def scan_value(sport: str | None = None, min_edge: float = 1.04, db: Session = Depends(get_db)):
     """Scrape SportyBet and run the value betting engine immediately.
 
