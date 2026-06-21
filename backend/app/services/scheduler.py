@@ -197,6 +197,55 @@ def run_daily_learning_pipeline() -> dict:
             log.exception("Daily prediction generation failed")
             report["skipped"].append({"stage": "predict", "reason": str(exc)})
 
+        # Backfill model-implied odds on any fixture still missing odds after ingestion
+        try:
+            from app.ml.generic import GenericSportEngine
+            from app.ml.ensemble import LoyalEdgeEngine
+            from app.services.model_registry import active_model_path
+            from app.services.predictions import _backfill_fixture_odds
+
+            today_ref = date.today()
+            from app.db.models import Fixture as _Fixture
+            missing = (
+                db.query(_Fixture)
+                .filter(
+                    func.date(_Fixture.match_date) >= today_ref,
+                    _Fixture.home_odds == None,
+                    _Fixture.draw_odds == None,
+                    _Fixture.away_odds == None,
+                )
+                .order_by(_Fixture.match_date.asc())
+                .limit(300)
+                .all()
+            )
+            if missing:
+                _history = dataframe_from_db(db, max_age_days=90)
+                _soccer_engine = LoyalEdgeEngine(active_model_path(db, "soccer"))
+                _generic_engine = GenericSportEngine()
+                _backfilled = 0
+                for _fx in missing:
+                    try:
+                        if _fx.sport == "soccer":
+                            _items = _soccer_engine.predict_soccer(_history, {
+                                "sport": _fx.sport, "home_team": _fx.home_team,
+                                "away_team": _fx.away_team, "match_date": _fx.match_date,
+                                "league": _fx.league, "home_odds": None, "draw_odds": None, "away_odds": None,
+                            })
+                        else:
+                            _items = _generic_engine.predict(_history, {
+                                "sport": _fx.sport, "home_team": _fx.home_team,
+                                "away_team": _fx.away_team, "match_date": _fx.match_date,
+                            })
+                        if _backfill_fixture_odds(db, _fx, _items):
+                            _backfilled += 1
+                    except Exception:
+                        continue
+                db.commit()
+                report["odds_backfilled"] = _backfilled
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Odds backfill failed")
+            report["skipped"].append({"stage": "odds_backfill", "reason": str(exc)})
+
         return report
     finally:
         db.close()

@@ -302,6 +302,64 @@ def refresh_odds(db: Session = Depends(get_db)):
     return {"refreshed": result}
 
 
+@router.post("/backfill-odds", dependencies=[Depends(require_admin)])
+def backfill_odds(db: Session = Depends(get_db)):
+    """Backfill model-implied odds on all upcoming fixtures that have no bookmaker odds.
+
+    Runs the prediction engine on every upcoming fixture without bookmaker odds and
+    writes fair-value implied odds back to the fixture row. Safe to call repeatedly —
+    it never overwrites real bookmaker odds, only fills gaps.
+    """
+    from app.ml.generic import GenericSportEngine
+    from app.ml.ensemble import LoyalEdgeEngine
+    from app.services.model_registry import active_model_path
+    from app.services.predictions import _backfill_fixture_odds, dataframe_from_db
+
+    today_ref = date.today()
+    fixtures = (
+        db.query(Fixture)
+        .filter(
+            func.date(Fixture.match_date) >= today_ref,
+            Fixture.home_odds == None,
+            Fixture.draw_odds == None,
+            Fixture.away_odds == None,
+        )
+        .order_by(Fixture.match_date.asc())
+        .limit(500)
+        .all()
+    )
+    if not fixtures:
+        return {"backfilled": 0, "message": "No fixtures missing odds"}
+
+    history = dataframe_from_db(db, max_age_days=90)
+    soccer_engine = LoyalEdgeEngine(active_model_path(db, "soccer"))
+    generic_engine = GenericSportEngine()
+    backfilled = 0
+    errors = 0
+
+    for fx in fixtures:
+        try:
+            if fx.sport == "soccer":
+                items = soccer_engine.predict_soccer(history, {
+                    "sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team,
+                    "match_date": fx.match_date, "league": fx.league,
+                    "home_odds": None, "draw_odds": None, "away_odds": None,
+                })
+            else:
+                items = generic_engine.predict(history, {
+                    "sport": fx.sport, "home_team": fx.home_team,
+                    "away_team": fx.away_team, "match_date": fx.match_date,
+                })
+            if _backfill_fixture_odds(db, fx, items):
+                backfilled += 1
+        except Exception:
+            errors += 1
+            continue
+
+    db.commit()
+    return {"backfilled": backfilled, "errors": errors, "total_checked": len(fixtures)}
+
+
 @router.post("/predict", dependencies=[Depends(require_admin)])
 def predict(db: Session = Depends(get_db)):
     return {"generated": generate_today_predictions(db)}

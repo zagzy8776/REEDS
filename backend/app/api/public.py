@@ -330,8 +330,10 @@ def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league:
             "away_odds": f.away_odds,
             "source": f.source,
             "has_odds": any([f.home_odds, f.draw_odds, f.away_odds]),
-            "api_status": (f.extra or {}).get("status") if isinstance(f.extra, dict) else None,
             "odds_source": (f.extra or {}).get("odds_source") if isinstance(f.extra, dict) else None,
+            "odds_note": (f.extra or {}).get("odds_note") if isinstance(f.extra, dict) else None,
+            "model_implied_odds": (f.extra or {}).get("odds_source") == "model_implied" if isinstance(f.extra, dict) else False,
+            "api_status": (f.extra or {}).get("status") if isinstance(f.extra, dict) else None,
         }
         for f in rows
     ]
@@ -387,6 +389,10 @@ def fixture_detail(fixture_id: int, db: Session = Depends(get_db)):
             "home_odds": fixture.home_odds,
             "draw_odds": fixture.draw_odds,
             "away_odds": fixture.away_odds,
+            "has_odds": any([fixture.home_odds, fixture.draw_odds, fixture.away_odds]),
+            "odds_source": (fixture.extra or {}).get("odds_source") if isinstance(fixture.extra, dict) else None,
+            "odds_note": (fixture.extra or {}).get("odds_note") if isinstance(fixture.extra, dict) else None,
+            "model_implied_odds": (fixture.extra or {}).get("odds_source") == "model_implied" if isinstance(fixture.extra, dict) else False,
             "api_status": (fixture.extra or {}).get("status") if isinstance(fixture.extra, dict) else None,
         },
         "predictions": [serialize_prediction(p, fixture) for p in predictions],
