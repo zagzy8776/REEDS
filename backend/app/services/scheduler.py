@@ -78,14 +78,23 @@ def run_daily_learning_pipeline() -> dict:
         if csv_count:
             log.info("Seeded %d historical CSV rows into database", csv_count)
 
-        # Pull free multi-sport data (football-data.co.uk, tennis, NBA, NFL, NHL, IPL)
-        # Only runs when the DB has fewer than 5000 rows to avoid re-downloading every day
+        # Pull free multi-sport data on first boot OR when model sample is low
+        # Threshold: if soccer model has < 1000 training rows, we need more data
         from app.db.models import Fixture as _Fixture
+        from app.db.models import ModelVersion as _ModelVersion
         fixture_count = db.query(_Fixture).count()
-        if fixture_count < 5000:
+        best_soccer_model = (
+            db.query(_ModelVersion)
+            .filter(_ModelVersion.sport == "soccer", _ModelVersion.is_active == True)
+            .order_by(_ModelVersion.trained_at.desc())
+            .first()
+        )
+        needs_data = fixture_count < 10000 or (best_soccer_model and best_soccer_model.sample_size < 1000)
+        if needs_data:
             try:
                 from app.scraper.free_data import ingest_all_free_sources
-                free_result = ingest_all_free_sources(db, max_leagues=20)
+                # Incremental: pull 3 leagues at a time to avoid OOM
+                free_result = ingest_all_free_sources(db, max_leagues=3)
                 log.info("Free data ingestion: %s", {k: v.get("total", 0) if isinstance(v, dict) else v for k, v in free_result.items()})
                 report["free_data_seeded"] = True
             except Exception as exc:  # noqa: BLE001

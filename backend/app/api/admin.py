@@ -363,16 +363,51 @@ def backfill_odds(db: Session = Depends(get_db)):
 
 
 @router.post("/ingest-free", dependencies=[Depends(require_admin)])
-def ingest_free(max_leagues: int = 20, db: Session = Depends(get_db)):
-    """Pull free historical data from football-data.co.uk and OpenFootball.
+def ingest_free(max_leagues: int = 3, db: Session = Depends(get_db)):
+    """Pull free historical data — call this 5-6 times to load all leagues.
 
-    No API key needed. Adds up to 8 seasons × 20 leagues ≈ 60,000 rows with
-    real Betfair/B365/Pinnacle odds. Safe to call repeatedly — duplicates skipped.
-    After this completes, call /train to retrain the models on the full dataset.
+    Each call downloads max_leagues leagues (default 3) to stay within
+    Render's 30-second request window. Call repeatedly until all leagues loaded.
+
+    Round 1: max_leagues=3  (EPL, La Liga, Serie A)
+    Round 2: max_leagues=3  (Bundesliga, Ligue 1, Eredivisie)
+    ...etc
+
+    After all rounds, call /train to retrain models.
     """
     from app.scraper.free_data import ingest_all_free_sources
-    result = ingest_all_free_sources(db, max_leagues=min(max_leagues, 20))
-    return {"status": "done", "result": result}
+    result = ingest_all_free_sources(db, max_leagues=min(max_leagues, 5))
+    total = sum(v.get("total", 0) if isinstance(v, dict) else 0 for v in result.values())
+    fixture_count = db.query(Fixture).count()
+    return {
+        "status": "done",
+        "fixtures_loaded_this_run": total,
+        "total_fixtures_in_db": fixture_count,
+        "result": {k: v.get("total", v) if isinstance(v, dict) else v for k, v in result.items()},
+        "next_step": "Call /train when fixture count reaches 20,000+" if fixture_count < 20000 else "Ready to train — call /train now",
+    }
+
+
+@router.get("/training-status", dependencies=[Depends(require_admin)])
+def training_status(db: Session = Depends(get_db)):
+    """Quick check — how many rows do we have and what models are active."""
+    from app.db.models import ModelVersion
+    fixture_count = db.query(Fixture).count()
+    soccer_count = db.query(Fixture).filter(Fixture.sport == "soccer", Fixture.home_score != None).count()
+    active_models = db.query(ModelVersion).filter(ModelVersion.is_active == True).all()
+    return {
+        "total_fixtures": fixture_count,
+        "soccer_completed": soccer_count,
+        "ready_to_train": soccer_count >= 1000,
+        "active_models": [
+            {"sport": m.sport, "type": m.model_type, "rows": m.sample_size, "accuracy": round(m.accuracy * 100, 1)}
+            for m in active_models
+        ],
+        "recommendation": (
+            "✅ Run /train now" if soccer_count >= 5000
+            else f"📥 Need more data — run /ingest-free (have {soccer_count} soccer rows, need 5000+)"
+        ),
+    }
 
 
 @router.post("/train-full", dependencies=[Depends(require_admin)])
