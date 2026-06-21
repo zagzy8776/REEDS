@@ -523,6 +523,18 @@ def sync_events(db: Session = Depends(get_db)):
     return {"synced": result}
 
 
+@router.post("/scan-value", dependencies=[Depends(require_admin)])
+def scan_value(sport: str | None = None, min_edge: float = 1.04, db: Session = Depends(get_db)):
+    """Scrape SportyBet and run the value betting engine immediately.
+
+    Returns all fixtures where our model finds a mathematical edge over
+    SportyBet's overround-stripped fair probabilities.
+    """
+    from app.services.value_bets import run_value_scan
+    sports = [sport] if sport else None
+    return run_value_scan(db, sports=sports, min_edge=min_edge)
+
+
 @router.post("/predict", dependencies=[Depends(require_admin)])
 def predict(db: Session = Depends(get_db)):
     return {"generated": generate_today_predictions(db)}
