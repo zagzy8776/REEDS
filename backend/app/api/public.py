@@ -289,6 +289,47 @@ async def post_win_slip(request: Request, db: Session = Depends(get_db)):
     return {"id": row.id, "status": "win_posted"}
 
 
+@router.get("/value-bets")
+def value_bets(
+    sport: str | None = None,
+    min_edge: float = 1.04,
+    db: Session = Depends(get_db),
+):
+    """Live value bets — SportyBet odds vs our model's predicted probabilities.
+
+    Returns only fixtures where the model finds a mathematical edge over the
+    bookmaker's fair (overround-stripped) probabilities. Includes Kelly Criterion
+    stake sizing. Edge minimum defaults to 4% (value_score > 1.04).
+    """
+    from app.services.value_bets import run_value_scan
+    sports = [sport] if sport else None
+    return run_value_scan(db, sports=sports, min_edge=max(1.01, min(min_edge, 1.50)))
+
+
+@router.get("/value-bets/explain")
+def value_bets_explain():
+    """Explains the value betting methodology used by LOYAL EDGE."""
+    return {
+        "methodology": "LOYAL EDGE Value Detection",
+        "steps": [
+            "Fetch upcoming fixtures and odds from bookmakers",
+            "Strip bookmaker overround to find fair (zero-vig) probabilities",
+            "Run our ML model (trained on 60k+ historical matches) to get predicted probabilities",
+            "Calculate value score: model_probability × bookmaker_odds",
+            "Flag selections where value_score > 1.04 (4% positive expected value)",
+            "Size recommended stake using fractional Kelly Criterion (0.25× full Kelly)",
+        ],
+        "overround_example": {
+            "bookmaker_odds": {"home": 2.00, "draw": 3.40, "away": 4.00},
+            "raw_implied": {"home": "50.0%", "draw": "29.4%", "away": "25.0%"},
+            "total_implied": "104.4% (4.4% is the bookmaker margin)",
+            "fair_probabilities": {"home": "47.9%", "draw": "28.2%", "away": "23.9%"},
+        },
+        "kelly_criterion": "f* = (b×p - q) / b, scaled by 0.25 (fractional Kelly). Never exceeds 5% of bankroll.",
+        "responsible_note": "Value bets identify mathematical edges. They do not guarantee wins. Always stake within your means.",
+    }
+
+
 @router.get("/fixtures/upcoming")
 def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league: str | None = None, limit: int = 300, db: Session = Depends(get_db)):
     query = db.query(Fixture)

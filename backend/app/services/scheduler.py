@@ -373,6 +373,30 @@ def start_scheduler() -> BackgroundScheduler:
         coalesce=True,
     )
 
+    # Value bet scan every 30 minutes — scrapes SportyBet, runs model, finds edges
+    def value_scan_job():
+        from app.services.value_bets import run_value_scan
+        db = SessionLocal()
+        try:
+            result = run_value_scan(db, sports=["soccer", "basketball", "tennis"])
+            found = result.get("value_bets_found", 0)
+            if found:
+                log.info("Value scan: found %d value bets from %d fixtures", found, result.get("scanned", 0))
+        except Exception:
+            log.exception("Value scan job failed")
+        finally:
+            db.close()
+
+    scheduler.add_job(
+        value_scan_job,
+        "interval",
+        minutes=30,
+        id="value_bet_scan",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Free data ingestion weekly — pulls football-data.co.uk + OpenFootball
     def free_data_job():
         from app.scraper.free_data import ingest_all_free_sources
