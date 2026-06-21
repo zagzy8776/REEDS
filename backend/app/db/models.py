@@ -191,3 +191,68 @@ class BacktestRun(Base):
     roi_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
     metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class MatchEvent(Base):
+    """Live match events: goals, cards, substitutions, lineups.
+
+    Stored per-fixture so the SSE stream and notification engine can
+    read new rows since the last poll. Each event is idempotent on
+    (fixture_id, event_type, minute, team, player) to avoid duplicates
+    from repeated score-sync calls.
+    """
+
+    __tablename__ = "match_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "fixture_id", "event_type", "minute", "team", "player",
+            name="uq_match_event",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fixture_id: Mapped[int] = mapped_column(Integer, index=True)
+    # goal | yellow_card | red_card | substitution | lineup | var | penalty_missed
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    team: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    player: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    assist: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    detail: Mapped[str | None] = mapped_column(String(120), nullable=True)   # "Normal Goal", "Own Goal", "Yellow Card", etc.
+    home_score_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class MatchLineup(Base):
+    """Starting XI + bench for each team in a fixture."""
+
+    __tablename__ = "match_lineups"
+    __table_args__ = (
+        UniqueConstraint("fixture_id", "team", "player", name="uq_lineup_player"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fixture_id: Mapped[int] = mapped_column(Integer, index=True)
+    team: Mapped[str] = mapped_column(String(120), index=True)
+    player: Mapped[str] = mapped_column(String(120))
+    position: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_starter: Mapped[bool] = mapped_column(Boolean, default=True)
+    formation: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PushSubscription(Base):
+    """Web Push / notification subscriptions from browser clients."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True)
+    keys_p256dh: Mapped[str | None] = mapped_column(Text, nullable=True)
+    keys_auth: Mapped[str | None] = mapped_column(Text, nullable=True)
+    username: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    fixture_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)  # subscribed fixtures
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

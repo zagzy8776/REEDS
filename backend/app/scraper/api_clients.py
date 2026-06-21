@@ -27,6 +27,33 @@ class ApiFootballClient:
             headers={"x-apisports-key": self.api_key},
         ).json()
 
+    def fixture_events(self, fixture_id: int) -> dict:
+        if not self.api_key:
+            return {"response": []}
+        return self.http.get(
+            f"{self.base_url}/fixtures/events",
+            params={"fixture": fixture_id},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+    def fixture_lineups(self, fixture_id: int) -> dict:
+        if not self.api_key:
+            return {"response": []}
+        return self.http.get(
+            f"{self.base_url}/fixtures/lineups",
+            params={"fixture": fixture_id},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+    def fixture_statistics(self, fixture_id: int) -> dict:
+        if not self.api_key:
+            return {"response": []}
+        return self.http.get(
+            f"{self.base_url}/fixtures/statistics",
+            params={"fixture": fixture_id},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
     def odds_by_date(self, target_date: str, bookmaker: int | None = None) -> dict:
         if not self.api_key:
             return {"response": [], "note": "API_FOOTBALL_KEY not configured"}

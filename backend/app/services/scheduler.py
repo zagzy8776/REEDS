@@ -316,6 +316,56 @@ def start_scheduler() -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
+
+    # Live event sync every 60 seconds during live matches (goals, cards, lineups)
+    def live_event_job():
+        from app.services.live_events import sync_live_events
+        db = SessionLocal()
+        settings = get_settings()
+        try:
+            key = settings.api_football_key or settings.api_sports_key
+            result = sync_live_events(db, key)
+            if result["new_events"]:
+                log.info("Live events: %s", result)
+        except Exception:
+            log.exception("Live event sync job failed")
+        finally:
+            db.close()
+
+    scheduler.add_job(
+        live_event_job,
+        "interval",
+        seconds=60,
+        id="live_event_sync",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Free data ingestion weekly — pulls football-data.co.uk + OpenFootball
+    def free_data_job():
+        from app.scraper.free_data import ingest_all_free_sources
+        db = SessionLocal()
+        try:
+            result = ingest_all_free_sources(db, max_leagues=6)
+            log.info("Free data ingestion: %s", result)
+        except Exception:
+            log.exception("Free data ingestion job failed")
+        finally:
+            db.close()
+
+    scheduler.add_job(
+        free_data_job,
+        "cron",
+        day_of_week="sun",
+        hour=3,
+        minute=0,
+        id="free_data_weekly",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.add_job(
         daily_job,
         "date",
