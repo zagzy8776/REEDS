@@ -140,6 +140,16 @@ def _upload(path: str, sport: str, model_type: str,
     Primary: POST the .joblib file to Render's /api/admin/upload-model.
     Fallback: Create a GitHub Release asset, then tell Render to pull it.
     """
+    # ── Safety: refuse to upload files >50MB (Render slug limit) ────────────
+    try:
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+    except OSError as exc:
+        return False, f"File check failed: {exc}"
+    if size_mb > 50:
+        _log(f"⚠️  Upload {sport}: {size_mb:.1f}MB exceeds 50MB limit — skipping direct upload, trying GitHub Release fallback")
+        # Skip direct POST attempts, go straight to fallback
+        return _upload_via_github_release(path, sport, model_type, accuracy, sample_size)
+
     # ── Primary: direct POST to Render ───────────────────────────────────────
     for attempt in range(2):
         try:
@@ -217,6 +227,56 @@ def _upload(path: str, sport: str, model_type: str,
             return True, f"pull-model OK via GitHub Release {tag}"
         return False, f"GitHub Release created but Render pull failed: {pull.status_code}"
 
+    except Exception as e:
+        return False, f"GitHub Release fallback failed: {e}"
+
+
+def _upload_via_github_release(path: str, sport: str, model_type: str,
+                               accuracy: float, sample_size: int) -> tuple[bool, str]:
+    """Create a GitHub Release and ask Render to pull it."""
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+    GITHUB_REPO  = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")
+    if not GITHUB_TOKEN:
+        return False, "No GITHUB_TOKEN secret — add it to Space settings for pull-model fallback"
+    try:
+        import json as _json
+        fname = Path(path).name
+        tag = f"models-v{time.strftime('%Y%m%d%H%M%S')}"
+
+        rel = requests.post(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases",
+            headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                     "Accept": "application/vnd.github+json"},
+            json={"tag_name": tag, "name": f"Model: {sport} {tag}",
+                  "body": f"Auto-trained {sport} model. accuracy={accuracy:.3f} rows={sample_size}",
+                  "draft": False, "prerelease": False},
+            timeout=30,
+        )
+        if not rel.ok:
+            return False, f"GitHub release creation failed: {rel.status_code} {rel.text[:200]}"
+
+        upload_url = rel.json()["upload_url"].replace("{?name,label}", "")
+        with open(path, "rb") as f:
+            asset = requests.post(
+                f"{upload_url}?name={fname}",
+                headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                         "Content-Type": "application/octet-stream"},
+                data=f,
+                timeout=120,
+            )
+        if not asset.ok:
+            return False, f"GitHub asset upload failed: {asset.status_code} {asset.text[:200]}"
+
+        _log(f"Model pushed to GitHub Release {tag} — triggering Render pull...")
+        pull = requests.post(
+            f"{RENDER_URL}/api/admin/download-models",
+            headers={"x-admin-key": ADMIN_KEY},
+            json={},
+            timeout=60,
+        )
+        if pull.ok:
+            return True, f"pull-model OK via GitHub Release {tag}"
+        return False, f"GitHub Release created but Render pull failed: {pull.status_code}"
     except Exception as e:
         return False, f"GitHub Release fallback failed: {e}"
 

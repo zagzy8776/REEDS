@@ -176,7 +176,7 @@ jobs:
           path: backend/data/models/
           retention-days: 30   # keep 30 days
 
-      - name: Create GitHub Release with models
+      - name: Create GitHub Release with slim models only
         uses: softprops/action-gh-release@v2
         with:
           tag_name: models-v${{ github.run_number }}
@@ -186,7 +186,8 @@ jobs:
             - Runner: ubuntu-latest (2-core, 7GB RAM)
             - Trigger: ${{ github.event_name }}
             - Commit: ${{ github.sha }}
-          files: backend/data/models/*.joblib
+            - Only slim bundles (RF + XGBoost, ~15-30MB) uploaded for Render compatibility
+          files: backend/data/models/*_slim.joblib
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
