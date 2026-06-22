@@ -110,7 +110,7 @@ export function PredictionCard({ p }: PredictionCardProps) {
       <div className="flex items-start justify-between mb-4">
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-2">
-            <Badge variant="outline" className="text-xs">
+            <Badge className="border border-slate-600 text-xs">
               {p.sport}
             </Badge>
             <span className="text-xs text-slate-500">{p.league}</span>
@@ -291,13 +291,12 @@ export function PredictionCard({ p }: PredictionCardProps) {
           )}
         </div>
         <Badge
-          variant="outline"
           className={
             p.result === "won"
-              ? "border-emerald-500/50 text-emerald-400"
+              ? "border border-emerald-500/50 text-emerald-400"
               : p.result === "lost"
-              ? "border-rose-500/50 text-rose-400"
-              : "border-slate-500/50 text-slate-400"
+              ? "border border-rose-500/50 text-rose-400"
+              : "border border-slate-500/50 text-slate-400"
           }
         >
           {p.result === "pending" ? "Pending" : p.result === "won" ? "Won" : "Lost"}
