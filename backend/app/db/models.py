@@ -159,11 +159,11 @@ class ModelVersion(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     sport: Mapped[str] = mapped_column(String(30), index=True)
-    model_type: Mapped[str] = mapped_column(String(50))
+    model_type: Mapped[str] = mapped_column(String(120))
     path: Mapped[str] = mapped_column(String(255))
     accuracy: Mapped[float] = mapped_column(Float, default=0.0)
     sample_size: Mapped[int] = mapped_column(Integer, default=0)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     trained_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
