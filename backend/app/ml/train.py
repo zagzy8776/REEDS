@@ -418,8 +418,8 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
 
     # Train ensemble with available models. For very large public-history imports,
     # use a fast RF path so training finishes reliably on local/Render machines.
-    # Threshold lowered to 15k to avoid OOM on Render's 512MB free tier.
-    if len(X) >= 15000:
+    # Threshold raised to 60k — HF Space has enough RAM for the full ensemble up to that size.
+    if len(X) >= 60000:
         result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, "soccer")
     else:
         result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=15)
@@ -489,7 +489,7 @@ def train_basketball_model(fixtures: pd.DataFrame) -> dict:
     # Remove gradient_boosting for binary (sklearn GB handles it but slower)
     factories = [(n, f) for n, f in factories if n != "gradient_boosting"]
 
-    if len(X) >= 15000:
+    if len(X) >= 60000:
         result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, "basketball")
     else:
         result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=10)
