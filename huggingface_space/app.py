@@ -64,12 +64,13 @@ def _ensure_repo(force: bool = False) -> bool:
     try:
         if not os.path.exists(REPO_DIR) or force:
             if os.path.exists(REPO_DIR):
-                subprocess.run(["rm", "-rf", REPO_DIR], timeout=30)
+                os.chdir("/home/user")
+                subprocess.run(["rm", "-rf", REPO_DIR], timeout=30, cwd="/home/user")
             _log("📥 Cloning zagzy8776/REEDS (latest)...")
             r = subprocess.run(
                 ["git", "clone", "--depth=1",
                  "https://github.com/zagzy8776/REEDS.git", REPO_DIR],
-                capture_output=True, text=True, timeout=180,
+                capture_output=True, text=True, timeout=180, cwd="/home/user",
             )
             if r.returncode != 0:
                 _log(f"Clone error: {r.stderr[:300]}")
@@ -360,6 +361,8 @@ def action_train():
         # hockey = NHL in the DB  |  never use "nhl"
         for sport in ["tennis", "american_football", "hockey",
                       "cricket", "rugby", "baseball"]:
+            if sport not in ALLOWED_SPORTS:
+                continue
             try:
                 d = data[data["sport"] == sport].copy()
                 done = d["home_score"].notna().sum()
@@ -384,7 +387,7 @@ def action_train():
                 line = f"❌ {sport.upper()}: {e}"
                 _log(line); logs.append(line)
 
-        for ep in ["/api/admin/sync-models", "/api/admin/predict",
+        for ep in ["/api/admin/predict",
                    "/api/admin/backfill-odds", "/api/admin/clear-train-flag"]:
             try:
                 requests.post(f"{RENDER_URL}{ep}",
