@@ -16,11 +16,13 @@ def test_value_betting_engine():
     # Test basic value calculations
     engine = ValueBettingEngine(bankroll=1000.0, kelly_fraction=0.25)
     
-    # Test implied probability
+    # Test implied probability (with default 6% overround for 1X2 markets)
     odds = 2.0
-    implied = engine.implied_probability(odds)
-    print(f"Implied probability for odds {odds}: {implied:.4f} (expected: 0.5000)")
-    assert 0.49 <= implied <= 0.51, "Implied probability calculation incorrect"
+    implied = engine.implied_probability(odds, "1x2")
+    # With 6% overround: 1 / (2.0 * 0.94) = 0.5319
+    expected_implied = 1.0 / (odds * 0.94)
+    print(f"Implied probability for odds {odds}: {implied:.4f} (expected: {expected_implied:.4f})")
+    assert abs(implied - expected_implied) < 0.01, "Implied probability calculation incorrect"
     
     # Test edge calculation
     model_prob = 0.60
