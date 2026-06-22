@@ -86,7 +86,8 @@ def _ensure_repo(force: bool = False) -> bool:
 
         if BACKEND_DIR not in sys.path:
             sys.path.insert(0, BACKEND_DIR)
-        os.chdir(BACKEND_DIR)
+        # Note: do NOT os.chdir here — it breaks subsequent git operations
+        # that rely on the original working directory
 
         # Verify the multi_class fix is present
         cal_path = os.path.join(BACKEND_DIR, "app/ml/calibration.py")
@@ -141,13 +142,15 @@ def _upload(path: str, sport: str, model_type: str,
             if r.ok:
                 return True, r.text
             if r.status_code == 413:
-                return False, "413 Too Large"
+                return False, f"413 Too Large — model file too big for Render free tier"
             if r.status_code in (401, 403):
                 return False, f"{r.status_code} Auth error — check ADMIN_API_KEY"
+            # Log the actual error response for debugging
+            _log(f"Upload {sport} attempt {attempt+1}: HTTP {r.status_code} — {r.text[:200]}")
         except requests.exceptions.Timeout:
             _log(f"Upload {sport} timeout (attempt {attempt+1}/3)")
         except Exception as e:
-            return False, str(e)
+            _log(f"Upload {sport} exception (attempt {attempt+1}): {e}")
         time.sleep(2 ** attempt)
     return False, "failed after 3 attempts"
 
