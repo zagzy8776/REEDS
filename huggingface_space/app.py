@@ -128,7 +128,13 @@ def _load_data(db):
 # ── Upload with retry ─────────────────────────────────────────────────────────
 def _upload(path: str, sport: str, model_type: str,
             accuracy: float, sample_size: int) -> tuple[bool, str]:
-    for attempt in range(3):
+    """Upload model to Render via direct POST, with GitHub Release fallback.
+
+    Primary: POST the .joblib file to Render's /api/admin/upload-model.
+    Fallback: Create a GitHub Release asset, then tell Render to pull it.
+    """
+    # ── Primary: direct POST to Render ───────────────────────────────────────
+    for attempt in range(2):
         try:
             with open(path, "rb") as f:
                 r = requests.post(
@@ -137,22 +143,75 @@ def _upload(path: str, sport: str, model_type: str,
                     files={"model": (Path(path).name, f, "application/octet-stream")},
                     data={"sport": sport, "model_type": model_type,
                           "accuracy": str(accuracy), "sample_size": str(sample_size)},
-                    timeout=300,
+                    timeout=120,
                 )
             if r.ok:
                 return True, r.text
             if r.status_code == 413:
-                return False, f"413 Too Large — model file too big for Render free tier"
+                _log(f"Upload {sport}: 413 Too Large — switching to GitHub Release pull")
+                break
             if r.status_code in (401, 403):
                 return False, f"{r.status_code} Auth error — check ADMIN_API_KEY"
-            # Log the actual error response for debugging
             _log(f"Upload {sport} attempt {attempt+1}: HTTP {r.status_code} — {r.text[:200]}")
         except requests.exceptions.Timeout:
-            _log(f"Upload {sport} timeout (attempt {attempt+1}/3)")
+            _log(f"Upload {sport} timeout (attempt {attempt+1}/2)")
         except Exception as e:
             _log(f"Upload {sport} exception (attempt {attempt+1}): {e}")
-        time.sleep(2 ** attempt)
-    return False, "failed after 3 attempts"
+        time.sleep(3)
+
+    # ── Fallback: GitHub Release → Render pull ────────────────────────────────
+    _log(f"Direct upload failed for {sport} — trying GitHub Release pull model...")
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+    GITHUB_REPO  = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")
+    if not GITHUB_TOKEN:
+        return False, "No GITHUB_TOKEN secret — add it to Space settings for pull-model fallback"
+
+    try:
+        import json as _json
+        fname = Path(path).name
+        tag = f"models-v{time.strftime('%Y%m%d%H%M%S')}"
+
+        # Create release
+        rel = requests.post(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases",
+            headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                     "Accept": "application/vnd.github+json"},
+            json={"tag_name": tag, "name": f"Model: {sport} {tag}",
+                  "body": f"Auto-trained {sport} model. accuracy={accuracy:.3f} rows={sample_size}",
+                  "draft": False, "prerelease": False},
+            timeout=30,
+        )
+        if not rel.ok:
+            return False, f"GitHub release creation failed: {rel.status_code} {rel.text[:200]}"
+
+        upload_url = rel.json()["upload_url"].replace("{?name,label}", "")
+        # Upload asset
+        with open(path, "rb") as f:
+            asset = requests.post(
+                f"{upload_url}?name={fname}",
+                headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                         "Content-Type": "application/octet-stream"},
+                data=f,
+                timeout=120,
+            )
+        if not asset.ok:
+            return False, f"GitHub asset upload failed: {asset.status_code} {asset.text[:200]}"
+
+        _log(f"Model pushed to GitHub Release {tag} — triggering Render pull...")
+
+        # Tell Render to pull
+        pull = requests.post(
+            f"{RENDER_URL}/api/admin/download-models",
+            headers={"x-admin-key": ADMIN_KEY},
+            json={},
+            timeout=60,
+        )
+        if pull.ok:
+            return True, f"pull-model OK via GitHub Release {tag}"
+        return False, f"GitHub Release created but Render pull failed: {pull.status_code}"
+
+    except Exception as e:
+        return False, f"GitHub Release fallback failed: {e}"
 
 # ── Actions ───────────────────────────────────────────────────────────────────
 
