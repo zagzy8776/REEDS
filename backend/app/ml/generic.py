@@ -102,10 +102,15 @@ class GenericSportEngine:
         winner_pick = "Home Win" if home_win_prob >= 0.5 else "Away Win"
         away_win_prob = 1 - home_win_prob
 
+        # If we have no real data, cap confidence below publish threshold
+        if not has_data:
+            winner_conf = min(winner_conf, 50.0)
+            home_win_prob = 0.50
+
         note = (
             f"{sport.replace('_', ' ').title()} model checks recent win rate, scoring margin, and home advantage."
             if has_data else
-            f"Limited {sport.replace('_', ' ')} history — conservative read based on home-side advantage signal."
+            f"No completed {sport.replace('_', ' ')} history in database — pick uses league-average defaults only. Not a reliable signal."
         )
 
         meta = {
@@ -140,6 +145,8 @@ class GenericSportEngine:
         dc_prob = max(home_win_prob + 0.25, away_win_prob + 0.25)  # covers draw scenario
         dc_pick = "Home or Draw" if home_win_prob >= away_win_prob else "Away or Draw"
         dc_conf = round(min(dc_prob, 0.82) * 100, 1)
+        if not has_data:
+            dc_conf = min(dc_conf, 50.0)
         items.append({
             "market": "Double Chance",
             "pick": dc_pick,
