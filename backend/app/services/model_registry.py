@@ -30,7 +30,8 @@ def register_model(db: Session, sport: str, model_type: str, path: str, accuracy
     activate = sample_ok and (current is None or not current_sample_ok or accuracy >= current.accuracy)
     if activate:
         db.query(ModelVersion).filter_by(sport=sport, is_active=True).update({"is_active": False})
-    mv = ModelVersion(sport=sport, model_type=model_type, path=path, accuracy=accuracy, sample_size=sample_size, is_active=activate)
+    safe_model_type = (model_type or "unknown")[:50]
+    mv = ModelVersion(sport=sport, model_type=safe_model_type, path=path, accuracy=accuracy, sample_size=sample_size, is_active=activate)
     db.add(mv)
     db.commit()
     db.refresh(mv)
