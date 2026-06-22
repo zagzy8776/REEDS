@@ -790,7 +790,21 @@ def download_models(payload: dict | None = None, db: Session = Depends(get_db)):
 
     Requires GITHUB_REPO env var (e.g. 'zagzy8776/REEDS') to be set on Render.
     """
+    import shutil as _shutil
     import requests as _req
+    from pathlib import Path as _Path
+
+    settings = get_settings()
+    # ── Disk sanitization: wipe stale models before pulling fresh ones ───────
+    try:
+        model_dir = _Path(settings.model_dir)
+        if model_dir.exists():
+            for old in model_dir.glob("*.joblib"):
+                old.unlink()
+        else:
+            model_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Model cleanup failed: {exc}")
     import tempfile
     import os
     from pathlib import Path
