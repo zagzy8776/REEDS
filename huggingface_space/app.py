@@ -1,6 +1,7 @@
 """
-LOYAL EDGE — Hugging Face Space trainer  v4
+LOYAL EDGE — Hugging Face Space trainer  v5
 Trains all sport models directly against Neon and pushes them live to Render.
+Changes v5: pull-model fallback via GitHub Releases, fixed os.chdir bug.
 
 CRITICAL: This file is the Space's app.py. When you update the REEDS GitHub
 repo, you must ALSO push this file to the HF Space repo to trigger a restart.
