@@ -1,8 +1,5 @@
 name: Deploy HF Space
 
-# Automatically pushes huggingface_space/ changes to the HF Space
-# whenever you push to main. That way you never need to manually
-# `cd huggingface_space && git push space master` again.
 on:
   push:
     branches: [main]
@@ -13,23 +10,27 @@ jobs:
     name: Sync huggingface_space → HF Space
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout full repo
+      - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Push huggingface_space/ to HF Space
+      - name: Push to HF Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Navigate into the huggingface_space subfolder (it's itself a git repo)
-          cd huggingface_space
+          git config --global user.email "ci@reeds.ai"
+          git config --global user.name "REEDS CI"
 
-          # Configure git with the HF token for auth
-          git remote set-url space https://Zagzy:${HF_TOKEN}@huggingface.co/spaces/Zagzy/reeds-ml-worker
+          # Clone the HF Space repo
+          git clone https://Zagzy:${HF_TOKEN}@huggingface.co/spaces/Zagzy/reeds-ml-worker hf_space_repo
 
-          # Push latest
-          git push space master
+          # Copy our files into it (overwrite everything)
+          cp huggingface_space/app.py          hf_space_repo/app.py
+          cp huggingface_space/requirements.txt hf_space_repo/requirements.txt
+          cp huggingface_space/README.md        hf_space_repo/README.md
 
-          # Reset URL to avoid leaking token in git remote output
-          git remote set-url space https://huggingface.co/spaces/Zagzy/reeds-ml-worker
+          # Commit and push
+          cd hf_space_repo
+          git add app.py requirements.txt README.md
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "sync from GitHub ${{ github.sha }}"
+          git push
