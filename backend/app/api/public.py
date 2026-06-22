@@ -119,6 +119,16 @@ def prediction_result(p: Prediction, f: Fixture) -> bool | None:
 
 def serialize_prediction(p: Prediction, f: Fixture) -> dict:
     result = prediction_result(p, f)
+    
+    # Extract value betting information if available
+    engine_meta = p.engine_meta or {}
+    value_info = {}
+    
+    if "value_bets" in engine_meta:
+        pick_key = f"{p.market}_{p.pick}".replace(" ", "_")
+        if pick_key in engine_meta["value_bets"]:
+            value_info = engine_meta["value_bets"][pick_key]
+    
     return {
         "id": p.id,
         "fixture_id": f.id,
@@ -133,7 +143,8 @@ def serialize_prediction(p: Prediction, f: Fixture) -> dict:
         "edge_score": p.edge_score,
         "risk_level": p.risk_level,
         "reasoning": p.reasoning,
-        "analysis": p.engine_meta or {},
+        "analysis": engine_meta,
+        "value_betting": value_info,
         "is_premium": p.is_premium,
         "version": p.version,
         "status": p.status,

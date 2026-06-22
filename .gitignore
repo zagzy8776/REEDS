@@ -19,3 +19,7 @@ backend/data/raw/statsbomb_open_data/
 data/raw/**/*.csv
 data/raw/**/*.json
 data/raw/statsbomb_open_data/
+
+
+#Ignore cursor AI rules
+.cursor\rules\codacy.mdc

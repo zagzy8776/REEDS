@@ -7,6 +7,7 @@ import pandas as pd
 from app.ml.features import features_for_fixture
 from app.ml.poisson import soccer_probabilities
 from app.ml.calibration import apply_calibration
+from app.ml.value_engine import ValueBettingEngine, PoissonValueEngine
 from app.services.customer_copy import high_variance_warning
 from app.utils.team_names import normalize_team_name
 
@@ -15,7 +16,7 @@ class LoyalEdgeEngine:
     """Private hybrid engine using multi-model ensemble + Poisson blend.
 
     Loads the ensemble bundle trained by train.py (which may contain XGBoost,
-    LightGBM, CatBoost, RandomForest, GradientBoosting, and a meta-learner).
+    and RandomForest).
     Blends ensemble probabilities with Poisson goal simulation for final output.
     """
 
@@ -52,25 +53,6 @@ class LoyalEdgeEngine:
             for proba, w in zip(all_probas, weights)
         )
 
-        # Meta-learner blend if available. During training the meta model sees
-        # one row shaped as [model_1_class_probs..., model_2_class_probs...].
-        # For a single fixture we must flatten all model probability vectors
-        # into that same one-row shape, not column-stack into (classes, models).
-        if "meta_learner" in self.bundle:
-            stacked = np.array([np.concatenate(all_probas)])
-            try:
-                meta_probas = self.bundle["meta_learner"].predict_proba(stacked)[0]
-                aligned_meta = np.zeros(len(labels))
-                for src_idx, cls in enumerate(self.bundle["meta_learner"].classes_):
-                    if cls in labels:
-                        aligned_meta[labels.index(cls)] = meta_probas[src_idx]
-                if aligned_meta.sum() > 0:
-                    ensemble_probas = 0.7 * ensemble_probas + 0.3 * aligned_meta
-            except Exception:
-                # If an older bundle has a different meta shape, keep the safe
-                # weighted ensemble output rather than failing prediction generation.
-                pass
-
         cls_map = {0: "away", 1: "draw", 2: "home"}
         return {cls_map.get(i, str(i)): float(ensemble_probas[i]) for i in range(len(labels))}
 
@@ -101,6 +83,9 @@ class LoyalEdgeEngine:
         home_lam = max((f["home_goals_for"] + f["away_goals_against"]) / 2, 0.2)
         away_lam = max((f["away_goals_for"] + f["home_goals_against"]) / 2, 0.2)
         p = soccer_probabilities(home_lam, away_lam)
+        
+        # Initialize value betting engine
+        value_engine = PoissonValueEngine()
 
         # Ensemble prediction with meta-learner blend
         labels = [0, 1, 2]  # away, draw, home
@@ -185,12 +170,71 @@ class LoyalEdgeEngine:
         over35_pick = "Over 3.5 Goals" if over35 >= 0.5 else "Under 3.5 Goals"
         over35_conf = round(max(over35, 1 - over35) * 100, 1)
 
+        # Check for significant line movement (market efficiency check)
+        line_movement_warning = False
+        if fixture.get("home_odds") and fixture.get("draw_odds") and fixture.get("away_odds"):
+            # In production, this would compare with historical odds
+            # For now, we'll add a flag that can be set by the odds aggregator
+            if fixture.get("line_movement_significant"):
+                line_movement_warning = True
+        
+        # Calculate value bets if odds are available
+        value_bets_info = {}
+        if fixture.get("home_odds") and fixture.get("draw_odds") and fixture.get("away_odds"):
+            # Create predictions dictionary for value engine
+            predictions_for_value = [
+                {"market": "1X2", "pick": pick_1x2, "confidence": conf_1x2 * 100},
+                {"market": "Over/Under 2.5", "pick": goals_pick, "confidence": goals_conf},
+                {"market": "Both Teams to Score", "pick": btts_pick, "confidence": btts_final_conf},
+            ]
+            
+            # Map picks to odds
+            fixture_odds = {}
+            if pick_1x2 == "Home Win":
+                fixture_odds["1X2_Home_Win"] = fixture["home_odds"]
+            elif pick_1x2 == "Draw":
+                fixture_odds["1X2_Draw"] = fixture["draw_odds"]
+            elif pick_1x2 == "Away Win":
+                fixture_odds["1X2_Away_Win"] = fixture["away_odds"]
+            
+            if "Over" in goals_pick:
+                fixture_odds["Over/Under_2.5_Over_2.5_Goals"] = fixture.get("over_2_5_odds", 1.9)
+            else:
+                fixture_odds["Over/Under_2.5_Under_2.5_Goals"] = fixture.get("under_2_5_odds", 1.9)
+            
+            if "Yes" in btts_pick:
+                fixture_odds["Both_Teams_to_Score_BTTS_Yes"] = fixture.get("btts_yes_odds", 1.8)
+            else:
+                fixture_odds["Both_Teams_to_Score_BTTS_No"] = fixture.get("btts_no_odds", 1.9)
+            
+            # Identify value bets
+            value_bets = value_engine.identify_value_bets(predictions_for_value, fixture_odds)
+            
+            for vb in value_bets:
+                key = f"{vb.market}_{vb.pick}".replace(" ", "_")
+                value_bets_info[key] = {
+                    "edge": round(vb.edge * 100, 2),
+                    "expected_value": round(vb.expected_value * 100, 2),
+                    "kelly_stake": round(vb.kelly_stake * 100, 2),
+                    "value_confidence": vb.confidence
+                }
+        
+        # Add value information to engine_meta
+        if value_bets_info:
+            base_meta["value_bets"] = value_bets_info
+            base_meta["value_note"] = "Edge calculated as model probability minus bookmaker implied probability. Positive edge indicates value."
+        
+        # Add line movement warning if detected
+        if line_movement_warning:
+            base_meta["line_movement_warning"] = True
+            base_meta["market_efficiency_note"] = "Significant line movement detected. Market may have information not reflected in model. Use caution."
+        
         return [
-            {"market": "1X2", "pick": pick_1x2, "confidence": round(conf_1x2 * 100, 1), "edge_score": round(conf_1x2 * 100, 1), "risk_level": risk(conf_1x2), "reasoning": reason_1x2, "engine_meta": {**base_meta, "market_logic": "Result pick compares model win/draw probabilities with form and Elo edge."}},
+            {"market": "1X2", "pick": pick_1x2, "confidence": round(conf_1x2 * 100, 1), "edge_score": round(conf_1x2 * 100, 1), "risk_level": risk(conf_1x2), "reasoning": reason_1x2, "engine_meta": {**base_meta, "market_logic": "Result pick compares model win/draw probabilities with form and Elo edge. Edge vs bookmaker calculated where odds available."}},
             {"market": "Double Chance", "pick": dc_pick, "confidence": round(dc_conf * 100, 1), "edge_score": round(dc_conf * 100, 1), "risk_level": risk(dc_conf), "reasoning": reason_dc, "engine_meta": {**base_meta, "market_logic": "Double chance reduces draw/upset variance by covering two outcomes."}},
-            {"market": "Over/Under 2.5", "pick": goals_pick, "confidence": goals_conf, "edge_score": goals_conf, "risk_level": risk(goals_conf / 100), "reasoning": reason_goals, "engine_meta": {**base_meta, "market_logic": "2.5 goals uses projected goal total plus each team's scoring and concession profile."}},
+            {"market": "Over/Under 2.5", "pick": goals_pick, "confidence": goals_conf, "edge_score": goals_conf, "risk_level": risk(goals_conf / 100), "reasoning": reason_goals, "engine_meta": {**base_meta, "market_logic": "2.5 goals uses projected goal total plus each team's scoring and concession profile. Value calculated vs bookmaker odds."}},
             {"market": "Over/Under 1.5", "pick": over15_pick, "confidence": over15_conf, "edge_score": over15_conf, "risk_level": risk(over15_conf / 100), "reasoning": reason_goals, "engine_meta": {**base_meta, "market_logic": "1.5 goals is a safer totals read from the same goal simulation."}},
             {"market": "Over/Under 3.5", "pick": over35_pick, "confidence": over35_conf, "edge_score": over35_conf, "risk_level": risk(over35_conf / 100), "reasoning": reason_goals, "engine_meta": {**base_meta, "market_logic": "3.5 goals checks whether the match profile points to a very open game or a lower ceiling."}},
-            {"market": "Both Teams to Score", "pick": btts_pick, "confidence": btts_final_conf, "edge_score": btts_final_conf, "risk_level": risk(btts_final_conf / 100), "reasoning": reason_btts, "engine_meta": {**base_meta, "market_logic": "BTTS compares both teams' scoring rates, failed-score rates, clean sheets, and simulated both-score probability."}},
+            {"market": "Both Teams to Score", "pick": btts_pick, "confidence": btts_final_conf, "edge_score": btts_final_conf, "risk_level": risk(btts_final_conf / 100), "reasoning": reason_btts, "engine_meta": {**base_meta, "market_logic": "BTTS compares both teams' scoring rates, failed-score rates, clean sheets, and simulated both-score probability. Value calculated vs bookmaker odds."}},
             {"market": "Correct Score", "pick": p["score"], "confidence": round(score_conf, 1), "edge_score": round(score_conf, 1), "risk_level": "High", "reasoning": high_variance_warning(), "engine_meta": {**base_meta, "market_logic": "Correct score is shown as a score-band signal only because exact scores are volatile."}},
         ]
