@@ -159,11 +159,13 @@ def _time_series_split(X, y, n_splits=5):
         yield train_idx, test_idx
 
 
-def _build_model_factories(binary: bool = False):
+def _build_model_factories(binary: bool = False, slim: bool = False):
     """Return list of (name, factory) tuples for available model types.
     
     binary=True for 2-class problems (basketball, tennis, etc.)
     binary=False for 3-class problems (soccer 1X2)
+    slim=True returns only RF + XGBoost (~15-30MB) for Render upload.
+    slim=False returns full ensemble (RF + XGB + LGBM + MLP) for HF training.
     """
     factories = []
     if RandomForestClassifier is not None:
@@ -177,7 +179,7 @@ def _build_model_factories(binary: bool = False):
             n_jobs=-1,
             random_state=42,
         )))
-    if GradientBoostingClassifier is not None:
+    if not slim and GradientBoostingClassifier is not None:
         factories.append(("gradient_boosting", lambda params=None: GradientBoostingClassifier(
             n_estimators=params.get("n_estimators", 200) if params else 200,
             max_depth=params.get("max_depth", 4) if params else 4,
@@ -201,7 +203,7 @@ def _build_model_factories(binary: bool = False):
             random_state=42,
             verbosity=0,
         )))
-    if LGBMClassifier is not None:
+    if not slim and LGBMClassifier is not None:
         factories.append(("lightgbm", lambda params=None: LGBMClassifier(
             n_estimators=params.get("n_estimators", 200) if params else 200,
             max_depth=params.get("max_depth", 6) if params else 6,
@@ -214,7 +216,7 @@ def _build_model_factories(binary: bool = False):
             random_state=42,
             verbosity=-1,
         )))
-    if CatBoostClassifier is not None:
+    if not slim and CatBoostClassifier is not None:
         factories.append(("catboost", lambda params=None: CatBoostClassifier(
             iterations=params.get("iterations", 200) if params else 200,
             depth=params.get("depth", 6) if params else 6,
@@ -224,8 +226,8 @@ def _build_model_factories(binary: bool = False):
             verbose=False,
             random_seed=42,
         )))
-    # Lightweight Neural Net — fast on CPU, good at non-linear interactions
-    if _has_mlp:
+    # Lightweight Neural Net — skip in slim mode
+    if not slim and _has_mlp:
         factories.append(("neural_net", lambda params=None: MLPClassifier(
             hidden_layer_sizes=params.get("hidden_layer_sizes", (128, 64, 32)) if params else (128, 64, 32),
             activation="relu",
@@ -427,7 +429,6 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
     Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
     model_type_str = "+".join(result["model_types"])
     path = f"{settings.model_dir}/soccer_ensemble_{model_type_str}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.joblib"
-
     calibrator_path = None
     if len(X) >= 15000:
         # Calibration also memory-intensive — skip on large datasets
@@ -453,8 +454,27 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
     }
     joblib.dump(bundle, path)
 
+    # Save slim bundle (RF + XGBoost only) for Render upload — ~15-30MB vs 100MB+
+    slim_models = {k: v for k, v in result["models"].items() if k in ("random_forest", "xgboost", "random_forest_fast")}
+    slim_weights = [w for w, n in zip(result["weights"], result["model_types"]) if n in slim_models]
+    slim_path = path.replace(".joblib", "_slim.joblib")
+    slim_bundle = {
+        "models": slim_models,
+        "meta_learner": None,
+        "features": FEATURES,
+        "model_types": list(slim_models.keys()),
+        "weights": slim_weights if slim_weights else [1.0] * len(slim_models),
+        "accuracy": result["accuracy"],
+        "sample_size": len(X),
+        "split": "chronological_70_30_ensemble",
+        "calibrator_path": calibrator_path,
+        "labels": labels,
+    }
+    joblib.dump(slim_bundle, slim_path)
+
     return {
-        "path": path,
+        "path": slim_path,          # slim path for upload
+        "full_path": path,          # full path for local use
         "accuracy": result["accuracy"],
         "sample_size": len(X),
         "model_type": model_type_str,
@@ -511,8 +531,25 @@ def train_basketball_model(fixtures: pd.DataFrame) -> dict:
     }
     joblib.dump(bundle, path)
 
+    # Slim bundle for Render upload
+    slim_models = {k: v for k, v in result["models"].items() if k in ("random_forest", "xgboost", "random_forest_fast")}
+    slim_weights = [w for w, n in zip(result["weights"], result["model_types"]) if n in slim_models]
+    slim_path = path.replace(".joblib", "_slim.joblib")
+    joblib.dump({
+        "models": slim_models,
+        "meta_learner": None,
+        "features": BASKETBALL_FEATURES,
+        "model_types": list(slim_models.keys()),
+        "weights": slim_weights if slim_weights else [1.0] * len(slim_models),
+        "accuracy": result["accuracy"],
+        "sample_size": len(X),
+        "split": "chronological_70_30_ensemble",
+        "labels": labels,
+    }, slim_path)
+
     return {
-        "path": path,
+        "path": slim_path,
+        "full_path": path,
         "accuracy": result["accuracy"],
         "sample_size": len(X),
         "model_type": model_type_str,
@@ -694,8 +731,26 @@ def train_generic_sport_model(fixtures: pd.DataFrame, sport: str) -> dict:
     }
     joblib.dump(bundle, path)
 
+    # Slim bundle for Render upload
+    slim_models = {k: v for k, v in result["models"].items() if k in ("random_forest", "xgboost", "random_forest_fast")}
+    slim_path = path.replace(".joblib", "_slim.joblib")
+    slim_weights = [w for w, n in zip(result["weights"], result["model_types"]) if n in slim_models]
+    joblib.dump({
+        "models": slim_models,
+        "meta_learner": None,
+        "features": GENERIC_SPORT_FEATURES,
+        "model_types": list(slim_models.keys()),
+        "weights": slim_weights if slim_weights else [1.0] * len(slim_models),
+        "accuracy": result["accuracy"],
+        "sample_size": len(X),
+        "sport": sport,
+        "split": "chronological_70_30_ensemble",
+        "labels": labels,
+    }, slim_path)
+
     return {
-        "path": path,
+        "path": slim_path,
+        "full_path": path,
         "accuracy": result["accuracy"],
         "sample_size": len(X),
         "model_type": model_type_str,
