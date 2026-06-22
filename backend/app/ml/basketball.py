@@ -77,6 +77,16 @@ class BasketballEngine:
         projected_total = home_avg + away_avg
         spread_edge = (home_avg - away_avg) + 2.5
 
+        # Detect pure-default prediction: no real game history found for either team.
+        # home_recent_points_for default=112, away_recent_points_for default=108.
+        # When both are at exact defaults, the pick is a guess — cap confidence below publish threshold.
+        is_default_fallback = (
+            f["home_recent_points_for"] == 112.0
+            and f["away_recent_points_for"] == 108.0
+            and f["home_win_rate"] == 0.55
+            and f["away_win_rate"] == 0.45
+        )
+
         home_win_prob = 0.55
         if self.bundle:
             home_win_prob = self._bundle_home_win_probability(f) or 0.55
@@ -85,11 +95,25 @@ class BasketballEngine:
 
         winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
         spread_conf = min(74, max(52, abs(spread_edge) * 4 + 50))
-        # Always produce a readable total pick — use standard NBA/basketball line of 220.5 as default
+
+        # Cap confidence below the 55% publish threshold when there's no real data
+        if is_default_fallback:
+            winner_conf = min(winner_conf, 50.0)
+            spread_conf = min(spread_conf, 50.0)
+            home_win_prob = 0.50  # treat as coin flip — no edge claimed
+
         default_line = line_total or 220.5
         total_pick = f"Over {default_line}" if projected_total > default_line else f"Under {default_line}"
         total_conf = round(min(68, max(54, abs(projected_total - default_line) * 0.8 + 54)), 1)
-        reason = f"Recent scoring projects {home_team} {home_avg:.1f} pts, {away_team} {away_avg:.1f} pts; model win edge {home_win_prob:.1%}. Combined projection: {projected_total:.1f} vs line {default_line}."
+        if is_default_fallback:
+            total_conf = min(total_conf, 50.0)
+
+        reason = (
+            f"Insufficient game history for {home_team} or {away_team} — using league averages only. "
+            "This pick uses default values and should not be treated as a strong signal."
+            if is_default_fallback else
+            f"Recent scoring projects {home_team} {home_avg:.1f} pts, {away_team} {away_avg:.1f} pts; model win edge {home_win_prob:.1%}. Combined projection: {projected_total:.1f} vs line {default_line}."
+        )
         base_meta = {
             "summary": "Basketball engine compares recent points for/against, model win probability, projected total, and spread edge.",
             "factors": [
