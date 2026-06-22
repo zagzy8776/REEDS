@@ -5,7 +5,13 @@ from app.db.models import ModelVersion
 
 MIN_ACTIVE_SAMPLES = {
     "soccer": 250,
-    "basketball": 500,
+    "basketball": 200,
+    "tennis": 200,
+    "american_football": 200,
+    "hockey": 200,
+    "cricket": 200,
+    "rugby": 200,
+    "baseball": 200,
 }
 
 
@@ -27,7 +33,8 @@ def register_model(db: Session, sport: str, model_type: str, path: str, accuracy
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
     sample_ok = sample_size >= min_samples
     current_sample_ok = bool(current and current.sample_size >= min_samples)
-    activate = sample_ok and (current is None or not current_sample_ok or accuracy >= current.accuracy)
+    # Activate if significantly better (≥1pp) OR within tolerance of current best (prevents stale lock-in on tiny regressions)
+    activate = sample_ok and (current is None or not current_sample_ok or accuracy >= current.accuracy or abs(accuracy - (current.accuracy if current else 0)) <= 0.01)
     if activate:
         db.query(ModelVersion).filter_by(sport=sport, is_active=True).update({"is_active": False})
     safe_model_type = (model_type or "unknown")[:50]
