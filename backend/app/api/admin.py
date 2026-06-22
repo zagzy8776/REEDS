@@ -680,6 +680,43 @@ def clear_train_flag():
     return {"status": "flag_cleared"}
 
 
+@router.post("/sync-models", dependencies=[Depends(require_admin)])
+def sync_models(db: Session = Depends(get_db)):
+    """Clean the model directory and pull latest slim models from GitHub Releases.
+
+    Called after HF Space training to ensure Render always has a fresh,
+    non-corrupted model state. Steps:
+      1. Delete all .joblib files from MODEL_DIR (keeps .retrain_requested flag)
+      2. Call download-models to pull the latest slim bundles from GitHub
+    """
+    import os, shutil
+    from pathlib import Path
+
+    settings = get_settings()
+    model_dir = Path(settings.model_dir)
+    removed = []
+
+    if model_dir.exists():
+        for f in model_dir.glob("*.joblib"):
+            try:
+                f.unlink()
+                removed.append(f.name)
+            except Exception:
+                pass
+
+    # Re-download from GitHub Releases
+    try:
+        download_result = download_models(db=db)
+    except Exception as exc:
+        download_result = {"error": str(exc)}
+
+    return {
+        "status": "synced",
+        "removed_files": len(removed),
+        "download_result": download_result,
+    }
+
+
 @router.post("/upload-model", dependencies=[Depends(require_admin)])
 async def upload_model(
     request: Request,

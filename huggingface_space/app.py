@@ -33,6 +33,11 @@ os.environ["MIN_TRAINING_ROWS"] = "200"
 os.environ["APP_ENV"]           = "production"
 os.makedirs("/tmp/models", exist_ok=True)
 
+# ── Strict sports allowlist ────────────────────────────────────────────────────
+# Only these sports get trained, uploaded, and served as .joblib models.
+# All others fall back to GenericSportEngine heuristics on Render.
+ALLOWED_SPORTS = ["soccer", "basketball", "tennis", "american_football"]
+
 # ── Log buffer ────────────────────────────────────────────────────────────────
 _log_lines: list[str] = []
 _log_lock  = threading.Lock()
@@ -326,6 +331,8 @@ def action_train():
         for sport, trainer in [("soccer", train_soccer_model),
                                 ("basketball", train_basketball_model)]:
             try:
+                if sport not in ALLOWED_SPORTS:
+                    continue
                 d = data[data["sport"] == sport].copy()
                 done = d["home_score"].notna().sum()
                 if done < 200:
@@ -377,11 +384,11 @@ def action_train():
                 line = f"❌ {sport.upper()}: {e}"
                 _log(line); logs.append(line)
 
-        for ep in ["/api/admin/predict", "/api/admin/backfill-odds",
-                   "/api/admin/refresh-signals", "/api/admin/clear-train-flag"]:
+        for ep in ["/api/admin/sync-models", "/api/admin/predict",
+                   "/api/admin/backfill-odds", "/api/admin/clear-train-flag"]:
             try:
                 requests.post(f"{RENDER_URL}{ep}",
-                              headers={"x-admin-key": ADMIN_KEY}, timeout=45)
+                              headers={"x-admin-key": ADMIN_KEY}, timeout=60)
             except Exception:
                 pass
         line = "⚡ Render synced (predictions + signals + clear flag)"
