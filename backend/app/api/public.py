@@ -54,7 +54,6 @@ def prediction_result(p: Prediction, f: Fixture) -> bool | None:
             return home_score == away_score
     if market in {"goals", "over/under 2.5", "over/under 1.5", "over/under 3.5"}:
         total = home_score + away_score
-        # Extract the line from the pick (e.g., "Over 2.5 Goals", "Under 1.5 Goals")
         parts = pick.replace("goals", "").strip().split()
         try:
             threshold = float(parts[-1]) if len(parts) > 1 and parts[-1].replace(".", "").isdigit() else 0.0
@@ -75,7 +74,6 @@ def prediction_result(p: Prediction, f: Fixture) -> bool | None:
     if market == "correct score":
         return pick == f"{home_score}-{away_score}"
     if market in {"spread", "point spread", "run line"}:
-        # Extract the spread value (e.g., "Home +5.5" or "Away -3.0")
         parts = pick.replace("home", "").replace("away", "").strip().split()
         try:
             spread = float(parts[-1]) if parts else 0.0
@@ -113,48 +111,29 @@ def prediction_result(p: Prediction, f: Fixture) -> bool | None:
         if "home" in pick and "away" in pick:
             return home_score != away_score
 
-    # Spread/total lines need the actual bookmaker line to grade correctly.
     return None
 
 
 def serialize_prediction(p: Prediction, f: Fixture) -> dict:
     result = prediction_result(p, f)
-    
-    # Extract value betting information if available
     engine_meta = p.engine_meta or {}
     value_info = {}
-    
     if "value_bets" in engine_meta:
         pick_key = f"{p.market}_{p.pick}".replace(" ", "_")
         if pick_key in engine_meta["value_bets"]:
             value_info = engine_meta["value_bets"][pick_key]
-    
     return {
-        "id": p.id,
-        "fixture_id": f.id,
-        "sport": f.sport,
-        "league": f.league,
-        "match_date": f.match_date,
-        "home_team": f.home_team,
-        "away_team": f.away_team,
-        "market": p.market,
-        "pick": p.pick,
-        "confidence": p.confidence,
-        "edge_score": p.edge_score,
-        "risk_level": p.risk_level,
-        "reasoning": p.reasoning,
-        "analysis": engine_meta,
-        "value_betting": value_info,
-        "is_premium": p.is_premium,
-        "version": p.version,
-        "status": p.status,
-        "published_at": p.published_at,
+        "id": p.id, "fixture_id": f.id, "sport": f.sport, "league": f.league,
+        "match_date": f.match_date, "home_team": f.home_team, "away_team": f.away_team,
+        "market": p.market, "pick": p.pick, "confidence": p.confidence,
+        "edge_score": p.edge_score, "risk_level": p.risk_level, "reasoning": p.reasoning,
+        "analysis": engine_meta, "value_betting": value_info, "is_premium": p.is_premium,
+        "version": p.version, "status": p.status, "published_at": p.published_at,
         "result": "pending" if result is None else "won" if result else "lost",
     }
 
 
-@router.get("/predictions/today")
-def today(sport: str | None = None, league: str | None = None, market: str | None = None, risk: str | None = None, min_confidence: float = 0, db: Session = Depends(get_db)):
+def _prediction_query(db: Session, sport: str | None, league: str | None, market: str | None, risk: str | None, min_confidence: float):
     query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(
         Prediction.is_published == True,
         Prediction.status == "active",
@@ -169,35 +148,33 @@ def today(sport: str | None = None, league: str | None = None, market: str | Non
         query = query.filter(Prediction.market == market)
     if risk:
         query = query.filter(Prediction.risk_level == risk)
+    return query
+
+
+@router.get("/predictions/today")
+def today(sport: str | None = None, league: str | None = None, market: str | None = None, risk: str | None = None, min_confidence: float = 0, db: Session = Depends(get_db)):
+    query = _prediction_query(db, sport, league, market, risk, min_confidence)
     rows = query.order_by(Prediction.confidence.desc()).limit(100).all()
     if not rows:
-        # Self-heal: generate predictions for upcoming + live fixtures if board is empty
+        # Never make a user request execute the expensive ML build. The external
+        # cron/scheduler is responsible for filling the board; this endpoint only
+        # queues a recovery build when fixtures exist and immediately returns the
+        # currently available board (possibly empty).
         upcoming = db.query(Fixture.id).filter(func.date(Fixture.match_date) >= func.current_date()).first()
         if upcoming:
             try:
-                generate_today_predictions(db)
+                from app.services.prediction_runner import start_prediction_generation
+                start_prediction_generation(reason="public-empty-board")
             except Exception:
-                log.exception("Self-heal prediction generation failed")
-            query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Prediction.status == "active", func.date(Fixture.match_date) >= func.current_date(), Prediction.confidence >= min_confidence)
-            if sport:
-                query = query.filter(Fixture.sport == sport)
-            if league:
-                query = _apply_league_filter(query, league)
-            if market:
-                query = query.filter(Prediction.market == market)
-            if risk:
-                query = query.filter(Prediction.risk_level == risk)
-            rows = query.order_by(Prediction.confidence.desc()).limit(100).all()
+                log.exception("Could not queue public self-heal prediction generation")
     return [serialize_prediction(p, f) for p, f in rows]
 
 
 @router.get("/predictions/history")
 def prediction_history(sport: str | None = None, days: int = 7, limit: int = 50, db: Session = Depends(get_db)):
-    """Show past AI predictions with results (won/lost/pending)."""
     cutoff = date.today() - timedelta(days=days)
     query = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(
-        Prediction.is_published == True,
-        Fixture.match_date >= cutoff,
+        Prediction.is_published == True, Fixture.match_date >= cutoff,
     )
     if sport:
         query = query.filter(Fixture.sport == sport)
@@ -235,364 +212,3 @@ def prediction_detail(prediction_id: int, db: Session = Depends(get_db)):
 @router.get("/community/predictions/{prediction_id}/social")
 def prediction_social(prediction_id: int, db: Session = Depends(get_db)):
     return prediction_social_context(db, prediction_id)
-
-
-@router.post("/community/predictions/{prediction_id}/comments")
-async def add_prediction_comment(prediction_id: int, request: Request, db: Session = Depends(get_db)):
-    payload = await request.json()
-    username = str(payload.get("username", "")).strip()[:80]
-    comment_text = str(payload.get("comment_text", "")).strip()[:1000]
-    if not username or not comment_text:
-        raise HTTPException(status_code=400, detail="username and comment_text are required")
-    row = CommunityComment(prediction_id=prediction_id, username=username, comment_text=comment_text)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return {"id": row.id, "status": "commented"}
-
-
-@router.post("/community/predictions/{prediction_id}/reactions")
-async def add_prediction_reaction(prediction_id: int, request: Request, db: Session = Depends(get_db)):
-    payload = await request.json()
-    username = str(payload.get("username", "")).strip()[:80]
-    reaction = str(payload.get("reaction", "like")).strip()[:30]
-    rating = payload.get("rating")
-    if not username:
-        raise HTTPException(status_code=400, detail="username is required")
-    row = CommunityReaction(prediction_id=prediction_id, username=username, reaction=reaction, rating=int(rating) if rating else None)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return {"id": row.id, "status": "reacted"}
-
-
-@router.post("/community/predictions/{prediction_id}/plays")
-async def tail_prediction(prediction_id: int, request: Request, db: Session = Depends(get_db)):
-    payload = await request.json()
-    username = str(payload.get("username", "")).strip()[:80]
-    stake_units = float(payload.get("stake_units") or 1)
-    if not username:
-        raise HTTPException(status_code=400, detail="username is required")
-    row = CommunityPlay(prediction_id=prediction_id, username=username, stake_units=stake_units)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return {"id": row.id, "status": "tailed"}
-
-
-@router.post("/community/win-slips")
-async def post_win_slip(request: Request, db: Session = Depends(get_db)):
-    payload = await request.json()
-    username = str(payload.get("username", "")).strip()[:80]
-    title = str(payload.get("title", "")).strip()[:160]
-    if not username or not title:
-        raise HTTPException(status_code=400, detail="username and title are required")
-    row = WinSlip(
-        prediction_id=payload.get("prediction_id"),
-        username=username,
-        title=title,
-        proof_text=str(payload.get("proof_text", "")).strip()[:1000] or None,
-        profit_units=float(payload.get("profit_units")) if payload.get("profit_units") not in {None, ""} else None,
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return {"id": row.id, "status": "win_posted"}
-
-
-@router.get("/value-bets")
-def value_bets(
-    sport: str | None = None,
-    tier: str = "elite",
-    min_edge: float = 1.04,
-    db: Session = Depends(get_db),
-):
-    """Live value bets — SportyBet odds vs LOYAL EDGE model probabilities.
-
-    tier=elite    → only EPL/CL/La Liga etc, model ≥60% confident, live-verified (default)
-    tier=standard → all leagues, model ≥52% confident
-    tier=all      → everything including sandbox
-
-    Returns overround-stripped fair probabilities, proxy-xG signals,
-    Kelly Criterion stake sizing, and live odds verification status.
-    """
-    from app.services.value_bets import run_value_scan
-    sports = [sport] if sport else None
-    return run_value_scan(db, sports=sports, tier=tier, verify_live=(tier == "elite"))
-
-
-@router.get("/value-bets/explain")
-def value_bets_explain():
-    """Four-layer methodology used by LOYAL EDGE value detection."""
-    return {
-        "methodology": "LOYAL EDGE Value Detection — 4-Layer Protection",
-        "layers": {
-            "1_certainty_floor": {
-                "description": "Model must be ≥60% confident for elite picks, ≥52% for standard. Eliminates high-edge/low-probability underdogs that lose 3 out of 4.",
-                "elite_threshold": "≥60% model probability AND ≥5% edge",
-                "standard_threshold": "≥52% model probability AND ≥4% edge",
-            },
-            "2_proxy_xg": {
-                "description": "Scorelines lie. We adjust model probabilities using proxy-xG metrics built from historical data: clean sheet rate, failed-to-score rate, goal diff momentum.",
-                "signals": ["goals_per_game", "clean_sheet_rate", "failed_to_score_rate", "btts_rate", "gd_momentum_last5_vs_last15"],
-            },
-            "3_live_verification": {
-                "description": "Before serving an elite pick, we re-ping SportyBet to confirm odds haven't moved. Stale cached odds from scheduler runs are caught and dropped.",
-                "when": "Applied to all elite picks at request time",
-            },
-            "4_elite_sandbox_split": {
-                "description": "Elite board = EPL, La Liga, Serie A, Bundesliga, Champions League, NBA, NFL only. Obscure leagues go to sandbox tab.",
-                "elite_leagues": sorted(list({"Premier League","La Liga","Serie A","Bundesliga","Ligue 1","Champions League","Europa League","NBA","NFL","MLB","NHL"})),
-            },
-        },
-        "overround_example": {
-            "bookmaker_odds":     {"home": 2.00, "draw": 3.40, "away": 4.00},
-            "raw_implied_total":  "104.4% (4.4% is the bookmaker margin)",
-            "fair_probabilities": {"home": "47.9%", "draw": "28.2%", "away": "23.9%"},
-            "value_condition":    "model_prob × bookmaker_odds > 1.05 for elite picks",
-        },
-        "kelly_criterion":    "f* = (b×p − q) / b × 0.25 (fractional Kelly). Never exceeds 5% of bankroll.",
-        "responsible_note":   "Value bets identify mathematical edges. They do not guarantee wins. Always stake within your means.",
-    }
-
-
-@router.get("/fixtures/upcoming")
-def upcoming_fixtures(scope: str = "upcoming", sport: str | None = None, league: str | None = None, limit: int = 300, db: Session = Depends(get_db)):
-    query = db.query(Fixture)
-    normalized_scope = scope.lower().strip()
-    if normalized_scope == "upcoming":
-        query = query.filter(func.date(Fixture.match_date) >= func.current_date())
-    elif normalized_scope in {"live", "today"}:
-        query = query.filter(func.date(Fixture.match_date) == func.current_date())
-    elif normalized_scope in {"results", "old", "past"}:
-        query = query.filter(func.date(Fixture.match_date) < func.current_date())
-    elif normalized_scope == "all":
-        # Public match center should behave like LiveScore/SofaScore: show active
-        # and upcoming action first. Historical results remain available via
-        # scope=results so they don't bury the next matches users came to track.
-        query = query.filter(func.date(Fixture.match_date) >= func.current_date())
-    else:
-        raise HTTPException(status_code=400, detail="scope must be upcoming, live, results, or all")
-    if sport:
-        query = query.filter(Fixture.sport == sport)
-    if league:
-        query = _apply_league_filter(query, league)
-    order_date = Fixture.match_date.desc() if normalized_scope in {"results", "old", "past"} else Fixture.match_date.asc()
-    rows = query.order_by(order_date, Fixture.league.asc()).limit(min(limit, 500)).all()
-    return [
-        {
-            "id": f.id,
-            "sport": f.sport,
-            "league": f.league,
-            "season": f.season,
-            "match_date": f.match_date,
-            "home_team": f.home_team,
-            "away_team": f.away_team,
-            "home_score": f.home_score,
-            "away_score": f.away_score,
-            "total_goals": (f.home_score + f.away_score) if f.home_score is not None and f.away_score is not None else None,
-            "result_label": "pending" if f.home_score is None or f.away_score is None else "home_win" if f.home_score > f.away_score else "away_win" if f.away_score > f.home_score else "draw",
-            "home_odds": f.home_odds,
-            "draw_odds": f.draw_odds,
-            "away_odds": f.away_odds,
-            "source": f.source,
-            "has_odds": any([f.home_odds, f.draw_odds, f.away_odds]),
-            "odds_source": (f.extra or {}).get("odds_source") if isinstance(f.extra, dict) else None,
-            "odds_note": (f.extra or {}).get("odds_note") if isinstance(f.extra, dict) else None,
-            "model_implied_odds": (f.extra or {}).get("odds_source") == "model_implied" if isinstance(f.extra, dict) else False,
-            "api_status": (f.extra or {}).get("status") if isinstance(f.extra, dict) else None,
-        }
-        for f in rows
-    ]
-
-
-@router.get("/fixtures/status")
-def fixtures_status(db: Session = Depends(get_db)):
-    today = db.query(Fixture).filter(func.date(Fixture.match_date) == func.current_date()).count()
-    upcoming = db.query(Fixture).filter(func.date(Fixture.match_date) > func.current_date()).count()
-    with_odds = db.query(Fixture).filter(
-        (Fixture.home_odds != None) | (Fixture.draw_odds != None) | (Fixture.away_odds != None)
-    ).count()
-    live = db.query(Fixture).filter(
-        func.date(Fixture.match_date) == func.current_date(),
-        Fixture.home_score != None,
-        Fixture.away_score != None,
-    ).count()
-    sports = db.query(Fixture.sport).distinct().all()
-    api_sources = ["api_football", "api_basketball", "apifootball_com", "football_data_org", "sportmonks", "allsportsapi", "thesportsdb"]
-    has_live_feed = db.query(Fixture).filter(Fixture.source.in_(api_sources)).count() > 0
-    return {
-        "feed_status": "active" if has_live_feed else "connecting",
-        "today": today,
-        "upcoming": upcoming,
-        "live_now": live,
-        "with_odds": with_odds,
-        "sports_covered": [row[0] for row in sports],
-        "checked_at": datetime.utcnow(),
-    }
-
-
-@router.get("/fixtures/{fixture_id}")
-def fixture_detail(fixture_id: int, db: Session = Depends(get_db)):
-    fixture = db.query(Fixture).filter(Fixture.id == fixture_id).first()
-    if not fixture:
-        raise HTTPException(status_code=404, detail="Fixture not found")
-    predictions = db.query(Prediction).filter(Prediction.fixture_id == fixture.id, Prediction.status == "active", Prediction.is_published == True).order_by(Prediction.confidence.desc()).all()
-    return {
-        "fixture": {
-            "id": fixture.id,
-            "sport": fixture.sport,
-            "league": fixture.league,
-            "season": fixture.season,
-            "match_date": fixture.match_date,
-            "home_team": fixture.home_team,
-            "away_team": fixture.away_team,
-            "home_score": fixture.home_score,
-            "away_score": fixture.away_score,
-            "home_odds": fixture.home_odds,
-            "draw_odds": fixture.draw_odds,
-            "away_odds": fixture.away_odds,
-            "has_odds": any([fixture.home_odds, fixture.draw_odds, fixture.away_odds]),
-            "odds_source": (fixture.extra or {}).get("odds_source") if isinstance(fixture.extra, dict) else None,
-            "odds_note": (fixture.extra or {}).get("odds_note") if isinstance(fixture.extra, dict) else None,
-            "model_implied_odds": (fixture.extra or {}).get("odds_source") == "model_implied" if isinstance(fixture.extra, dict) else False,
-            "api_status": (fixture.extra or {}).get("status") if isinstance(fixture.extra, dict) else None,
-        },
-        "predictions": [serialize_prediction(p, fixture) for p in predictions],
-        "community": fixture_consensus(db, fixture.id),
-        "note": "Fixture detail combines live match context, AI market reads, odds and community sentiment.",
-    }
-
-
-@router.post("/community/predictions")
-async def submit_user_prediction(request: Request, db: Session = Depends(get_db)):
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        payload = await request.json()
-    else:
-        form = await request.form()
-        payload = dict(form)
-    fixture_id = payload.get("fixture_id")
-    username = str(payload.get("username", "")).strip()[:80]
-    market = str(payload.get("market", "")).strip()[:50]
-    pick = str(payload.get("pick", "")).strip()[:120]
-    analysis = str(payload.get("analysis_text", "")).strip()[:1000]
-    if not fixture_id or not username or not market or not pick:
-        raise HTTPException(status_code=400, detail="fixture_id, username, market, and pick are required")
-    fixture = db.query(Fixture).filter(Fixture.id == int(fixture_id), func.date(Fixture.match_date) >= func.current_date()).first()
-    if not fixture:
-        raise HTTPException(status_code=404, detail="Upcoming fixture not found")
-    # Duplicate check: block if user already has active pick on same fixture+market
-    existing = db.query(UserPrediction).filter(
-        UserPrediction.fixture_id == fixture.id,
-        UserPrediction.username == username,
-        UserPrediction.market == market,
-        UserPrediction.is_settled == False,
-    ).first()
-    if existing:
-        raise HTTPException(status_code=409, detail=f"You already have an active pick on this match ({market}). Wait for it to settle first.")
-    row = UserPrediction(fixture_id=fixture.id, username=username, market=market, pick=pick, analysis_text=analysis or None)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return {"id": row.id, "status": "submitted"}
-
-
-@router.get("/community/fixtures/{fixture_id}")
-def community_for_fixture(fixture_id: int, db: Session = Depends(get_db)):
-    return fixture_consensus(db, fixture_id)
-
-
-@router.get("/community/leaderboard")
-def leaderboard(limit: int = 50, db: Session = Depends(get_db)):
-    return community_leaderboard(db, min(limit, 100))
-
-
-@router.get("/community/overview")
-def community(db: Session = Depends(get_db)):
-    return community_overview(db)
-
-
-@router.get("/community/experts")
-def experts(limit: int = 50, db: Session = Depends(get_db)):
-    return experts_list(db, min(limit, 100))
-
-
-@router.get("/community/win-wall")
-def win_wall_endpoint(limit: int = 30, db: Session = Depends(get_db)):
-    return win_wall(db, min(limit, 50))
-
-
-@router.get("/community/daily-challenge")
-def daily_challenge_endpoint(db: Session = Depends(get_db)):
-    return daily_challenge(db)
-
-
-@router.get("/community/profile/{username}")
-def profile(username: str, db: Session = Depends(get_db)):
-    result = user_profile(db, username)
-    if not result:
-        raise HTTPException(status_code=404, detail="User not found")
-    return result
-
-
-@router.post("/community/follow")
-async def follow_endpoint(request: Request, db: Session = Depends(get_db)):
-    payload = await request.json()
-    follower = str(payload.get("follower", "")).strip()[:80]
-    following = str(payload.get("following", "")).strip()[:80]
-    if not follower or not following:
-        raise HTTPException(status_code=400, detail="follower and following are required")
-    if follower == following:
-        raise HTTPException(status_code=400, detail="Cannot follow yourself")
-    return follow_user(db, follower, following)
-
-
-@router.get("/stats/backtest")
-def stats(db: Session = Depends(get_db)):
-    models = db.query(ModelVersion).order_by(ModelVersion.trained_at.desc()).limit(10).all()
-    backtests = db.query(BacktestRun).order_by(BacktestRun.created_at.desc()).limit(10).all()
-    rows = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.is_published == True, Fixture.home_score != None, Fixture.away_score != None).all()
-    odds_snapshot_count = db.query(OddsSnapshot).count()
-    settled = []
-    for p, f in rows:
-        result = prediction_result(p, f)
-        if result is not None:
-            settled.append((p, f, result))
-
-    by_sport: dict[str, dict] = {}
-    by_market: dict[str, dict] = {}
-    confidence_buckets = {"70+": {"total": 0, "wins": 0}, "60-69": {"total": 0, "wins": 0}, "<60": {"total": 0, "wins": 0}}
-
-    for p, f, won in settled:
-        sport_row = by_sport.setdefault(f.sport, {"sport": f.sport, "total": 0, "wins": 0})
-        market_row = by_market.setdefault(p.market, {"market": p.market, "total": 0, "wins": 0})
-        for row in (sport_row, market_row):
-            row["total"] += 1
-            row["wins"] += 1 if won else 0
-        bucket = "70+" if p.confidence >= 70 else "60-69" if p.confidence >= 60 else "<60"
-        confidence_buckets[bucket]["total"] += 1
-        confidence_buckets[bucket]["wins"] += 1 if won else 0
-
-    def with_hit_rate(row: dict) -> dict:
-        total = row["total"]
-        return {**row, "hit_rate": round((row["wins"] / total) * 100, 1) if total else 0}
-
-    return {
-        "brand": "LOYAL EDGE",
-        "note": "Metrics are historical validation estimates and settled-pick tracking, not guarantees.",
-        "models": [{"sport": m.sport, "type": m.model_type, "accuracy": m.accuracy, "sample_size": m.sample_size, "active": m.is_active, "trained_at": m.trained_at} for m in models],
-        "backtests": [{"sport": b.sport, "type": b.model_type, "strategy": b.split_strategy, "accuracy": b.accuracy, "brier_score": b.brier_score, "log_loss": b.log_loss, "sample_size": b.sample_size, "created_at": b.created_at, "metrics": b.metrics} for b in backtests],
-        "data_quality": {"odds_snapshots": odds_snapshot_count, "note": "ROI and CLV become meaningful after published and closing odds are captured consistently."},
-        "market_proof": roi_clv_summary(db),
-        "yield_tracking": yield_by_tier(db),
-        "results": {
-            "settled_picks": len(settled),
-            "wins": sum(1 for _, _, won in settled if won),
-            "losses": sum(1 for _, _, won in settled if not won),
-            "hit_rate": round((sum(1 for _, _, won in settled if won) / len(settled)) * 100, 1) if settled else 0,
-            "by_sport": [with_hit_rate(x) for x in by_sport.values()],
-            "by_market": [with_hit_rate(x) for x in by_market.values()],
-            "confidence_buckets": [{"bucket": k, **with_hit_rate(v)} for k, v in confidence_buckets.items()],
-        },
-    }
