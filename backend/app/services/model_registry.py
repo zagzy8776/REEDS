@@ -21,11 +21,7 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
     mv = (
         db.query(ModelVersion)
-        .filter(
-            ModelVersion.sport == sport,
-            ModelVersion.is_active == True,
-            ModelVersion.sample_size >= min_samples,
-        )
+        .filter(ModelVersion.sport == sport, ModelVersion.is_active == True, ModelVersion.sample_size >= min_samples)
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
@@ -65,7 +61,11 @@ def register_model(
 
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
     sample_ok = sample_size >= min_samples
-    worker_training = os.environ.get("MODEL_WORKER", "").strip() == "1"
+    worker_training = (
+        os.environ.get("MODEL_WORKER", "").strip() == "1"
+        or os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+        or path.startswith("/tmp/models/")
+    )
 
     current = (
         db.query(ModelVersion)
@@ -78,7 +78,6 @@ def register_model(
 
     if worker_training:
         # Training workers share Neon with Render but do not share its filesystem.
-        # Their local artifact can never be activated directly.
         activate = False
     elif not sample_ok:
         activate = False
