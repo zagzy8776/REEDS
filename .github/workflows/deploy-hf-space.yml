@@ -13,6 +13,36 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Prepare HF worker runtime hardening
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("huggingface_space/app.py")
+          text = path.read_text(encoding="utf-8")
+
+          # HF pulls the backend at runtime. Install the same leakage-safe
+          # training hook used by Render/GitHub Actions after that checkout.
+          marker = "_ensure_repo()\n\n\ndef _get_db():"
+          replacement = "_ensure_repo()\n\n# The worker trains from the same leakage-safe chronological ensemble used\n# by production. Keep this immediately after the repo is available.\ntry:\n    from app.services.model_bootstrap import install_quality_training\n    install_quality_training()\nexcept Exception as exc:\n    print(f\"⚠️ Quality training hook unavailable: {exc}\", flush=True)\n\n\ndef _get_db():"
+          if marker in text and "install_quality_training()" not in text:
+              text = text.replace(marker, replacement, 1)
+
+          # Authenticate external cron wake-ups when CRON_SECRET is configured.
+          text = text.replace(
+              'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")',
+              'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")\nCRON_SECRET = os.environ.get("CRON_SECRET", "")',
+              1,
+          )
+          text = text.replace(
+              'response = requests.get(f"{RENDER_URL}/api/wake", timeout=60)',
+              'headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}\n        response = requests.get(f"{RENDER_URL}/api/wake", headers=headers, timeout=60)',
+              1,
+          )
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
       - name: Push to HF Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
