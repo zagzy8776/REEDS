@@ -16,18 +16,32 @@ MIN_ACTIVE_SAMPLES = {
     "baseball": 200,
 }
 
+# Production models should not be replaced by a statistically weaker run just
+# because the new run happens to be close on accuracy.  A tiny tolerance is
+# retained for normal training noise, while sample size prevents a smaller
+# dataset from displacing a better-established model.
+MAX_ACCURACY_REGRESSION = 0.001  # 0.1 percentage point
+MIN_SAMPLE_RATIO_TO_REPLACE = 0.90
+
 
 def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
     mv = (
         db.query(ModelVersion)
-        .filter(ModelVersion.sport == sport, ModelVersion.is_active == True, ModelVersion.sample_size >= min_samples)
+        .filter(
+            ModelVersion.sport == sport,
+            ModelVersion.is_active == True,
+            ModelVersion.sample_size >= min_samples,
+        )
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
     if mv and os.path.isfile(mv.path):
         return mv
 
+    # Runtime fallback is deliberately read-only: if the active artifact is
+    # missing on ephemeral storage, use the strongest available local artifact
+    # without changing database activation state from a prediction request.
     available = (
         db.query(ModelVersion)
         .filter(ModelVersion.sport == sport, ModelVersion.sample_size >= min_samples)
@@ -53,13 +67,20 @@ def register_model(
     accuracy: float,
     sample_size: int,
 ) -> ModelVersion:
-    """Register a model while protecting the last known-good production model."""
+    """Register a model while protecting the last known-good production model.
+
+    Worker training is never allowed to activate a model because the worker's
+    filesystem is not the Render production filesystem. Production activation
+    additionally requires a valid artifact, enough samples, and a quality gate
+    against the currently active model.
+    """
     sport = str(sport).strip().lower()
     path = str(path)
     accuracy = float(accuracy)
     sample_size = int(sample_size)
 
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
+    artifact_ok = os.path.isfile(path)
     sample_ok = sample_size >= min_samples
     worker_training = (
         os.environ.get("MODEL_WORKER", "").strip() == "1"
@@ -79,14 +100,17 @@ def register_model(
     if worker_training:
         # Training workers share Neon with Render but do not share its filesystem.
         activate = False
-    elif not sample_ok:
+    elif not artifact_ok or not sample_ok:
         activate = False
     elif current is None or not current_sample_ok:
+        # No usable production artifact exists, so a valid model may become active.
         activate = True
     else:
-        # Keep the known-good production model unless the new model is within
-        # 0.2 percentage points of it or better.
-        activate = accuracy >= (current.accuracy - 0.002)
+        # Do not replace a known-good model with a meaningfully weaker one.
+        # The new run must also have roughly the same amount of evidence.
+        accuracy_floor = current.accuracy - MAX_ACCURACY_REGRESSION
+        sample_floor = max(min_samples, int(current.sample_size * MIN_SAMPLE_RATIO_TO_REPLACE))
+        activate = accuracy >= accuracy_floor and sample_size >= sample_floor
 
     if activate:
         db.query(ModelVersion).filter_by(sport=sport, is_active=True).update({"is_active": False})
