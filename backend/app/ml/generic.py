@@ -53,11 +53,22 @@ class GenericSportEngine:
 
         # --- Form heuristic for rugby, volleyball, handball, mma, etc. ---
         return self._heuristic(history, fixture, sport)
+
     def _heuristic(self, history: pd.DataFrame, fixture: dict, sport: str) -> list[dict]:
         home = normalize_team_name(fixture["home_team"], sport)
         away = normalize_team_name(fixture["away_team"], sport)
 
         df = history[history["sport"] == sport].copy() if (not history.empty and "sport" in history.columns) else (history.copy() if not history.empty else pd.DataFrame())
+
+        # Critical anti-leakage guard: a prediction may only use completed
+        # fixtures strictly before the target fixture date. The serving history
+        # window can contain future rows, especially after bulk ingestion.
+        if not df.empty and "match_date" in df.columns:
+            target_date = pd.to_datetime(fixture.get("match_date"), errors="coerce")
+            dates = pd.to_datetime(df["match_date"], errors="coerce")
+            if not pd.isna(target_date):
+                df = df[dates < target_date].copy()
+            df = df.sort_values("match_date", kind="mergesort", na_position="last")
 
         home_wr = away_wr = 0.50
         home_margin = away_margin = 0.0
