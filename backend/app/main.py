@@ -104,11 +104,10 @@ def api_readiness():
 
 @app.get("/api/feed-health")
 def api_feed_health():
-    from app.api.public import fixtures_status
     from app.db.session import SessionLocal
     db = SessionLocal()
     try:
-        return fixtures_status(db=db)
+        return fixtures.fixtures_status(db=db)
     finally:
         db.close()
 
