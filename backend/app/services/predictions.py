@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture, OddsSnapshot, Prediction
+from app.services.prediction_quality import annotate_quality, evaluate_publication
 
 
 PUBLISH_THRESHOLDS = {
@@ -24,31 +25,16 @@ PUBLISH_THRESHOLDS = {
     "Total Points": 55,
     "Total Runs": 55,
     "Total Games": 55,
-    "Correct Score": 101,  # never publish as a customer pick by default; too volatile
+    "Correct Score": 101,
 }
 
 
 def should_publish_pick(item: dict) -> bool:
-    """Strict customer protection filter.
-
-    The engine may produce many internal picks, but only stronger markets should be
-    public. This helps avoid sending weak/noisy predictions to customers.
-    """
-
     threshold = PUBLISH_THRESHOLDS.get(item.get("market", ""), 68)
     return float(item.get("confidence", 0)) >= threshold and item.get("risk_level") != "High"
 
 
 def choose_provisional_public_pick(items: list[dict]) -> dict | None:
-    """Keep the board populated when live fixtures exist but strict filters reject all picks.
-
-    The normal publish filter remains conservative. For brand-new live feeds with no
-    trained model/odds yet, every generated market can fall just below threshold,
-    leaving customers with fixtures but no AI reads. In that case publish one
-    clearly-labelled non-correct-score read per fixture so the product is useful
-    while still preserving the original confidence and risk level.
-    """
-
     candidates = [item for item in items if item.get("market") != "Correct Score"]
     if not candidates:
         return None
@@ -56,35 +42,26 @@ def choose_provisional_public_pick(items: list[dict]) -> dict | None:
 
 
 def select_public_picks(items: list[dict], max_picks: int = 4) -> set[int]:
-    """Publish a healthy mix of markets instead of only the single highest pick.
-
-    Betting users expect multiple angles per fixture: result, safer double-chance,
-    totals, and BTTS. We still avoid correct score by default because it is highly
-    volatile, but we allow the strongest markets through even while a model is young.
-    """
-
-    eligible = [
-        (idx, item)
-        for idx, item in enumerate(items)
-        if item.get("market") != "Correct Score" and item.get("risk_level") != "High"
-    ]
-    published = {idx for idx, item in eligible if should_publish_pick(item)}
-    if len(published) < max_picks:
-        for idx, _ in sorted(eligible, key=lambda pair: float(pair[1].get("confidence", 0)), reverse=True):
+    """Select only quality-approved public picks; never bypass quality controls."""
+    published: set[int] = set()
+    for idx, raw_item in enumerate(items):
+        item = annotate_quality(raw_item)
+        if should_publish_pick(item) and evaluate_publication(item)[0]:
             published.add(idx)
-            if len(published) >= max_picks:
-                break
+
+    # Do not fill remaining slots with weak predictions. Internal predictions remain
+    # stored for diagnostics, but customers only see picks that clear the gate.
+    if len(published) > max_picks:
+        ranked = sorted(
+            published,
+            key=lambda idx: float(items[idx].get("confidence", 0)),
+            reverse=True,
+        )
+        published = set(ranked[:max_picks])
     return published
 
 
 def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
-    """Guarantee every pick has a clear user-facing explanation.
-
-    Engines normally provide reasoning, but fallback/new-sport feeds can be thin.
-    This keeps customer copy transparent by always answering: what was picked,
-    how confident the model is, what risk applies, and what signals were checked.
-    """
-
     reasoning = str(item.get("reasoning") or "").strip()
     meta = item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else {}
     summary = str(meta.get("summary") or "").strip()
@@ -102,7 +79,7 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
         ]
         if factor_text:
             pieces.append(f"Key signals: {factor_text}.")
-        pieces.append(f"Risk is marked {item.get('risk_level', 'Medium')} because confidence and data depth are not guarantees.")
+        pieces.append(f"Risk is marked {item.get('risk_level', 'Medium')} based on confidence and available data depth.")
         reasoning = " ".join(pieces)
     elif "risk" not in reasoning.lower():
         reasoning = f"{reasoning} Risk is marked {item.get('risk_level', 'Medium')} based on confidence and available data depth."
@@ -116,30 +93,16 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
 
 
 def dataframe_from_db(db: Session, max_age_days: int | None = 180) -> pd.DataFrame:
-    """Load fixtures into a DataFrame.
-
-    Args:
-        max_age_days: Cut-off in days. Pass None to load all history (for training).
-                      Defaults to 180 days for prediction serving to avoid OOM on free tier.
-    """
     rows = db.query(Fixture)
     if max_age_days is not None:
         cutoff = date.today() - timedelta(days=max_age_days)
         rows = rows.filter(func.date(Fixture.match_date) >= cutoff)
     rows = rows.limit(120000).all()
     return pd.DataFrame([{
-        "id": r.id,
-        "sport": r.sport,
-        "league": r.league,
-        "season": r.season,
-        "match_date": r.match_date,
-        "home_team": r.home_team,
-        "away_team": r.away_team,
-        "home_score": r.home_score,
-        "away_score": r.away_score,
-        "home_odds": r.home_odds,
-        "draw_odds": r.draw_odds,
-        "away_odds": r.away_odds,
+        "id": r.id, "sport": r.sport, "league": r.league, "season": r.season,
+        "match_date": r.match_date, "home_team": r.home_team, "away_team": r.away_team,
+        "home_score": r.home_score, "away_score": r.away_score,
+        "home_odds": r.home_odds, "draw_odds": r.draw_odds, "away_odds": r.away_odds,
     } for r in rows])
 
 
@@ -154,13 +117,11 @@ def _next_prediction_version(db: Session, fixture_id: int, market: str) -> int:
 
 
 def _supersede_active_prediction(db: Session, fixture_id: int, market: str) -> None:
-    # Supersede by exact market match
     db.query(Prediction).filter(
         Prediction.fixture_id == fixture_id,
         Prediction.market == market,
         Prediction.status == "active",
     ).update({"status": "superseded", "superseded_at": datetime.utcnow()})
-    # Also supersede legacy market names that were renamed (e.g., "Total Points" → "Total Games" for tennis)
     legacy_markets = {
         "Total Games": ["Total Points"],
         "Point Spread": ["Spread"],
@@ -182,13 +143,8 @@ def _capture_odds_snapshot(db: Session, fx: Fixture, pred: Prediction, phase: st
     if fx.home_odds is None and fx.draw_odds is None and fx.away_odds is None:
         return
     db.add(OddsSnapshot(
-        fixture_id=fx.id,
-        prediction_id=pred.id,
-        phase=phase,
-        market=pred.market,
-        home_odds=fx.home_odds,
-        draw_odds=fx.draw_odds,
-        away_odds=fx.away_odds,
+        fixture_id=fx.id, prediction_id=pred.id, phase=phase, market=pred.market,
+        home_odds=fx.home_odds, draw_odds=fx.draw_odds, away_odds=fx.away_odds,
         source=fx.source or "fixture",
     ))
 
@@ -196,16 +152,7 @@ def _capture_odds_snapshot(db: Session, fx: Fixture, pred: Prediction, phase: st
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Model-implied odds derivation
-# ---------------------------------------------------------------------------
-
 def _prob_to_decimal_odds(prob: float, margin: float = 0.05) -> float | None:
-    """Convert a probability to decimal odds with a small vigorish margin.
-
-    Example: 52% probability → 1/0.52 * (1 - 0.05) ≈ 1.83
-    Returns None for zero/invalid probabilities.
-    """
     try:
         p = float(prob)
         if p <= 0 or p > 1:
@@ -216,19 +163,8 @@ def _prob_to_decimal_odds(prob: float, margin: float = 0.05) -> float | None:
 
 
 def _backfill_fixture_odds(db: Session, fx: Fixture, items: list[dict]) -> bool:
-    """Write model-implied odds back to the fixture when no bookmaker odds exist.
-
-    Looks for the 1X2/Moneyline item in the engine output, extracts win/draw/loss
-    probabilities from engine_meta, converts to decimal odds, and stores them on
-    the fixture row. Clearly marked as odds_source='model_implied' in extra so the
-    frontend can distinguish them from real bookmaker odds.
-
-    Returns True if odds were written.
-    """
     if fx.home_odds is not None or fx.draw_odds is not None or fx.away_odds is not None:
-        return False  # real bookmaker odds already present — don't overwrite
-
-    # Find probability data from 1X2 or Moneyline item
+        return False
     probs: dict | None = None
     for item in items:
         market = str(item.get("market", "")).lower()
@@ -236,28 +172,16 @@ def _backfill_fixture_odds(db: Session, fx: Fixture, items: list[dict]) -> bool:
             meta = item.get("engine_meta") or {}
             probs = meta.get("probabilities") or {}
             break
-
     if not probs:
         return False
-
-    # Soccer: home_win / draw / away_win
     home_p = probs.get("home_win")
     draw_p = probs.get("draw")
     away_p = probs.get("away_win")
-
-    # Basketball/other sports: home_win / away_win (no draw)
-    if home_p is None:
-        home_p = probs.get("home_win")
-    if away_p is None:
-        away_p = probs.get("away_win")
-
     if not home_p and not away_p:
         return False
-
     fx.home_odds = _prob_to_decimal_odds(home_p)
     fx.draw_odds = _prob_to_decimal_odds(draw_p) if draw_p else None
     fx.away_odds = _prob_to_decimal_odds(away_p)
-
     extra = dict(fx.extra or {})
     extra["odds_source"] = "model_implied"
     extra["odds_note"] = "Fair-value odds derived from model probabilities. Not bookmaker prices."
@@ -265,15 +189,32 @@ def _backfill_fixture_odds(db: Session, fx: Fixture, items: list[dict]) -> bool:
     return True
 
 
-def generate_today_predictions(db: Session) -> int:
-    """Generate predictions for today's and upcoming fixtures.
+def _prediction_signature(item: dict) -> tuple:
+    """Stable signature used to avoid needless prediction churn."""
+    meta = item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else {}
+    probs = meta.get("probabilities") if isinstance(meta.get("probabilities"), dict) else {}
+    normalized_probs = tuple(sorted(
+        (str(k), round(float(v), 4))
+        for k, v in probs.items()
+        if isinstance(v, (int, float))
+    ))
+    return (
+        str(item.get("market", "")),
+        str(item.get("pick", "")),
+        round(float(item.get("confidence", 0)), 3),
+        round(float(item.get("edge_score", 0)), 5),
+        normalized_probs,
+    )
 
-    Covers both pre-match (no score yet) and live in-progress fixtures so
-    odds and predictions stay visible while a game is being played.
-    Uses LoyalEdgeEngine (Poisson + form + Elo + draw detection) for soccer and
-    GenericSportEngine with real history for all other sports.
-    History capped at 90 days to stay within Render free tier RAM.
-    """
+
+def _existing_prediction_changed(pred: Prediction, item: dict) -> bool:
+    """Only version a prediction when the model's actual read changed materially."""
+    meta = pred.engine_meta if isinstance(pred.engine_meta, dict) else {}
+    old_sig = meta.get("prediction_signature")
+    return old_sig != _prediction_signature(item)
+
+
+def generate_today_predictions(db: Session) -> int:
     from app.ml.generic import GenericSportEngine
     from app.ml.ensemble import LoyalEdgeEngine
     from app.services.model_registry import active_model_path
@@ -284,41 +225,24 @@ def generate_today_predictions(db: Session) -> int:
         "UEFA European Championship", "Copa America", "Africa Cup of Nations",
         "NBA", "NFL", "IPL",
     }
-    priority_fixtures = (
-        db.query(Fixture)
-        .filter(
-            func.date(Fixture.match_date) == today_ref,
-            Fixture.league.in_(PRIORITY_LEAGUES),
-        )
-        .all()
-    )
+    priority_fixtures = db.query(Fixture).filter(
+        func.date(Fixture.match_date) == today_ref,
+        Fixture.league.in_(PRIORITY_LEAGUES),
+    ).all()
+    raw_fixtures = db.query(Fixture).filter(
+        func.date(Fixture.match_date) >= today_ref,
+    ).order_by(Fixture.match_date.asc(), Fixture.league.asc()).limit(120).all()
 
-    # Include pre-match AND live in-progress fixtures (score may exist but game is ongoing)
-    raw_fixtures = (
-        db.query(Fixture)
-        .filter(
-            func.date(Fixture.match_date) >= today_ref,
-        )
-        .order_by(Fixture.match_date.asc(), Fixture.league.asc())
-        .limit(120)
-        .all()
-    )
-
-    # Separate: pre-match (no score) + live (score set but status is live)
     def _is_live(fx: Fixture) -> bool:
         extra = fx.extra if isinstance(fx.extra, dict) else {}
         return bool(extra.get("live")) or str(extra.get("status", "")).upper() in {
             "1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT", "IN PROGRESS", "HALF TIME",
         }
 
-    def _needs_prediction(fx: Fixture) -> bool:
-        # Always generate for pre-match; also generate/refresh for live games
-        if fx.home_score is None and fx.away_score is None:
-            return True
-        return _is_live(fx)
-
-    raw_fixtures = [fx for fx in raw_fixtures if _needs_prediction(fx)]
-
+    raw_fixtures = [
+        fx for fx in raw_fixtures
+        if (fx.home_score is None and fx.away_score is None) or _is_live(fx)
+    ]
     if not raw_fixtures and not priority_fixtures:
         return 0
     by_sport: dict[str, list[Fixture]] = {}
@@ -331,10 +255,7 @@ def generate_today_predictions(db: Session) -> int:
     fixtures = [fx for fx in priority_fixtures if fx.id not in seen_ids] + fixtures
     fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:50]
 
-    # Real 90-day history for form/Elo — capped to avoid OOM on free tier
     history = dataframe_from_db(db, max_age_days=90)
-
-    # Load soccer engine once — falls back gracefully if no model file exists
     soccer_model_path = active_model_path(db, "soccer")
     soccer_engine = LoyalEdgeEngine(soccer_model_path)
     generic_engine = GenericSportEngine()
@@ -344,50 +265,53 @@ def generate_today_predictions(db: Session) -> int:
         try:
             if fx.sport == "soccer":
                 items = soccer_engine.predict_soccer(history, {
-                    "id": fx.id,
-                    "_db": db,
-                    "sport": fx.sport,
-                    "home_team": fx.home_team,
-                    "away_team": fx.away_team,
-                    "match_date": fx.match_date,
-                    "league": fx.league,
-                    "home_odds": fx.home_odds,
-                    "draw_odds": fx.draw_odds,
-                    "away_odds": fx.away_odds,
+                    "id": fx.id, "_db": db, "sport": fx.sport,
+                    "home_team": fx.home_team, "away_team": fx.away_team,
+                    "match_date": fx.match_date, "league": fx.league,
+                    "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds,
                 })
             else:
-                items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date})
-            published_indexes = select_public_picks(items)
-            fallback_idx = None
-            if not published_indexes:
-                fallback_item = choose_provisional_public_pick(items)
-                if fallback_item:
-                    fallback_idx = items.index(fallback_item) if fallback_item in items else None
+                items = generic_engine.predict(history, {
+                    "sport": fx.sport, "home_team": fx.home_team,
+                    "away_team": fx.away_team, "match_date": fx.match_date,
+                })
 
-            # Backfill model-implied odds onto fixture if no bookmaker odds exist
             _backfill_fixture_odds(db, fx, items)
+            published_indexes = select_public_picks(items)
             for idx, item in enumerate(items):
-                item = explain_prediction_item(item, fx)
-                is_published = idx in published_indexes or idx == fallback_idx
-                if idx == fallback_idx and fallback_idx is not None:
-                    item = {**item, "reasoning": f"Best available model read for this fixture. {item.get('reasoning', '')}"}
-                _supersede_active_prediction(db, fx.id, item["market"])
-                version = _next_prediction_version(db, fx.id, item["market"])
+                item = annotate_quality(explain_prediction_item(item, fx))
+                is_published = idx in published_indexes
+                signature = _prediction_signature(item)
+                meta = dict(item.get("engine_meta") or {})
+                meta["prediction_signature"] = signature
+
+                existing = (
+                    db.query(Prediction)
+                    .filter(
+                        Prediction.fixture_id == fx.id,
+                        Prediction.market == str(item.get("market", "")),
+                        Prediction.status == "active",
+                    )
+                    .order_by(Prediction.version.desc())
+                    .first()
+                )
+                if existing and not _existing_prediction_changed(existing, item):
+                    if existing.is_published != is_published:
+                        existing.is_published = is_published
+                        existing.published_at = datetime.utcnow() if is_published else None
+                    continue
+
+                if existing:
+                    existing.status = "superseded"
+                    existing.superseded_at = datetime.utcnow()
+                version = _next_prediction_version(db, fx.id, str(item.get("market", "")))
                 pred = Prediction(
-                    fixture_id=fx.id,
-                    model_version_id=None,
-                    version=version,
-                    status="active",
-                    market=str(item.get("market", "")),
-                    pick=str(item.get("pick", "")),
-                    confidence=float(item.get("confidence", 0)),
-                    edge_score=float(item.get("edge_score", 0)),
-                    risk_level=str(item.get("risk_level", "Medium")),
-                    reasoning=str(item.get("reasoning", "")),
-                    engine_meta=item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else None,
-                    is_premium=is_published and float(item.get("confidence", 0)) >= 70,
-                    is_published=is_published,
-                    published_at=datetime.utcnow() if is_published else None,
+                    fixture_id=fx.id, model_version_id=None, version=version, status="active",
+                    market=str(item.get("market", "")), pick=str(item.get("pick", "")),
+                    confidence=float(item.get("confidence", 0)), edge_score=float(item.get("edge_score", 0)),
+                    risk_level=str(item.get("risk_level", "Medium")), reasoning=str(item.get("reasoning", "")),
+                    engine_meta=meta, is_premium=is_published and float(item.get("confidence", 0)) >= 70,
+                    is_published=is_published, published_at=datetime.utcnow() if is_published else None,
                 )
                 db.add(pred)
                 db.flush()
@@ -404,7 +328,10 @@ def generate_today_predictions(db: Session) -> int:
 
 def build_combo(db: Session, legs: int = 3, min_confidence: float = 60):
     today_ref = date.today()
-    picks = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.confidence >= min_confidence, Prediction.is_published == True, Prediction.status == "active", func.date(Fixture.match_date) >= today_ref).order_by(Prediction.confidence.desc()).all()
+    picks = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(
+        Prediction.confidence >= min_confidence, Prediction.is_published == True,
+        Prediction.status == "active", func.date(Fixture.match_date) >= today_ref,
+    ).order_by(Prediction.confidence.desc()).all()
     selected, teams = [], set()
     for pred, fx in picks:
         if fx.home_team in teams or fx.away_team in teams:
