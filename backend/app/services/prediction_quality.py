@@ -29,9 +29,10 @@ MARKET_MIN_CONFIDENCE = {
     "Correct Score": 101.0,
 }
 
-# A weak edge is not enough to justify presenting a selection as a strong read.
-MIN_EDGE = 0.025
-# Confidence above this level needs substantially better evidence.
+# Edge is represented by the engines as percentage points in several places
+# (for example, 6.5 means 6.5%). Accept fractional 0..1 payloads too, but
+# normalize them before applying the publication threshold.
+MIN_EDGE_PERCENT = 2.5
 HIGH_CONFIDENCE = 72.0
 MIN_HIGH_CONFIDENCE_SAMPLE = 200
 
@@ -42,6 +43,12 @@ def _finite(value: object, default: float = 0.0) -> float:
         return result if math.isfinite(result) else default
     except (TypeError, ValueError):
         return default
+
+
+def _edge_percent(value: object) -> float:
+    edge = abs(_finite(value))
+    # Treat a small 0..1 value as a probability-style fraction.
+    return edge * 100.0 if 0.0 < edge <= 1.0 else edge
 
 
 def _sample_size(item: dict) -> int:
@@ -60,7 +67,7 @@ def evaluate_publication(item: dict) -> tuple[bool, list[str]]:
     """Return whether a generated item is strong enough for public publication."""
     reasons: list[str] = []
     confidence = _finite(item.get("confidence"))
-    edge = abs(_finite(item.get("edge_score")))
+    edge_percent = _edge_percent(item.get("edge_score"))
     market = str(item.get("market") or "")
     risk = str(item.get("risk_level") or "Medium")
 
@@ -71,8 +78,8 @@ def evaluate_publication(item: dict) -> tuple[bool, list[str]]:
         reasons.append("correct-score market is disabled for public picks")
     if risk.lower() == "high":
         reasons.append("high-risk classification")
-    if edge and edge < MIN_EDGE:
-        reasons.append("model edge is too small")
+    if edge_percent < MIN_EDGE_PERCENT:
+        reasons.append(f"model edge is below {MIN_EDGE_PERCENT:.1f}%")
 
     if confidence >= HIGH_CONFIDENCE and _sample_size(item) < MIN_HIGH_CONFIDENCE_SAMPLE:
         reasons.append("high confidence requires deeper supporting data")
@@ -97,6 +104,7 @@ def annotate_quality(item: dict) -> dict:
         "publication_quality": {
             "accepted": accepted,
             "reasons": reasons,
+            "edge_percent": round(_edge_percent(item.get("edge_score")), 3),
         },
     }
     return item
