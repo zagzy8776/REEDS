@@ -35,6 +35,10 @@ from app.scraper.loaders import (
 from app.services.community import settle_user_predictions
 from app.services.coverage_seed import ensure_multisport_showcase
 from app.services.predictions import generate_today_predictions
+from app.services.public_football_sources import (
+    ingest_fixture_download_football,
+    ingest_sporting_events_football,
+)
 
 log = logging.getLogger(__name__)
 
@@ -243,6 +247,33 @@ def start_scheduler() -> BackgroundScheduler:
     scheduler.add_job(
         refresh_job, "interval", hours=2,
         id="lightweight_refresh",
+        replace_existing=True, max_instances=1, coalesce=True,
+    )
+
+    # ── Public football coverage fallback every 6 hours ───────────────────
+    # FixtureDownload + Sporting Events require no new API keys and sit below
+    # the paid/keyed feeds. They only broaden fixture coverage; they do not
+    # affect the prediction model directly.
+    def public_coverage_job():
+        db = SessionLocal()
+        try:
+            dates = _date_window(settings.live_ingest_days)
+            fixture_download = ingest_fixture_download_football(db, dates, max_competitions=8)
+            sporting_events = ingest_sporting_events_football(db, dates)
+            log.info(
+                "Public football coverage: fixture_download=%d sporting_events=%d",
+                fixture_download,
+                sporting_events,
+            )
+        except Exception:
+            log.exception("Public football coverage failed")
+        finally:
+            db.close()
+            gc.collect()
+
+    scheduler.add_job(
+        public_coverage_job, "interval", hours=6,
+        id="public_football_coverage",
         replace_existing=True, max_instances=1, coalesce=True,
     )
 
