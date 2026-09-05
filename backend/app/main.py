@@ -114,7 +114,7 @@ def api_feed_health():
 
 @app.get("/api/wake")
 def wake(request: Request):
-    """Cron heartbeat: sync scores immediately and queue prediction recovery."""
+    """Cron heartbeat: wake Render, recover fixture coverage, then recover predictions."""
     if settings.cron_secret:
         supplied = request.headers.get("x-cron-secret", "")
         if not supplied:
@@ -124,17 +124,20 @@ def wake(request: Request):
         if not supplied or not secrets.compare_digest(supplied, settings.cron_secret):
             raise HTTPException(status_code=401, detail="Invalid cron credential")
 
-    from datetime import date
+    from datetime import date, timedelta
     from sqlalchemy import func
     from fastapi.responses import JSONResponse
     from app.db.models import Fixture, Prediction
     from app.db.session import SessionLocal
     from app.services.prediction_runner import start_prediction_generation
+    from app.services.coverage_runner import start_coverage_refresh
     from app.scraper.loaders import sync_live_scores
 
     db = SessionLocal()
     scores_synced = {}
-    queued = False
+    prediction_queued = False
+    coverage_queued = False
+    coverage_trigger = "not_needed"
     error = None
     try:
         scores_synced = sync_live_scores(
@@ -142,19 +145,57 @@ def wake(request: Request):
             settings.api_football_key or settings.api_sports_key,
             settings.api_basketball_key or settings.api_sports_key,
         )
+
+        today = date.today()
+        coverage_horizon = today + timedelta(days=2)
+        upcoming_count = (
+            db.query(Fixture.id)
+            .filter(
+                func.date(Fixture.match_date) >= today,
+                func.date(Fixture.match_date) <= coverage_horizon,
+            )
+            .count()
+        )
+        all_future_count = (
+            db.query(Fixture.id)
+            .filter(func.date(Fixture.match_date) >= today)
+            .count()
+        )
+
+        # The external cron is also the wake mechanism for Render. Previously it
+        # only synced scores, so a sleeping/unscheduled instance could remain
+        # permanently empty even though the fixture ingestion code was healthy.
+        if upcoming_count == 0:
+            coverage_trigger = "no_fixtures_next_48h"
+        elif upcoming_count < 10:
+            coverage_trigger = "low_fixtures_next_48h"
+
+        if coverage_trigger != "not_needed":
+            coverage_queued = start_coverage_refresh(reason=f"cron_{coverage_trigger}")
+            log.info(
+                "Wake endpoint coverage recovery: trigger=%s queued=%s upcoming_48h=%d future=%d",
+                coverage_trigger,
+                coverage_queued,
+                upcoming_count,
+                all_future_count,
+            )
+
         active_today = (
             db.query(Prediction)
             .join(Fixture, Prediction.fixture_id == Fixture.id)
             .filter(
                 Prediction.is_published == True,
                 Prediction.status == "active",
-                func.date(Fixture.match_date) == date.today(),
+                func.date(Fixture.match_date) == today,
             )
             .count()
         )
-        if active_today == 0:
-            queued = start_prediction_generation(reason="cron_wake_empty_board")
-            log.info("Wake endpoint queued prediction recovery: queued=%s", queued)
+
+        # Do not race the coverage worker with prediction generation. The next
+        # heartbeat will generate predictions after fixtures have been ingested.
+        if active_today == 0 and all_future_count > 0 and not coverage_queued:
+            prediction_queued = start_prediction_generation(reason="cron_wake_empty_board")
+            log.info("Wake endpoint queued prediction recovery: queued=%s", prediction_queued)
     except Exception as exc:
         error = str(exc)[:300]
         log.exception("Wake endpoint failed")
@@ -164,7 +205,9 @@ def wake(request: Request):
     payload = {
         "ok": error is None,
         "scores_synced": scores_synced,
-        "prediction_build_queued": queued,
+        "coverage_refresh_queued": coverage_queued,
+        "coverage_trigger": coverage_trigger,
+        "prediction_build_queued": prediction_queued,
     }
     if error:
         payload["error"] = error
