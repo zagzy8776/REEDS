@@ -82,6 +82,8 @@ jobs:
           os.environ.setdefault("MODEL_DIR", "data/models")
           os.environ.setdefault("MIN_TRAINING_ROWS", "200")
 
+          from app.services.model_bootstrap import install_quality_training
+          install_quality_training()
           from app.db.session import SessionLocal, init_db
           from app.services.predictions import dataframe_from_db
           from app.ml.train import train_soccer_model, train_basketball_model, train_generic_sport_model
