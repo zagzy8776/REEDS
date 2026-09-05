@@ -16,8 +16,6 @@ MIN_ACTIVE_SAMPLES = {
     "baseball": 200,
 }
 
-WORKER_MODEL_PREFIXES = ("/tmp/models/",)
-
 
 def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
@@ -34,8 +32,6 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
     if mv and os.path.isfile(mv.path):
         return mv
 
-    # A database row alone is not enough: Render's filesystem is ephemeral.
-    # Prefer a model whose artifact actually exists on this instance.
     available = (
         db.query(ModelVersion)
         .filter(ModelVersion.sport == sport, ModelVersion.sample_size >= min_samples)
@@ -69,7 +65,7 @@ def register_model(
 
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
     sample_ok = sample_size >= min_samples
-    worker_local = path.startswith(WORKER_MODEL_PREFIXES)
+    worker_training = os.environ.get("MODEL_WORKER", "").strip() == "1"
 
     current = (
         db.query(ModelVersion)
@@ -80,15 +76,17 @@ def register_model(
     current_artifact_ok = bool(current and os.path.isfile(current.path))
     current_sample_ok = bool(current and current.sample_size >= min_samples and current_artifact_ok)
 
-    if worker_local:
+    if worker_training:
+        # Training workers share Neon with Render but do not share its filesystem.
+        # Their local artifact can never be activated directly.
         activate = False
     elif not sample_ok:
         activate = False
     elif current is None or not current_sample_ok:
-        # Includes the important restart case: DB says active, but Render lost
-        # the local artifact during a restart/redeploy.
         activate = True
     else:
+        # Keep the known-good production model unless the new model is within
+        # 0.2 percentage points of it or better.
         activate = accuracy >= (current.accuracy - 0.002)
 
     if activate:
