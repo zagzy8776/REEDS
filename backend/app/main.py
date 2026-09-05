@@ -3,11 +3,12 @@ import secrets
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api import admin, public, live
 from app.core.config import get_settings
 from app.core.logging import setup_logging
-from app.db.session import init_db
+from app.db.session import init_db, engine
 
 
 setup_logging()
@@ -45,12 +46,40 @@ def on_startup():
 
 @app.get("/health")
 def health():
+    """Cheap liveness probe. It intentionally does not require the database."""
     return {"ok": True, "brand": settings.public_brand_name}
 
 
 @app.get("/api/health")
 def api_health():
     return health()
+
+
+@app.get("/ready")
+def readiness():
+    """Readiness probe for Render/monitoring.
+
+    Unlike /health, this verifies that the application can reach its configured
+    database. A restart or database outage therefore becomes observable without
+    turning the cheap liveness endpoint into a dependency check.
+    """
+    from fastapi.responses import JSONResponse
+
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {"ok": True, "ready": True, "database": "ok"}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Readiness database check failed")
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "ready": False, "database": "error", "detail": str(exc)[:200]},
+        )
+
+
+@app.get("/api/readiness")
+def api_readiness():
+    return readiness()
 
 
 @app.get("/api/feed-health")
