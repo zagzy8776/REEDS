@@ -20,6 +20,17 @@ SPORTS = (
 )
 
 
+def install_quality_training() -> None:
+    """Replace the legacy leaky meta-learner before any Render training runs."""
+    try:
+        import app.ml.train as train_module
+        from app.ml.quality_ensemble import train_quality_ensemble
+        train_module._train_ensemble = train_quality_ensemble
+    except Exception:
+        # Training itself will surface the import error if dependencies are absent.
+        pass
+
+
 def _asset_sport(asset_name: str, bundle: dict | None = None) -> str:
     if bundle and bundle.get("sport"):
         return str(bundle["sport"]).strip().lower()
@@ -70,7 +81,6 @@ def restore_missing_models(db: Session) -> dict:
     releases = [r for r in releases if str(r.get("tag_name", "")).startswith("models-v")]
     releases.sort(key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
 
-    # HF can publish one release per sport. Pick the newest artifact for each.
     chosen: dict[str, dict] = {}
     for release in releases:
         for asset in release.get("assets", []):
