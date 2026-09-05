@@ -98,6 +98,13 @@ jobs:
           try:
               print("Loading training data from database...")
               data = dataframe_from_db(db, max_age_days=None)
+              # Quality training is chronological. Enforce deterministic temporal
+              # ordering here so walk-forward validation cannot be fed shuffled rows.
+              if "match_date" in data.columns:
+                  sort_columns = ["match_date"]
+                  if "id" in data.columns:
+                      sort_columns.append("id")
+                  data = data.sort_values(sort_columns, kind="mergesort", na_position="last").reset_index(drop=True)
               print(f"Total rows loaded: {len(data)}")
               if "sport" in data.columns:
                   print("Rows per sport:")
@@ -146,6 +153,9 @@ jobs:
           finally:
               db.close()
 
+          if not results:
+              raise SystemExit("No sport model was trained successfully; refusing to publish an empty model release.")
+
           summary = {"trained": results, "errors": errors}
           with open("data/models/training_summary.json", "w") as f:
               json.dump(summary, f, indent=2, default=str)
@@ -181,6 +191,8 @@ jobs:
             - Runner: ubuntu-latest
             - Trigger: ${{ github.event_name }}
             - Commit: ${{ github.sha }}
+            - Chronologically ordered training data
+            - Leakage-safe quality ensemble hook
             - Only slim bundles uploaded for Render compatibility
           files: backend/data/models/*_slim.joblib
           prerelease: false
