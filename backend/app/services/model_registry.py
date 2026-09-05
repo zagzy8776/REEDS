@@ -1,5 +1,7 @@
+import math
 import os
 
+import joblib
 from sqlalchemy.orm import Session
 
 from app.db.models import ModelVersion
@@ -17,11 +19,45 @@ MIN_ACTIVE_SAMPLES = {
 }
 
 # Production models should not be replaced by a statistically weaker run just
-# because the new run happens to be close on accuracy.  A tiny tolerance is
+# because the new run happens to be close on accuracy. A tiny tolerance is
 # retained for normal training noise, while sample size prevents a smaller
 # dataset from displacing a better-established model.
 MAX_ACCURACY_REGRESSION = 0.001  # 0.1 percentage point
 MIN_SAMPLE_RATIO_TO_REPLACE = 0.90
+
+
+def _artifact_is_loadable(path: str) -> bool:
+    """Validate that a model artifact is real and exposes prediction behavior.
+
+    This is intentionally lightweight: it does not execute inference against
+    production data, but it catches corrupt/empty uploads and common cases where
+    a release contains metadata instead of an actual trained estimator.
+    """
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        bundle = joblib.load(path)
+    except Exception:
+        return False
+
+    candidates = [bundle]
+    if isinstance(bundle, dict):
+        for key in ("model", "models", "ensemble", "estimator", "classifier"):
+            value = bundle.get(key)
+            if value is not None:
+                if isinstance(value, dict):
+                    candidates.extend(value.values())
+                elif isinstance(value, (list, tuple)):
+                    candidates.extend(value)
+                else:
+                    candidates.append(value)
+
+    for candidate in candidates:
+        if callable(getattr(candidate, "predict", None)):
+            return True
+        if callable(getattr(candidate, "predict_proba", None)):
+            return True
+    return False
 
 
 def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
@@ -36,12 +72,12 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
-    if mv and os.path.isfile(mv.path):
+    if mv and _artifact_is_loadable(mv.path):
         return mv
 
     # Runtime fallback is deliberately read-only: if the active artifact is
-    # missing on ephemeral storage, use the strongest available local artifact
-    # without changing database activation state from a prediction request.
+    # missing/corrupt on ephemeral storage, use the strongest valid local
+    # artifact without changing database activation state from a prediction request.
     available = (
         db.query(ModelVersion)
         .filter(ModelVersion.sport == sport, ModelVersion.sample_size >= min_samples)
@@ -49,7 +85,7 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
         .all()
     )
     for candidate in available:
-        if os.path.isfile(candidate.path):
+        if _artifact_is_loadable(candidate.path):
             return candidate
     return None
 
@@ -71,8 +107,8 @@ def register_model(
 
     Worker training is never allowed to activate a model because the worker's
     filesystem is not the Render production filesystem. Production activation
-    additionally requires a valid artifact, enough samples, and a quality gate
-    against the currently active model.
+    additionally requires a valid artifact, enough samples, sane metrics, and
+    a quality gate against the currently active model.
     """
     sport = str(sport).strip().lower()
     path = str(path)
@@ -80,8 +116,9 @@ def register_model(
     sample_size = int(sample_size)
 
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
-    artifact_ok = os.path.isfile(path)
+    artifact_ok = _artifact_is_loadable(path)
     sample_ok = sample_size >= min_samples
+    accuracy_ok = math.isfinite(accuracy) and 0.0 <= accuracy <= 1.0
     worker_training = (
         os.environ.get("MODEL_WORKER", "").strip() == "1"
         or os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
@@ -94,20 +131,20 @@ def register_model(
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
-    current_artifact_ok = bool(current and os.path.isfile(current.path))
+    current_artifact_ok = bool(current and _artifact_is_loadable(current.path))
     current_sample_ok = bool(current and current.sample_size >= min_samples and current_artifact_ok)
 
     if worker_training:
         # Training workers share Neon with Render but do not share its filesystem.
         activate = False
-    elif not artifact_ok or not sample_ok:
+    elif not artifact_ok or not sample_ok or not accuracy_ok:
         activate = False
     elif current is None or not current_sample_ok:
         # No usable production artifact exists, so a valid model may become active.
         activate = True
     else:
-        # Do not replace a known-good model with a meaningfully weaker one.
-        # The new run must also have roughly the same amount of evidence.
+        # A replacement must be at least as accurate within a very small noise
+        # tolerance and backed by roughly the same amount of evidence.
         accuracy_floor = current.accuracy - MAX_ACCURACY_REGRESSION
         sample_floor = max(min_samples, int(current.sample_size * MIN_SAMPLE_RATIO_TO_REPLACE))
         activate = accuracy >= accuracy_floor and sample_size >= sample_floor
