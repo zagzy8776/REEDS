@@ -20,10 +20,14 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
+from app.scraper.coverage_sources import ingest_bzzoiro_football, ingest_openfoot_football
 from app.scraper.loaders import (
     ingest_allsportsapi_events,
     ingest_api_basketball_games,
     ingest_api_football_fixtures,
+    ingest_apifootball_com_events,
+    ingest_football_data_org_matches,
+    ingest_sportmonks_football_fixtures,
     ingest_thesportsdb_events,
     sync_live_scores,
     refresh_odds_from_the_odds_api,
@@ -94,7 +98,9 @@ def run_lightweight_refresh() -> dict:
         football_key   = settings.api_football_key or settings.api_sports_key
         basketball_key = settings.api_basketball_key or settings.api_sports_key
 
-        # ── Live fixture ingestion ────────────────────────────────────────
+        # ── Live football fixture ingestion ────────────────────────────────
+        # API-Football remains the primary provider. The other feeds are
+        # complementary coverage sources and only run when their own key exists.
         if football_key:
             try:
                 n = ingest_api_football_fixtures(
@@ -106,6 +112,43 @@ def run_lightweight_refresh() -> dict:
                 report["ingested"]["api_football"] = n
             except Exception as exc:
                 report["skipped"].append({"provider": "api_football", "reason": str(exc)})
+
+        if settings.sportmonks_api_key:
+            try:
+                n = ingest_sportmonks_football_fixtures(db, settings.sportmonks_api_key, dates)
+                report["ingested"]["sportmonks"] = n
+            except Exception as exc:
+                report["skipped"].append({"provider": "sportmonks", "reason": str(exc)})
+
+        if settings.football_data_api_key:
+            try:
+                n = ingest_football_data_org_matches(db, settings.football_data_api_key, dates)
+                report["ingested"]["football_data_org"] = n
+            except Exception as exc:
+                report["skipped"].append({"provider": "football_data_org", "reason": str(exc)})
+
+        if settings.api_football_com_key:
+            try:
+                n = ingest_apifootball_com_events(db, settings.api_football_com_key, dates)
+                report["ingested"]["apifootball_com"] = n
+            except Exception as exc:
+                report["skipped"].append({"provider": "apifootball_com", "reason": str(exc)})
+
+        # Optional broad-coverage providers. Each is deliberately bounded:
+        # Bzzoiro uses one range request; OpenFoot uses one request per day.
+        if settings.bzzoiro_api_key:
+            try:
+                n = ingest_bzzoiro_football(db, settings.bzzoiro_api_key, dates)
+                report["ingested"]["bzzoiro"] = n
+            except Exception as exc:
+                report["skipped"].append({"provider": "bzzoiro", "reason": str(exc)})
+
+        if settings.openfoot_api_key:
+            try:
+                n = ingest_openfoot_football(db, settings.openfoot_api_key, dates)
+                report["ingested"]["openfoot"] = n
+            except Exception as exc:
+                report["skipped"].append({"provider": "openfoot", "reason": str(exc)})
 
         if basketball_key:
             try:
