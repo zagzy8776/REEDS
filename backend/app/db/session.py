@@ -17,20 +17,25 @@ def normalize_database_url(url: str) -> str:
 
 
 database_url = normalize_database_url(settings.database_url)
-
-# Never silently run production against the ephemeral local SQLite fallback.
-# A missing DATABASE_URL must fail loudly instead of creating a split-brain DB.
-if settings.app_env == "production" and database_url.startswith("sqlite"):
+if settings.app_env.lower() == "production" and (not database_url or database_url.startswith("sqlite")):
     raise RuntimeError("DATABASE_URL must point to PostgreSQL in production")
 
-connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-engine = create_engine(
-    database_url,
-    pool_pre_ping=True,
-    pool_recycle=300,
-    connect_args=connect_args,
-)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+is_sqlite = database_url.startswith("sqlite")
+connect_args = {"check_same_thread": False} if is_sqlite else {
+    "connect_timeout": 10,
+    "application_name": "loyal-edge-api",
+}
+
+engine_kwargs = {
+    "pool_pre_ping": True,
+    "pool_recycle": 300,
+    "connect_args": connect_args,
+}
+if not is_sqlite:
+    engine_kwargs.update({"pool_size": 5, "max_overflow": 5, "pool_timeout": 10})
+
+engine = create_engine(database_url, **engine_kwargs)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
 class Base(DeclarativeBase):
@@ -47,7 +52,6 @@ def get_db():
 
 def init_db() -> None:
     from app.db import models  # noqa: F401
-
     Base.metadata.create_all(bind=engine)
     repair_runtime_schema()
 
@@ -67,12 +71,7 @@ def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
 
 
 def repair_runtime_schema() -> None:
-    """Patch known additive schema drift at startup.
-
-    ``create_all`` creates missing tables but does not alter existing tables.
-    These additive repairs are idempotent; Alembic remains the preferred
-    long-term migration mechanism for larger schema changes.
-    """
+    """Patch known additive schema drift at startup."""
     inspector = inspect(engine)
     if "predictions" not in inspector.get_table_names():
         return
