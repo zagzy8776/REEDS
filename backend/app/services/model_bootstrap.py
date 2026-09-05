@@ -1,4 +1,4 @@
-"""Restore production model artifacts after Render restarts."""
+"""Restore production model artifacts and harden the training runtime."""
 
 from __future__ import annotations
 
@@ -21,13 +21,49 @@ SPORTS = (
 
 
 def install_quality_training() -> None:
-    """Replace the legacy leaky meta-learner before any Render training runs."""
+    """Install leakage-safe training for both normal and large datasets.
+
+    The production trainer historically switched to a single RandomForest on very
+    large datasets. That path is useful as a memory fallback, but it should still
+    use probability validation and an ensemble rather than silently changing the
+    modelling strategy. This hook replaces both training paths before any worker
+    starts a model build.
+    """
     try:
         import app.ml.train as train_module
         from app.ml.quality_ensemble import train_quality_ensemble
+
         train_module._train_ensemble = train_quality_ensemble
+
+        original_fast = train_module._train_fast_large_dataset_model
+
+        def quality_large_dataset_model(X_train, y_train, X_test, y_test, labels, sport):
+            # Keep the large-data path memory-conscious: RF + XGBoost only, while
+            # retaining the same leakage-safe validation/weighting logic.
+            factories = train_module._build_model_factories(
+                binary=(len(labels) == 2),
+                slim=True,
+            )
+            try:
+                result = train_quality_ensemble(
+                    X_train,
+                    y_train,
+                    X_test,
+                    y_test,
+                    factories,
+                    labels,
+                    n_trials=0,
+                )
+                return result
+            except Exception as exc:
+                # A hard memory/dependency failure must still leave the existing
+                # production fallback available rather than taking the worker down.
+                print(f"  quality large-data ensemble fallback for {sport}: {exc}")
+                return original_fast(X_train, y_train, X_test, y_test, labels, sport)
+
+        train_module._train_fast_large_dataset_model = quality_large_dataset_model
     except Exception:
-        # Training itself will surface the import error if dependencies are absent.
+        # Training itself will surface the import/dependency error if unavailable.
         pass
 
 
