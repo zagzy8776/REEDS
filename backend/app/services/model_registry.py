@@ -1,3 +1,5 @@
+import os
+
 from sqlalchemy.orm import Session
 
 from app.db.models import ModelVersion
@@ -14,8 +16,6 @@ MIN_ACTIVE_SAMPLES = {
     "baseball": 200,
 }
 
-# HF and Render share Neon but do NOT share a filesystem. A worker-local model
-# must never become the active production model before its artifact is uploaded.
 WORKER_MODEL_PREFIXES = ("/tmp/models/",)
 
 
@@ -31,14 +31,21 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
-    if not mv:
-        mv = (
-            db.query(ModelVersion)
-            .filter(ModelVersion.sport == sport, ModelVersion.sample_size >= min_samples)
-            .order_by(ModelVersion.accuracy.desc(), ModelVersion.trained_at.desc())
-            .first()
-        )
-    return mv
+    if mv and os.path.isfile(mv.path):
+        return mv
+
+    # A database row alone is not enough: Render's filesystem is ephemeral.
+    # Prefer a model whose artifact actually exists on this instance.
+    available = (
+        db.query(ModelVersion)
+        .filter(ModelVersion.sport == sport, ModelVersion.sample_size >= min_samples)
+        .order_by(ModelVersion.accuracy.desc(), ModelVersion.trained_at.desc())
+        .all()
+    )
+    for candidate in available:
+        if os.path.isfile(candidate.path):
+            return candidate
+    return None
 
 
 def active_model_path(db: Session, sport: str = "soccer") -> str | None:
@@ -54,12 +61,7 @@ def register_model(
     accuracy: float,
     sample_size: int,
 ) -> ModelVersion:
-    """Register a model while protecting the last known-good production model.
-
-    Training can happen on Hugging Face while serving happens on Render. Both
-    use the same Neon database, so a worker-local path must stay inactive until
-    the artifact has actually been uploaded to Render.
-    """
+    """Register a model while protecting the last known-good production model."""
     sport = str(sport).strip().lower()
     path = str(path)
     accuracy = float(accuracy)
@@ -75,17 +77,18 @@ def register_model(
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
-    current_sample_ok = bool(current and current.sample_size >= min_samples)
+    current_artifact_ok = bool(current and os.path.isfile(current.path))
+    current_sample_ok = bool(current and current.sample_size >= min_samples and current_artifact_ok)
 
     if worker_local:
         activate = False
     elif not sample_ok:
         activate = False
     elif current is None or not current_sample_ok:
+        # Includes the important restart case: DB says active, but Render lost
+        # the local artifact during a restart/redeploy.
         activate = True
     else:
-        # A retrain may replace the current model only if it is not materially
-        # worse. 0.2 percentage points is a small tolerance for test variance.
         activate = accuracy >= (current.accuracy - 0.002)
 
     if activate:
