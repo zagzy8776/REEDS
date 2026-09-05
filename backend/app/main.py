@@ -32,11 +32,11 @@ app.include_router(model_sync.router)
 def on_startup():
     init_db()
 
-    # Render's filesystem is ephemeral. Restore missing model artifacts from
-    # the durable GitHub Release store before the scheduler starts serving work.
     try:
         from app.db.session import SessionLocal
-        from app.services.model_bootstrap import restore_missing_models
+        from app.services.model_bootstrap import install_quality_training, restore_missing_models
+        # Patch the legacy test-leaking ensemble before any training endpoint can run.
+        install_quality_training()
         db = SessionLocal()
         try:
             result = restore_missing_models(db)
@@ -44,8 +44,7 @@ def on_startup():
         finally:
             db.close()
     except Exception:
-        # Model bootstrap must never prevent the API from starting. Readiness
-        # remains available so monitoring can detect missing dependencies.
+        # Model recovery must never prevent the API from starting.
         log.exception("Model bootstrap failed during startup")
 
     from app.services.prediction_guard import install_prediction_guard
