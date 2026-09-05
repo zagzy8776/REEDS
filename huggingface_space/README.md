@@ -33,4 +33,4 @@ Open the Space UI and use the buttons to:
 - **Ingest Free Data** — downloads historical data from free sources first
 - **Start Auto-Polling** — keeps the Space alive, auto-retrains when Render signals new data
 
-The worker also installs the production leakage-safe chronological ensemble before training so HF, Render, and GitHub Actions use the same model-quality path.
+The worker installs the same leakage-safe chronological ensemble used by production before training and uses the safe model synchronization endpoint for durable recovery.
