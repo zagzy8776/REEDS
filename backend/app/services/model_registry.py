@@ -18,21 +18,11 @@ MIN_ACTIVE_SAMPLES = {
     "baseball": 200,
 }
 
-# Production models should not be replaced by a statistically weaker run just
-# because the new run happens to be close on accuracy. A tiny tolerance is
-# retained for normal training noise, while sample size prevents a smaller
-# dataset from displacing a better-established model.
-MAX_ACCURACY_REGRESSION = 0.001  # 0.1 percentage point
+MAX_ACCURACY_REGRESSION = 0.001
 MIN_SAMPLE_RATIO_TO_REPLACE = 0.90
 
 
 def _artifact_is_loadable(path: str) -> bool:
-    """Validate that a model artifact is real and exposes prediction behavior.
-
-    This is intentionally lightweight: it does not execute inference against
-    production data, but it catches corrupt/empty uploads and common cases where
-    a release contains metadata instead of an actual trained estimator.
-    """
     if not path or not os.path.isfile(path):
         return False
     try:
@@ -52,12 +42,38 @@ def _artifact_is_loadable(path: str) -> bool:
                 else:
                     candidates.append(value)
 
-    for candidate in candidates:
-        if callable(getattr(candidate, "predict", None)):
-            return True
-        if callable(getattr(candidate, "predict_proba", None)):
-            return True
-    return False
+    return any(
+        callable(getattr(candidate, "predict", None))
+        or callable(getattr(candidate, "predict_proba", None))
+        for candidate in candidates
+    )
+
+
+def _metric(value, default=None):
+    """Return a finite float metric when one is available."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
+
+
+def _candidate_is_better(current: ModelVersion, accuracy: float, sample_size: int) -> bool:
+    """Conservative replacement gate.
+
+    Accuracy remains the legacy-compatible primary metric. If newer training
+    metadata is present in model_type (for example ``accuracy=...;log_loss=...``),
+    this function deliberately does not parse it: the current schema has no
+    dedicated validation columns. Sample size + accuracy therefore form the
+    safe gate until validation metrics get first-class persistence.
+    """
+    current_accuracy = _metric(current.accuracy, 0.0)
+    accuracy_floor = current_accuracy - MAX_ACCURACY_REGRESSION
+    sample_floor = max(
+        MIN_ACTIVE_SAMPLES.get(current.sport, 100),
+        int(current.sample_size * MIN_SAMPLE_RATIO_TO_REPLACE),
+    )
+    return accuracy >= accuracy_floor and sample_size >= sample_floor
 
 
 def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
@@ -75,9 +91,6 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
     if mv and _artifact_is_loadable(mv.path):
         return mv
 
-    # Runtime fallback is deliberately read-only: if the active artifact is
-    # missing/corrupt on ephemeral storage, use the strongest valid local
-    # artifact without changing database activation state from a prediction request.
     available = (
         db.query(ModelVersion)
         .filter(ModelVersion.sport == sport, ModelVersion.sample_size >= min_samples)
@@ -103,13 +116,7 @@ def register_model(
     accuracy: float,
     sample_size: int,
 ) -> ModelVersion:
-    """Register a model while protecting the last known-good production model.
-
-    Worker training is never allowed to activate a model because the worker's
-    filesystem is not the Render production filesystem. Production activation
-    additionally requires a valid artifact, enough samples, sane metrics, and
-    a quality gate against the currently active model.
-    """
+    """Register a model without allowing weak worker artifacts into production."""
     sport = str(sport).strip().lower()
     path = str(path)
     accuracy = float(accuracy)
@@ -135,19 +142,13 @@ def register_model(
     current_sample_ok = bool(current and current.sample_size >= min_samples and current_artifact_ok)
 
     if worker_training:
-        # Training workers share Neon with Render but do not share its filesystem.
         activate = False
     elif not artifact_ok or not sample_ok or not accuracy_ok:
         activate = False
     elif current is None or not current_sample_ok:
-        # No usable production artifact exists, so a valid model may become active.
         activate = True
     else:
-        # A replacement must be at least as accurate within a very small noise
-        # tolerance and backed by roughly the same amount of evidence.
-        accuracy_floor = current.accuracy - MAX_ACCURACY_REGRESSION
-        sample_floor = max(min_samples, int(current.sample_size * MIN_SAMPLE_RATIO_TO_REPLACE))
-        activate = accuracy >= accuracy_floor and sample_size >= sample_floor
+        activate = _candidate_is_better(current, accuracy, sample_size)
 
     if activate:
         db.query(ModelVersion).filter_by(sport=sport, is_active=True).update({"is_active": False})
