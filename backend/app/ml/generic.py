@@ -7,6 +7,33 @@ def _risk(confidence_pct: float) -> str:
     return "Low" if confidence_pct >= 72 else "Medium" if confidence_pct >= 58 else "High"
 
 
+def _prediction_history(history: pd.DataFrame, fixture: dict) -> pd.DataFrame:
+    """Return only completed observations strictly before the target fixture.
+
+    The same sanitized frame is passed to every dedicated sport engine. This is
+    important because bulk ingestion can contain future fixtures, while each
+    engine's recent-form/H2H calculations must remain causal.
+    """
+    if history is None or history.empty:
+        return pd.DataFrame()
+
+    df = history.copy()
+    if "sport" in df.columns and fixture.get("sport"):
+        df = df[df["sport"] == fixture.get("sport")].copy()
+
+    if "home_score" in df.columns and "away_score" in df.columns:
+        df = df[df["home_score"].notna() & df["away_score"].notna()].copy()
+
+    if "match_date" in df.columns:
+        target = pd.to_datetime(fixture.get("match_date"), errors="coerce")
+        dates = pd.to_datetime(df["match_date"], errors="coerce")
+        if not pd.isna(target):
+            df = df[dates < target].copy()
+        df = df.sort_values("match_date", kind="mergesort", na_position="last")
+
+    return df.reset_index(drop=True)
+
+
 class GenericSportEngine:
     """Routes each sport to its dedicated engine, falls back to form-based heuristic.
 
@@ -25,6 +52,9 @@ class GenericSportEngine:
 
     def predict(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
         sport = fixture.get("sport") or "sport"
+        # Sanitize once before routing so dedicated engines cannot accidentally
+        # consume future or unfinished fixtures from the shared history frame.
+        history = _prediction_history(history, fixture)
 
         # --- Dedicated engines ---
         if sport == "basketball":
@@ -113,7 +143,6 @@ class GenericSportEngine:
         winner_pick = "Home Win" if home_win_prob >= 0.5 else "Away Win"
         away_win_prob = 1 - home_win_prob
 
-        # If we have no real data, cap confidence below publish threshold
         if not has_data:
             winner_conf = min(winner_conf, 50.0)
             home_win_prob = 0.50
@@ -152,8 +181,7 @@ class GenericSportEngine:
             }
         ]
 
-        # Double-chance: useful for any two-outcome sport
-        dc_prob = max(home_win_prob + 0.25, away_win_prob + 0.25)  # covers draw scenario
+        dc_prob = max(home_win_prob + 0.25, away_win_prob + 0.25)
         dc_pick = "Home or Draw" if home_win_prob >= away_win_prob else "Away or Draw"
         dc_conf = round(min(dc_prob, 0.82) * 100, 1)
         if not has_data:
@@ -168,9 +196,7 @@ class GenericSportEngine:
             "engine_meta": {**meta, "market_logic": "Double chance reduces upset risk by covering two outcomes."},
         })
 
-        # Totals market when we have projected data
         if projected_total:
-            # Pick a sensible sport-aware line
             sport_lines = {
                 "rugby": 40.5, "volleyball": 152.5, "handball": 52.5,
                 "mma": 2.5, "motorsport": 2.5,
