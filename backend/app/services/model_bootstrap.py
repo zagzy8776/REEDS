@@ -1,10 +1,4 @@
-"""Restore production model artifacts after Render restarts.
-
-Render filesystems are ephemeral, so a database row pointing at a local model
-file is not sufficient. This service discovers the newest model release for
-each sport, downloads only missing artifacts, validates them, and registers the
-restored file without deleting an existing working model.
-"""
+"""Restore production model artifacts after Render restarts."""
 
 from __future__ import annotations
 
@@ -20,15 +14,17 @@ from app.core.config import get_settings
 from app.services.model_registry import register_model
 
 
+SPORTS = (
+    "american_football", "basketball", "baseball", "soccer",
+    "tennis", "hockey", "cricket", "rugby",
+)
+
 
 def _asset_sport(asset_name: str, bundle: dict | None = None) -> str:
     if bundle and bundle.get("sport"):
         return str(bundle["sport"]).strip().lower()
     name = asset_name.lower()
-    for sport in (
-        "american_football", "basketball", "baseball", "soccer",
-        "tennis", "hockey", "cricket", "rugby",
-    ):
+    for sport in SPORTS:
         if sport in name:
             return sport
     return "soccer"
@@ -74,13 +70,12 @@ def restore_missing_models(db: Session) -> dict:
     releases = [r for r in releases if str(r.get("tag_name", "")).startswith("models-v")]
     releases.sort(key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
 
-    # Pick the newest asset available for each sport. This is necessary because
-    # the HF worker may publish one release per sport rather than one giant release.
+    # HF can publish one release per sport. Pick the newest artifact for each.
     chosen: dict[str, dict] = {}
     for release in releases:
         for asset in release.get("assets", []):
             name = Path(str(asset.get("name", ""))).name
-            if not name.endswith(".joblib") or name in {Path(name).name for name in []}:
+            if not name.endswith(".joblib"):
                 continue
             sport = _asset_sport(name)
             if sport not in chosen:
