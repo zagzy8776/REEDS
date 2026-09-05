@@ -40,6 +40,12 @@ jobs:
               1,
           )
 
+          # Never let the HF fallback invoke the legacy destructive model pull.
+          text = text.replace(
+              'f"{RENDER_URL}/api/admin/download-models"',
+              'f"{RENDER_URL}/api/admin/sync-models-safe"',
+          )
+
           path.write_text(text, encoding="utf-8")
           PY
 
