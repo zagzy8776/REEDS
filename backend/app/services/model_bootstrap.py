@@ -56,8 +56,8 @@ def install_quality_training() -> None:
                 )
                 return result
             except Exception as exc:
-                # A hard memory/dependency failure must still leave the existing
-                # production fallback available rather than taking the worker down.
+                # A hard memory/dependency failure must still leave the worker
+                # fallback available rather than taking the worker down.
                 print(f"  quality large-data ensemble fallback for {sport}: {exc}")
                 return original_fast(X_train, y_train, X_test, y_test, labels, sport)
 
@@ -78,13 +78,36 @@ def _asset_sport(asset_name: str, bundle: dict | None = None) -> str:
 
 
 def _validate(path: Path, asset_name: str) -> dict:
+    """Validate model structure and metadata before it reaches production."""
     bundle = joblib.load(path)
-    if not isinstance(bundle, dict) or not isinstance(bundle.get("models"), dict) or not bundle["models"]:
-        raise ValueError("invalid model bundle")
+    if not isinstance(bundle, dict):
+        raise ValueError("invalid model bundle: expected dictionary")
+
+    models = bundle.get("models")
+    if not isinstance(models, dict) or not models:
+        raise ValueError("invalid model bundle: no models")
+
+    # Every production prediction model must expose probability output. This
+    # catches truncated/wrong-version artifacts before they replace a good model.
+    invalid_models = [
+        name for name, model in models.items()
+        if not callable(getattr(model, "predict_proba", None))
+    ]
+    if invalid_models:
+        raise ValueError(
+            "invalid model bundle: missing predict_proba for "
+            + ", ".join(str(name) for name in invalid_models[:5])
+        )
+
+    labels = bundle.get("labels")
+    if labels is not None and (not isinstance(labels, (list, tuple)) or len(labels) < 2):
+        raise ValueError("invalid model bundle: labels")
+
     accuracy = float(bundle.get("accuracy", 0.0))
     sample_size = int(bundle.get("sample_size", 0))
     if not 0 <= accuracy <= 1 or sample_size <= 0:
         raise ValueError("invalid model metadata")
+
     model_types = bundle.get("model_types") or []
     return {
         "sport": _asset_sport(asset_name, bundle),
