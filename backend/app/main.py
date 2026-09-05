@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.api import admin, public, live, model_sync
+from app.api import admin, public, live, fixtures, model_sync
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import init_db, engine
@@ -26,6 +26,7 @@ app.add_middleware(
 app.include_router(public.router, prefix="/api")
 app.include_router(admin.router, prefix="/api/admin")
 app.include_router(live.router, prefix="/api")
+app.include_router(fixtures.router, prefix="/api")
 app.include_router(model_sync.router)
 
 
