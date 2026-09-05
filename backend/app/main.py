@@ -114,7 +114,7 @@ def api_feed_health():
 
 @app.get("/api/wake")
 def wake(request: Request):
-    """Cron keep-alive/sync endpoint with optional shared-secret protection."""
+    """Cron heartbeat: sync scores immediately and queue prediction recovery."""
     if settings.cron_secret:
         supplied = request.headers.get("x-cron-secret", "")
         if not supplied:
@@ -129,12 +129,12 @@ def wake(request: Request):
     from fastapi.responses import JSONResponse
     from app.db.models import Fixture, Prediction
     from app.db.session import SessionLocal
-    from app.services.predictions import generate_today_predictions
+    from app.services.prediction_runner import start_prediction_generation
     from app.scraper.loaders import sync_live_scores
 
     db = SessionLocal()
-    generated = 0
     scores_synced = {}
+    queued = False
     error = None
     try:
         scores_synced = sync_live_scores(
@@ -153,15 +153,19 @@ def wake(request: Request):
             .count()
         )
         if active_today == 0:
-            generated = generate_today_predictions(db)
-            log.info("Wake endpoint generated %d predictions", generated)
+            queued = start_prediction_generation(reason="cron_wake_empty_board")
+            log.info("Wake endpoint queued prediction recovery: queued=%s", queued)
     except Exception as exc:
         error = str(exc)[:300]
         log.exception("Wake endpoint failed")
     finally:
         db.close()
 
-    payload = {"ok": error is None, "scores_synced": scores_synced, "generated": generated}
+    payload = {
+        "ok": error is None,
+        "scores_synced": scores_synced,
+        "prediction_build_queued": queued,
+    }
     if error:
         payload["error"] = error
         return JSONResponse(status_code=503, content=payload)
