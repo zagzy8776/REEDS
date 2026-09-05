@@ -21,14 +21,7 @@ SPORTS = (
 
 
 def install_quality_training() -> None:
-    """Install leakage-safe training for both normal and large datasets.
-
-    The production trainer historically switched to a single RandomForest on very
-    large datasets. That path is useful as a memory fallback, but it should still
-    use probability validation and an ensemble rather than silently changing the
-    modelling strategy. This hook replaces both training paths before any worker
-    starts a model build.
-    """
+    """Install leakage-safe training and customer-facing prediction quality gates."""
     try:
         import app.ml.train as train_module
         from app.ml.quality_ensemble import train_quality_ensemble
@@ -56,14 +49,60 @@ def install_quality_training() -> None:
                 )
                 return result
             except Exception as exc:
-                # A hard memory/dependency failure must still leave the worker
-                # fallback available rather than taking the worker down.
                 print(f"  quality large-data ensemble fallback for {sport}: {exc}")
                 return original_fast(X_train, y_train, X_test, y_test, labels, sport)
 
         train_module._train_fast_large_dataset_model = quality_large_dataset_model
     except Exception:
-        # Training itself will surface the import/dependency error if unavailable.
+        pass
+
+    # The model can be statistically strong while an individual generated pick is
+    # still too weak to expose publicly. Install this gate at the real publication
+    # path so every scheduler/cron/manual generation route gets the same policy.
+    try:
+        import app.services.predictions as predictions_module
+        from app.services.prediction_quality import evaluate_publication
+
+        if not getattr(predictions_module, "_quality_gate_installed", False):
+            original_select = predictions_module.select_public_picks
+            original_fallback = predictions_module.choose_provisional_public_pick
+
+            def quality_select_public_picks(items: list[dict], max_picks: int = 4) -> set[int]:
+                annotated = []
+                for idx, item in enumerate(items):
+                    accepted, reasons = evaluate_publication(item)
+                    meta = item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else {}
+                    item["engine_meta"] = {
+                        **meta,
+                        "publication_quality": {
+                            "accepted": accepted,
+                            "reasons": reasons,
+                        },
+                    }
+                    annotated.append((idx, item, accepted))
+
+                # Preserve the existing market diversity/threshold logic, but never
+                # allow it to promote an item rejected by the quality gate.
+                eligible = [item for item in annotated if item[2]]
+                if not eligible:
+                    return set()
+                return original_select([item for _, item, _ in eligible], max_picks=max_picks) and {
+                    eligible[position][0]
+                    for position, (idx, _, _) in enumerate(eligible)
+                    if position in original_select([item for _, item, _ in eligible], max_picks=max_picks)
+                }
+
+            def quality_fallback(items: list[dict]) -> dict | None:
+                accepted = [item for item in items if evaluate_publication(item)[0]]
+                if not accepted:
+                    return None
+                return max(accepted, key=lambda item: float(item.get("confidence", 0) or 0))
+
+            predictions_module.select_public_picks = quality_select_public_picks
+            predictions_module.choose_provisional_public_pick = quality_fallback
+            predictions_module._quality_gate_installed = True
+    except Exception:
+        # Do not block startup if the optional quality module cannot import.
         pass
 
 
@@ -87,8 +126,6 @@ def _validate(path: Path, asset_name: str) -> dict:
     if not isinstance(models, dict) or not models:
         raise ValueError("invalid model bundle: no models")
 
-    # Every production prediction model must expose probability output. This
-    # catches truncated/wrong-version artifacts before they replace a good model.
     invalid_models = [
         name for name, model in models.items()
         if not callable(getattr(model, "predict_proba", None))
