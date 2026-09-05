@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite:///./data/local.db"
+    # Never silently run production against a local SQLite database. SQLite remains
+    # available for explicit local development only.
+    database_url: str = ""
     app_env: str = "development"
     admin_api_key: str = "change-me"
     cron_secret: str = ""
@@ -56,4 +58,7 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.app_env.lower() == "production" and not settings.database_url.strip():
+        raise RuntimeError("DATABASE_URL must be configured in production")
+    return settings
