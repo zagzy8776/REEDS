@@ -14,7 +14,7 @@ from pathlib import Path
 
 import joblib
 import requests
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -24,15 +24,12 @@ from app.services.model_registry import register_model
 router = APIRouter()
 
 
-def _admin_key(x_admin_key: str = ""):
-    # Kept as a dependency wrapper so this endpoint has the same protection as
-    # the existing admin router without importing the router itself.
+def _admin_key(x_admin_key: str = Header(default="")):
     from app.api.admin import require_admin
     return require_admin(x_admin_key)
 
 
 def _safe_filename(name: str) -> str:
-    # Release assets are untrusted input. Never allow path traversal.
     clean = Path(str(name)).name
     if clean != str(name) or not clean.endswith(".joblib"):
         raise ValueError(f"unsafe model asset name: {name}")
@@ -51,8 +48,6 @@ def _validate_bundle(path: Path) -> dict:
     if not isinstance(models, dict) or not models:
         raise ValueError("model bundle contains no models")
     if not sport:
-        # Existing bundles may not carry sport metadata; infer only from the
-        # controlled filename, never from arbitrary path components.
         lowered = path.name.lower()
         sport = "basketball" if "basketball" in lowered else "soccer"
     if not 0.0 <= accuracy <= 1.0:
@@ -130,7 +125,6 @@ def sync_models_safe(db: Session = Depends(get_db)):
                 os.replace(source, destination)
                 installed.append({"file": destination.name, **metadata})
 
-            # Register only after files are physically present on Render.
             for item in installed:
                 path = str(model_dir / item["file"])
                 mv = register_model(
@@ -144,7 +138,6 @@ def sync_models_safe(db: Session = Depends(get_db)):
                 item["active"] = bool(mv.is_active)
 
         except Exception:
-            # Restore files if the atomic publication phase fails.
             for _, destination, _ in reversed(staged):
                 if destination.exists():
                     destination.unlink(missing_ok=True)
