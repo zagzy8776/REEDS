@@ -31,11 +31,9 @@ app.include_router(model_sync.router)
 @app.on_event("startup")
 def on_startup():
     init_db()
-
     try:
         from app.db.session import SessionLocal
         from app.services.model_bootstrap import install_quality_training, restore_missing_models
-        # Patch the legacy test-leaking ensemble before any training endpoint can run.
         install_quality_training()
         db = SessionLocal()
         try:
@@ -44,7 +42,7 @@ def on_startup():
         finally:
             db.close()
     except Exception:
-        # Model recovery must never prevent the API from starting.
+        # Recovery must never prevent the HTTP process from starting.
         log.exception("Model bootstrap failed during startup")
 
     from app.services.prediction_guard import install_prediction_guard
@@ -112,6 +110,7 @@ def wake(request: Request):
 
     from datetime import date
     from sqlalchemy import func
+    from fastapi.responses import JSONResponse
     from app.db.models import Fixture, Prediction
     from app.db.session import SessionLocal
     from app.services.predictions import generate_today_predictions
@@ -120,6 +119,7 @@ def wake(request: Request):
     db = SessionLocal()
     generated = 0
     scores_synced = {}
+    error = None
     try:
         scores_synced = sync_live_scores(
             db,
@@ -139,8 +139,14 @@ def wake(request: Request):
         if active_today == 0:
             generated = generate_today_predictions(db)
             log.info("Wake endpoint generated %d predictions", generated)
-    except Exception:
+    except Exception as exc:
+        error = str(exc)[:300]
         log.exception("Wake endpoint failed")
     finally:
         db.close()
-    return {"ok": True, "scores_synced": scores_synced, "generated": generated}
+
+    payload = {"ok": error is None, "scores_synced": scores_synced, "generated": generated}
+    if error:
+        payload["error"] = error
+        return JSONResponse(status_code=503, content=payload)
+    return payload
