@@ -1,6 +1,7 @@
 import logging
+import secrets
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import admin, public, live
@@ -28,6 +29,14 @@ app.include_router(live.router, prefix="/api")
 @app.on_event("startup")
 def on_startup():
     init_db()
+
+    # Install one concurrency guard around every prediction-generation entry point
+    # before the scheduler starts. This prevents cron, public self-heal, admin
+    # actions, and scheduler jobs from generating the same board simultaneously.
+    from app.services.prediction_guard import install_prediction_guard
+
+    install_prediction_guard()
+
     if settings.enable_scheduler:
         from app.services.scheduler import start_scheduler
 
@@ -57,29 +66,43 @@ def api_feed_health():
 
 
 @app.get("/api/wake")
-def wake():
-    """Cron-job.org keep-alive ping. Keeps Render from sleeping, auto-generates
-    predictions if today's board is empty, and syncs live scores."""
+def wake(request: Request):
+    """Cron-job.org keep-alive/sync endpoint.
+
+    If CRON_SECRET is configured, callers must provide it as X-Cron-Secret or
+    Authorization: Bearer <secret>. Leaving it unset preserves compatibility
+    with an existing external cron while the deployment is being migrated.
+    """
+    if settings.cron_secret:
+        supplied = request.headers.get("x-cron-secret", "")
+        if not supplied:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                supplied = auth[7:].strip()
+        if not supplied or not secrets.compare_digest(supplied, settings.cron_secret):
+            raise HTTPException(status_code=401, detail="Invalid cron credential")
+
     from datetime import date
     from sqlalchemy import func
     from app.db.models import Fixture, Prediction
     from app.db.session import SessionLocal
     from app.services.predictions import generate_today_predictions
     from app.scraper.loaders import sync_live_scores
-    from app.core.config import get_settings
 
     db = SessionLocal()
     generated = 0
     scores_synced = {}
     try:
-        # Sync live/finished scores first
-        s = get_settings()
+        # Sync live/finished scores first.
         scores_synced = sync_live_scores(
             db,
-            s.api_football_key or s.api_sports_key,
-            s.api_basketball_key or s.api_sports_key,
+            settings.api_football_key or settings.api_sports_key,
+            settings.api_basketball_key or settings.api_sports_key,
         )
-        # Generate predictions if board is empty
+
+        # Only generate when today's published board is genuinely empty. The
+        # prediction guard prevents duplicate work if another path is already
+        # generating at the same time.
         active_today = (
             db.query(Prediction)
             .join(Fixture, Prediction.fixture_id == Fixture.id)
