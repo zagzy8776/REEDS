@@ -82,7 +82,7 @@ def upcoming_fixtures(
         query = query.filter(Fixture.match_date < today)
     elif scope == "all":
         query = query.filter(Fixture.match_date >= today)
-    else:  # upcoming / active / any unknown value
+    else:
         query = query.filter(Fixture.match_date >= today)
 
     if scope in {"live", "today"}:
@@ -94,10 +94,32 @@ def upcoming_fixtures(
 
     fixtures = query.order_by(*order).limit(limit).all()
 
-    # A browser visit is a legitimate wake signal for Render. When the board is
-    # genuinely empty, queue the normal ingestion pipeline instead of returning
-    # an unexplained permanent zero while the external cron catches up.
     if not fixtures and scope not in {"results"}:
+        # Fast last-resort recovery: OpenFoot exposes public fixture reads, so
+        # a newly-awakened Render instance can populate the board immediately
+        # without waiting for the background coverage worker or another cron.
+        try:
+            from app.scraper.coverage_sources import ingest_openfoot_football
+
+            recovery_dates = [
+                (today + timedelta(days=offset)).isoformat()
+                for offset in range(3)
+            ]
+            recovered = ingest_openfoot_football(db, None, recovery_dates)
+            if recovered:
+                fixtures = (
+                    db.query(Fixture)
+                    .filter(Fixture.match_date >= today)
+                    .order_by(Fixture.match_date.asc(), Fixture.id.asc())
+                    .limit(limit)
+                    .all()
+                )
+                log.info("Public fixture endpoint recovered %d rows from OpenFoot", recovered)
+        except Exception:
+            log.exception("OpenFoot emergency fixture recovery failed")
+
+        # Also queue the normal full multi-provider refresh. This keeps the DB
+        # populated beyond the small synchronous recovery window.
         try:
             from app.services.coverage_runner import start_coverage_refresh
             start_coverage_refresh(reason="public_fixture_board_empty")
