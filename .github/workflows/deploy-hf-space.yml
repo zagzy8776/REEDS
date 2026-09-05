@@ -41,9 +41,11 @@ jobs:
           )
 
           # Never let the HF fallback invoke the legacy destructive model pull.
+          # The safe endpoint stages and validates artifacts before replacement.
           text = text.replace(
               'f"{RENDER_URL}/api/admin/download-models"',
               'f"{RENDER_URL}/api/admin/sync-models-safe"',
+              1,
           )
 
           path.write_text(text, encoding="utf-8")
