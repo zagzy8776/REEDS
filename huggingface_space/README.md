@@ -23,6 +23,7 @@ Add the following **Repository Secrets** in your Space Settings → Repository s
 | `DATABASE_URL` | Your Neon Postgres connection string |
 | `ADMIN_API_KEY` | Your Render admin key |
 | `RENDER_URL` | `https://reeds-phj1.onrender.com` |
+| `CRON_SECRET` | Optional secret used to authenticate Render wake requests |
 
 ## Usage
 
@@ -31,3 +32,5 @@ Open the Space UI and use the buttons to:
 - **Train All Sports** — trains all models and uploads to Render
 - **Ingest Free Data** — downloads historical data from free sources first
 - **Start Auto-Polling** — keeps the Space alive, auto-retrains when Render signals new data
+
+The worker also installs the production leakage-safe chronological ensemble before training so HF, Render, and GitHub Actions use the same model-quality path.
