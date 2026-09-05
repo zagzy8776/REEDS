@@ -1,5 +1,6 @@
 import logging
 import secrets
+import threading
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,13 +29,10 @@ app.include_router(live.router, prefix="/api")
 app.include_router(model_sync.router)
 
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
+def _bootstrap_models_background() -> None:
     try:
         from app.db.session import SessionLocal
-        from app.services.model_bootstrap import install_quality_training, restore_missing_models
-        install_quality_training()
+        from app.services.model_bootstrap import restore_missing_models
         db = SessionLocal()
         try:
             result = restore_missing_models(db)
@@ -42,8 +40,26 @@ def on_startup():
         finally:
             db.close()
     except Exception:
-        # Recovery must never prevent the HTTP process from starting.
-        log.exception("Model bootstrap failed during startup")
+        log.exception("Background model bootstrap failed")
+
+
+@app.on_event("startup")
+def on_startup():
+    # DB schema initialization stays on the critical path; model downloads do not.
+    init_db()
+
+    # admin.py imports the training module during application import, so this
+    # patch is cheap here and guarantees Render-side training does not use the
+    # legacy test-leaking meta learner.
+    try:
+        from app.services.model_bootstrap import install_quality_training
+        install_quality_training()
+    except Exception:
+        log.exception("Could not install quality training guard")
+
+    # Render filesystems are ephemeral. Restore missing artifacts in the
+    # background so a slow GitHub download can never block HTTP startup.
+    threading.Thread(target=_bootstrap_models_background, name="model-bootstrap", daemon=True).start()
 
     from app.services.prediction_guard import install_prediction_guard
     install_prediction_guard()
