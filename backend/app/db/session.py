@@ -8,13 +8,7 @@ settings = get_settings()
 
 
 def normalize_database_url(url: str) -> str:
-    """Use psycopg v3 for Neon/PostgreSQL URLs.
-
-    Neon commonly provides URLs beginning with `postgresql://`. SQLAlchemy maps that
-    default form to psycopg2, but this project installs `psycopg[binary]` instead.
-    Converting the scheme prevents Render startup crashes from missing psycopg2.
-    """
-
+    """Use psycopg v3 for Neon/PostgreSQL URLs."""
     if url.startswith("postgresql://"):
         return url.replace("postgresql://", "postgresql+psycopg://", 1)
     if url.startswith("postgres://"):
@@ -23,8 +17,19 @@ def normalize_database_url(url: str) -> str:
 
 
 database_url = normalize_database_url(settings.database_url)
+
+# Never silently run production against the ephemeral local SQLite fallback.
+# A missing DATABASE_URL must fail loudly instead of creating a split-brain DB.
+if settings.app_env == "production" and database_url.startswith("sqlite"):
+    raise RuntimeError("DATABASE_URL must point to PostgreSQL in production")
+
 connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-engine = create_engine(database_url, pool_pre_ping=True, connect_args=connect_args)
+engine = create_engine(
+    database_url,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    connect_args=connect_args,
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -64,14 +69,10 @@ def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
 def repair_runtime_schema() -> None:
     """Patch known additive schema drift at startup.
 
-    Render deployments may point at an existing database that was created before the
-    prediction-ledger/community tables were added. ``create_all`` creates missing
-    tables but intentionally does not alter existing tables, which can make public
-    endpoints crash with 500s when they query newer columns. These additive repairs
-    are safe and idempotent for both SQLite and PostgreSQL; full migrations are
-    still the preferred long-term workflow.
+    ``create_all`` creates missing tables but does not alter existing tables.
+    These additive repairs are idempotent; Alembic remains the preferred
+    long-term migration mechanism for larger schema changes.
     """
-
     inspector = inspect(engine)
     if "predictions" not in inspector.get_table_names():
         return
