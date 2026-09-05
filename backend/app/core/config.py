@@ -4,9 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Never silently run production against a local SQLite database. SQLite remains
-    # available for explicit local development only.
-    database_url: str = ""
+    # Explicit local-development fallback only. Production validation below
+    # rejects SQLite so Render cannot silently create a split-brain database.
+    database_url: str = "sqlite:///./data/local.db"
     app_env: str = "development"
     admin_api_key: str = "change-me"
     cron_secret: str = ""
@@ -59,6 +59,8 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
-    if settings.app_env.lower() == "production" and not settings.database_url.strip():
-        raise RuntimeError("DATABASE_URL must be configured in production")
+    if settings.app_env.lower() == "production" and (
+        not settings.database_url.strip() or settings.database_url.lower().startswith(("sqlite://", "sqlite+"))
+    ):
+        raise RuntimeError("DATABASE_URL must point to PostgreSQL in production")
     return settings
