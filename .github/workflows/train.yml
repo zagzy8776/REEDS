@@ -14,19 +14,20 @@ on:
   repository_dispatch:
     types: [train-models]
   schedule:
-    - cron: '0 2 * * 0'   # Sunday 2am UTC
+    - cron: '0 2 * * 0'
 
 jobs:
   train:
     name: Train all sport models
-    runs-on: ubuntu-latest   # 2-core vCPU, 7GB RAM — free tier
-    timeout-minutes: 180     # 3 hours max
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
 
     env:
-      DATABASE_URL:   ${{ secrets.DATABASE_URL }}
-      MODEL_DIR:      data/models
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      MODEL_DIR: data/models
       MIN_TRAINING_ROWS: 200
-      APP_ENV:        production
+      APP_ENV: production
+      MODEL_WORKER: "1"
 
     steps:
       - name: Checkout code
@@ -101,35 +102,30 @@ jobs:
                   for sport, count in data.groupby("sport").size().items():
                       print(f"  {sport}: {count}")
 
-              # --- Soccer (primary model) ---
               try:
                   print("\nTraining soccer model...")
                   soccer_data = data[data["sport"] == "soccer"].copy()
                   print(f"  Soccer rows: {len(soccer_data)}")
                   result = train_soccer_model(soccer_data)
-                  mv = register_model(db, "soccer", result["model_type"], result["path"],
-                                      result["accuracy"], result["sample_size"])
+                  mv = register_model(db, "soccer", result["model_type"], result["path"], result["accuracy"], result["sample_size"])
                   print(f"  Soccer: {result['accuracy']:.1%} acc on {result['sample_size']} rows -> {result['path']}")
                   results.append({"sport": "soccer", **result, "active": mv.is_active})
               except Exception as e:
                   print(f"  Soccer training FAILED: {e}")
                   errors.append({"sport": "soccer", "error": str(e)})
 
-              # --- Basketball ---
               try:
                   print("\nTraining basketball model...")
                   bball_data = data[data["sport"] == "basketball"].copy()
                   print(f"  Basketball rows: {len(bball_data)}")
                   result = train_basketball_model(bball_data)
-                  mv = register_model(db, "basketball", result["model_type"], result["path"],
-                                      result["accuracy"], result["sample_size"])
+                  mv = register_model(db, "basketball", result["model_type"], result["path"], result["accuracy"], result["sample_size"])
                   print(f"  Basketball: {result['accuracy']:.1%} acc on {result['sample_size']} rows")
                   results.append({"sport": "basketball", **result, "active": mv.is_active})
               except Exception as e:
                   print(f"  Basketball training FAILED: {e}")
                   errors.append({"sport": "basketball", "error": str(e)})
 
-              # --- Other sports (tennis, NFL, NHL, cricket, rugby, baseball) ---
               for sport in ("tennis", "american_football", "hockey", "cricket", "rugby", "baseball"):
                   try:
                       sport_data = data[data["sport"] == sport].copy()
@@ -138,8 +134,7 @@ jobs:
                           continue
                       print(f"\nTraining {sport} model ({len(sport_data)} rows)...")
                       result = train_generic_sport_model(sport_data, sport)
-                      mv = register_model(db, sport, result["model_type"], result["path"],
-                                          result["accuracy"], result["sample_size"])
+                      mv = register_model(db, sport, result["model_type"], result["path"], result["accuracy"], result["sample_size"])
                       print(f"  {sport}: {result['accuracy']:.1%} acc on {result['sample_size']} rows")
                       results.append({"sport": sport, **result, "active": mv.is_active})
                   except Exception as e:
@@ -149,7 +144,6 @@ jobs:
           finally:
               db.close()
 
-          # Write summary
           summary = {"trained": results, "errors": errors}
           with open("data/models/training_summary.json", "w") as f:
               json.dump(summary, f, indent=2, default=str)
@@ -159,7 +153,6 @@ jobs:
           print(f"Errors:  {len(errors)}")
           for r in results:
               print(f"  {r['sport']}: {r.get('accuracy', 0):.1%} on {r.get('sample_size', 0)} rows")
-
           if errors:
               print("Errors:")
               for e in errors:
@@ -174,7 +167,7 @@ jobs:
         with:
           name: trained-models-${{ github.run_number }}
           path: backend/data/models/
-          retention-days: 30   # keep 30 days
+          retention-days: 30
 
       - name: Create GitHub Release with slim models only
         uses: softprops/action-gh-release@v2
@@ -183,20 +176,19 @@ jobs:
           name: "Trained Models — Run ${{ github.run_number }}"
           body: |
             Auto-trained model bundle from GitHub Actions.
-            - Runner: ubuntu-latest (2-core, 7GB RAM)
+            - Runner: ubuntu-latest
             - Trigger: ${{ github.event_name }}
             - Commit: ${{ github.sha }}
-            - Only slim bundles (RF + XGBoost, ~15-30MB) uploaded for Render compatibility
+            - Only slim bundles uploaded for Render compatibility
           files: backend/data/models/*_slim.joblib
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Notify Render to download new models
+      - name: Notify Render to atomically synchronize new models
         run: |
-          curl -s -X POST \
+          curl --fail-with-body -sS -X POST \
             -H "x-admin-key: ${{ secrets.ADMIN_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{"run_number": "${{ github.run_number }}"}' \
-            https://reeds-phj1.onrender.com/api/admin/download-models || true
-        continue-on-error: true   # don't fail the workflow if Render is asleep
+            https://reeds-phj1.onrender.com/api/admin/sync-models-safe
