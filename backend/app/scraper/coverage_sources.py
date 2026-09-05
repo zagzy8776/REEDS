@@ -1,8 +1,8 @@
 """Additional football coverage sources with bounded request volume.
 
-These providers are optional. No request is made unless the corresponding env
-key is configured. They are used for fixture/score coverage only; REEDS keeps
-its own prediction logic and does not import provider predictions as truth.
+These providers are optional. OpenFoot also supports public/no-key requests for
+basic fixture access, which gives REEDS a last-resort recovery path when keyed
+feeds are temporarily unavailable.
 """
 
 from datetime import date
@@ -54,11 +54,7 @@ def _extract_score(item: dict, side: str):
 
 
 def ingest_bzzoiro_football(db: Session, api_key: str, target_dates: list[str]) -> int:
-    """Ingest a single ranged request covering the requested window.
-
-    The provider documents date_from/date_to on the football events endpoint.
-    We deliberately make one call per refresh window to avoid quota-heavy polling.
-    """
+    """Ingest a single ranged request covering the requested window."""
 
     if not api_key or not target_dates:
         return 0
@@ -114,14 +110,17 @@ def ingest_bzzoiro_football(db: Session, api_key: str, target_dates: list[str]) 
     return count
 
 
-def ingest_openfoot_football(db: Session, api_key: str, target_dates: list[str]) -> int:
-    """Ingest OpenFoot fixture/result coverage, one request per calendar date."""
+def ingest_openfoot_football(db: Session, api_key: str | None, target_dates: list[str]) -> int:
+    """Ingest OpenFoot fixture/result coverage, including public/no-key access."""
 
-    if not api_key or not target_dates:
+    if not target_dates:
         return 0
     count = 0
     session = requests.Session()
-    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     for target_date in target_dates:
         response = session.get(
             f"{OPENFOOT_BASE}/matches",
@@ -147,8 +146,8 @@ def ingest_openfoot_football(db: Session, api_key: str, target_dates: list[str])
                 competition = competition.get("name") or competition.get("id") or "Football"
             fx = Fixture(
                 sport="soccer",
-                league=str(competition),
-                season=str(item.get("season") or kickoff.year),
+                league=str(competition)[:80],
+                season=str(item.get("season") or kickoff.year)[:20],
                 match_date=kickoff.date(),
                 home_team=resolve_team_name(db, str(home_name), "soccer", "openfoot"),
                 away_team=resolve_team_name(db, str(away_name), "soccer", "openfoot"),
