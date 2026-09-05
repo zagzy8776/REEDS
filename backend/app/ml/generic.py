@@ -1,5 +1,6 @@
 import pandas as pd
 
+from app.ml.history_guard import sanitize_prediction_history
 from app.utils.team_names import normalize_team_name
 
 
@@ -8,55 +9,20 @@ def _risk(confidence_pct: float) -> str:
 
 
 def _prediction_history(history: pd.DataFrame, fixture: dict) -> pd.DataFrame:
-    """Return only completed observations strictly before the target fixture.
-
-    The same sanitized frame is passed to every dedicated sport engine. This is
-    important because bulk ingestion can contain future fixtures, while each
-    engine's recent-form/H2H calculations must remain causal.
-    """
-    if history is None or history.empty:
-        return pd.DataFrame()
-
-    df = history.copy()
-    if "sport" in df.columns and fixture.get("sport"):
-        df = df[df["sport"] == fixture.get("sport")].copy()
-
-    if "home_score" in df.columns and "away_score" in df.columns:
-        df = df[df["home_score"].notna() & df["away_score"].notna()].copy()
-
-    if "match_date" in df.columns:
-        target = pd.to_datetime(fixture.get("match_date"), errors="coerce")
-        dates = pd.to_datetime(df["match_date"], errors="coerce")
-        if not pd.isna(target):
-            df = df[dates < target].copy()
-        df = df.sort_values("match_date", kind="mergesort", na_position="last")
-
-    return df.reset_index(drop=True)
+    return sanitize_prediction_history(history, fixture)
 
 
 class GenericSportEngine:
     """Routes each sport to its dedicated engine, falls back to form-based heuristic.
 
-    Sport routing:
-      basketball         -> BasketballEngine  (scoring/margin/spread/totals)
-      tennis             -> TennisEngine      (player form/surface/H2H/sets)
-      cricket            -> CricketEngine     (format/run margin/H2H)
-      baseball           -> BaseballEngine    (run diff/run line/totals)
-      american_football  -> AmericanFootballEngine
-      hockey             -> HockeyEngine
-      rugby / volleyball
-      / handball / mma
-      / motorsport       -> sport-aware heuristic with multi-market output
-      everything else    -> form heuristic with multi-market output
+    Every routed engine receives the same point-in-time history snapshot so
+    future/unfinished fixtures cannot contaminate recent-form or H2H features.
     """
 
     def predict(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
         sport = fixture.get("sport") or "sport"
-        # Sanitize once before routing so dedicated engines cannot accidentally
-        # consume future or unfinished fixtures from the shared history frame.
         history = _prediction_history(history, fixture)
 
-        # --- Dedicated engines ---
         if sport == "basketball":
             from app.ml.basketball import BasketballEngine
             return BasketballEngine().predict(history, fixture)
@@ -81,24 +47,12 @@ class GenericSportEngine:
             from app.ml.sport_specific import HockeyEngine
             return HockeyEngine().predict(history, fixture)
 
-        # --- Form heuristic for rugby, volleyball, handball, mma, etc. ---
         return self._heuristic(history, fixture, sport)
 
     def _heuristic(self, history: pd.DataFrame, fixture: dict, sport: str) -> list[dict]:
         home = normalize_team_name(fixture["home_team"], sport)
         away = normalize_team_name(fixture["away_team"], sport)
-
-        df = history[history["sport"] == sport].copy() if (not history.empty and "sport" in history.columns) else (history.copy() if not history.empty else pd.DataFrame())
-
-        # Critical anti-leakage guard: a prediction may only use completed
-        # fixtures strictly before the target fixture date. The serving history
-        # window can contain future rows, especially after bulk ingestion.
-        if not df.empty and "match_date" in df.columns:
-            target_date = pd.to_datetime(fixture.get("match_date"), errors="coerce")
-            dates = pd.to_datetime(df["match_date"], errors="coerce")
-            if not pd.isna(target_date):
-                df = df[dates < target_date].copy()
-            df = df.sort_values("match_date", kind="mergesort", na_position="last")
+        df = history.copy() if not history.empty else pd.DataFrame()
 
         home_wr = away_wr = 0.50
         home_margin = away_margin = 0.0
@@ -109,7 +63,6 @@ class GenericSportEngine:
             df["home_norm"] = df["home_team"].map(lambda x: normalize_team_name(str(x), sport))
             df["away_norm"] = df["away_team"].map(lambda x: normalize_team_name(str(x), sport))
             played = df[df["home_score"].notna() & df["away_score"].notna()].copy()
-
             if not played.empty:
                 has_data = True
 
@@ -128,7 +81,6 @@ class GenericSportEngine:
 
                 home_wr, home_margin = team_stats(home)
                 away_wr, away_margin = team_stats(away)
-
                 team_rows = played[
                     (played["home_norm"].isin([home, away])) |
                     (played["away_norm"].isin([home, away]))
@@ -138,7 +90,6 @@ class GenericSportEngine:
 
         edge = (home_wr - away_wr) + ((home_margin - away_margin) / 20) + 0.04
         home_win_prob = max(0.28, min(0.78, 0.50 + edge / 2))
-
         winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
         winner_pick = "Home Win" if home_win_prob >= 0.5 else "Away Win"
         away_win_prob = 1 - home_win_prob
@@ -152,7 +103,6 @@ class GenericSportEngine:
             if has_data else
             f"No completed {sport.replace('_', ' ')} history in database — pick uses league-average defaults only. Not a reliable signal."
         )
-
         meta = {
             "summary": note,
             "factors": [
@@ -162,56 +112,35 @@ class GenericSportEngine:
                 {"label": "Away scoring margin", "value": round(away_margin, 2), "note": "Average margin per game"},
                 {"label": "Home advantage", "value": "+4%", "note": "Generic home-venue boost"},
             ],
-            "probabilities": {
-                "home_win": round(home_win_prob, 4),
-                "away_win": round(away_win_prob, 4),
-            },
+            "probabilities": {"home_win": round(home_win_prob, 4), "away_win": round(away_win_prob, 4)},
             "market_logic": "Moneyline uses recent win-rate, scoring margin differential, and home advantage.",
         }
-
-        items = [
-            {
-                "market": "Moneyline",
-                "pick": winner_pick,
-                "confidence": round(winner_conf, 1),
-                "edge_score": round(winner_conf, 1),
-                "risk_level": _risk(winner_conf),
-                "reasoning": f"{note} Leans {winner_pick}: home {home_wr:.0%} win-rate, away {away_wr:.0%}, margin edge {home_margin - away_margin:.2f}.",
-                "engine_meta": meta,
-            }
-        ]
-
+        items = [{
+            "market": "Moneyline", "pick": winner_pick, "confidence": round(winner_conf, 1),
+            "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf),
+            "reasoning": f"{note} Leans {winner_pick}: home {home_wr:.0%} win-rate, away {away_wr:.0%}, margin edge {home_margin - away_margin:.2f}.",
+            "engine_meta": meta,
+        }]
         dc_prob = max(home_win_prob + 0.25, away_win_prob + 0.25)
         dc_pick = "Home or Draw" if home_win_prob >= away_win_prob else "Away or Draw"
         dc_conf = round(min(dc_prob, 0.82) * 100, 1)
         if not has_data:
             dc_conf = min(dc_conf, 50.0)
         items.append({
-            "market": "Double Chance",
-            "pick": dc_pick,
-            "confidence": dc_conf,
-            "edge_score": dc_conf,
-            "risk_level": _risk(dc_conf),
+            "market": "Double Chance", "pick": dc_pick, "confidence": dc_conf,
+            "edge_score": dc_conf, "risk_level": _risk(dc_conf),
             "reasoning": f"Double chance covers the favourite plus draw outcome. {note}",
             "engine_meta": {**meta, "market_logic": "Double chance reduces upset risk by covering two outcomes."},
         })
-
         if projected_total:
-            sport_lines = {
-                "rugby": 40.5, "volleyball": 152.5, "handball": 52.5,
-                "mma": 2.5, "motorsport": 2.5,
-            }
+            sport_lines = {"rugby": 40.5, "volleyball": 152.5, "handball": 52.5, "mma": 2.5, "motorsport": 2.5}
             line = sport_lines.get(sport, projected_total * 0.95)
             over_under = "Over" if projected_total > line else "Under"
             total_conf = round(min(67.0, max(54.0, abs(projected_total - line) * 3 + 54.0)), 1)
             items.append({
-                "market": "Total Points",
-                "pick": f"{over_under} {line}",
-                "confidence": total_conf,
-                "edge_score": total_conf,
-                "risk_level": _risk(total_conf),
+                "market": "Total Points", "pick": f"{over_under} {line}", "confidence": total_conf,
+                "edge_score": total_conf, "risk_level": _risk(total_conf),
                 "reasoning": f"Recent {sport.replace('_', ' ')} sample projects {projected_total} combined score vs line {line}.",
                 "engine_meta": {**meta, "market_logic": "Total uses recent combined scoring average versus a sport-adjusted line."},
             })
-
         return items
