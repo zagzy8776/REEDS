@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getFixtureStatus, getFixtures } from "../../lib/api";
+import { getFixtureStatus, getFixtures, getTodayPredictions } from "../../lib/api";
 
 export const dynamic = "force-dynamic";
 
@@ -18,12 +18,54 @@ function formatOdds(value?: number | null) {
   return typeof value === "number" ? value.toFixed(2) : "-";
 }
 
+function predictionBackedFixtures(picks: any[]) {
+  const seen = new Set<number>();
+  return picks
+    .filter((p: any) => Number.isFinite(Number(p.fixture_id)) && !seen.has(Number(p.fixture_id)) && seen.add(Number(p.fixture_id)))
+    .map((p: any) => ({
+      id: p.fixture_id,
+      sport: p.sport,
+      league: p.league,
+      season: "",
+      match_date: p.match_date,
+      home_team: p.home_team,
+      away_team: p.away_team,
+      home_score: null,
+      away_score: null,
+      home_odds: null,
+      draw_odds: null,
+      away_odds: null,
+      has_odds: false,
+      total_goals: null,
+      api_status: "prediction-backed",
+      result_label: "upcoming",
+      source: "prediction",
+      extra: { prediction_backed: true },
+    }));
+}
+
 export default async function Fixtures({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams;
-  const [fixtures, status] = await Promise.all([
-    getFixtures({ ...params, scope: params.scope || "upcoming", limit: params.limit || "300" }),
+  const [fixtureRows, status] = await Promise.all([
+    getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "300" }),
     getFixtureStatus(),
   ]);
+
+  // The AI board and the fixture board are supposed to describe the same
+  // underlying matches. When the fixture endpoint is temporarily empty or
+  // degraded but published predictions are already available, build the
+  // visible match centre from those exact prediction rows rather than showing
+  // a blank board to users.
+  let fixtures = Array.isArray(fixtureRows) ? fixtureRows : [];
+  let boardRecoveredFromPredictions = false;
+  if (!fixtures.length && params.scope !== "results") {
+    const picks = await getTodayPredictions(params);
+    if (Array.isArray(picks) && picks.length) {
+      fixtures = predictionBackedFixtures(picks);
+      boardRecoveredFromPredictions = fixtures.length > 0;
+    }
+  }
+
   const sports = Array.from(new Set([...DEFAULT_SPORTS, ...fixtures.map((f: any) => f.sport)])).filter(Boolean);
   const leagues = Array.from(new Set(fixtures.map((f: any) => f.league))).filter(Boolean);
   const withOdds = fixtures.filter((f: any) => f.has_odds).length;
@@ -80,10 +122,14 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
         <section className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <b className="text-white">Feed status:</b> <span className={status.feed_health === "active" ? "text-emerald-300" : "text-amber-300"}>{String(status.feed_health).replaceAll("_", " ")}</span>
+              <b className="text-white">Feed status:</b> <span className={boardRecoveredFromPredictions ? "text-amber-300" : status.feed_health === "active" ? "text-emerald-300" : "text-amber-300"}>
+                {boardRecoveredFromPredictions ? "prediction-backed" : String(status.feed_health).replaceAll("_", " ")}
+              </span>
               <p className="mt-1 text-slate-400">API rows: {status.api_rows} • Sample rows: {status.sample_rows} • Scores: {status.with_scores} • Odds: {status.with_odds}</p>
             </div>
-            <p className="max-w-xl text-xs text-slate-500">{status.feed_health === "active" ? "The match feed is connected." : "If the feed looks empty, check the API keys and scheduler on Render."}</p>
+            <p className="max-w-xl text-xs text-slate-500">
+              {boardRecoveredFromPredictions ? "Fixture feed is temporarily empty, so the match centre is reusing matches already powering the AI board." : status.feed_health === "active" ? "The match feed is connected." : "If the feed looks empty, check the API keys and scheduler on Render."}
+            </p>
           </div>
         </section>
       ) : null}
