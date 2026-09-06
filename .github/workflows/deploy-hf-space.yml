@@ -3,7 +3,9 @@ name: Deploy HF Space
 on:
   push:
     branches: [main]
-    paths: ['huggingface_space/**']
+    paths:
+      - 'huggingface_space/**'
+      - '.github/workflows/deploy-hf-space.yml'
 
 jobs:
   deploy:
@@ -17,6 +19,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path("huggingface_space/app.py")
           text = path.read_text(encoding="utf-8")
@@ -28,27 +31,79 @@ jobs:
           if marker in text and "install_quality_training()" not in text:
               text = text.replace(marker, replacement, 1)
 
-          # Authenticate external cron wake-ups when CRON_SECRET is configured.
-          text = text.replace(
-              'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")',
-              'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")\nCRON_SECRET = os.environ.get("CRON_SECRET", "")',
-              1,
-          )
-          text = text.replace(
-              'response = requests.get(f"{RENDER_URL}/api/wake", timeout=60)',
-              'headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}\n        response = requests.get(f"{RENDER_URL}/api/wake", headers=headers, timeout=60)',
-              1,
-          )
+          # CRON_SECRET belongs to the HF Space secrets. Never bake its value
+          # into the repo; the worker reads it only at runtime.
+          if 'CRON_SECRET = os.environ.get("CRON_SECRET", "")' not in text:
+              text = text.replace(
+                  'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")',
+                  'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")\nCRON_SECRET = os.environ.get("CRON_SECRET", "")',
+                  1,
+              )
 
-          # Never let the HF fallback invoke the legacy destructive model pull.
-          # The safe endpoint stages and validates artifacts before replacement.
+          # Make the interactive Wake Render action use the exact same
+          # credential contract as Render's /api/wake endpoint.
+          wake_pattern = re.compile(
+              r'def action_wake_render\(\):\n.*?\n\ndef _poll_loop\(',
+              re.S,
+          )
+          wake_replacement = '''def action_wake_render():
+    """Verify the HF worker can reach and authenticate against Render."""
+    try:
+        health = requests.get(f"{RENDER_URL}/api/health", timeout=20)
+        _log(f"Render health: HTTP {health.status_code}")
+
+        headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}
+        response = requests.get(f"{RENDER_URL}/api/wake", headers=headers, timeout=60)
+        if response.ok:
+            data = response.json() if response.headers.get("content-type", "").lower().startswith("application/json") else {}
+            message = (
+                "✅ HF → Render connection authenticated\\n"
+                f"health: HTTP {health.status_code}\\n"
+                f"wake: HTTP {response.status_code}\\n"
+                f"coverage refresh queued: {data.get('coverage_refresh_queued', False)}\\n"
+                f"existing future fixtures: {data.get('existing_fixtures', 0)}"
+            )
+        else:
+            message = (
+                f"⚠️ HF reached Render but wake returned HTTP {response.status_code}. "
+                "Check CRON_SECRET in HF Space secrets against Render."
+            )
+    except Exception as exc:
+        message = f"❌ HF → Render connection failed: {exc}"
+    _log(message)
+    return message, _get_log()
+
+
+def _poll_loop('''
+          text, count = wake_pattern.subn(wake_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("Could not patch action_wake_render safely")
+
+          # Model fallback synchronization must use the atomic endpoint so a
+          # bad release cannot wipe the last known-good production models.
           text = text.replace(
               'f"{RENDER_URL}/api/admin/download-models"',
               'f"{RENDER_URL}/api/admin/sync-models-safe"',
-              1,
           )
 
           path.write_text(text, encoding="utf-8")
+          PY
+
+          # Fail the workflow rather than publishing an HF worker that cannot
+          # authenticate its Render wake or safe model-sync calls.
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("huggingface_space/app.py").read_text(encoding="utf-8")
+          required = (
+              'CRON_SECRET = os.environ.get("CRON_SECRET", "")',
+              'headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}',
+              '/api/wake',
+              '/api/admin/sync-models-safe',
+          )
+          missing = [item for item in required if item not in text]
+          if missing:
+              raise SystemExit("HF Render integration verification failed: " + ", ".join(missing))
+          print("✅ HF Render integration verified in packaged worker")
           PY
 
       - name: Push to HF Space
