@@ -2,7 +2,9 @@
 
 Uses public listing pages only; no private/internal API endpoints and no browser
 automation. Requests are deliberately bounded and failures are isolated so one
-site can never stop the other fixture providers.
+site can never stop the other fixture providers. When the site's public HTML is
+client-rendered, the free Jina Reader is used as a rendering-aware reader for the
+same public URL.
 """
 
 from __future__ import annotations
@@ -27,6 +29,13 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; REEDS fixture reader/1.0)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.8",
+}
+
+READER_HEADERS = {
+    "User-Agent": "REEDS fixture reader/1.0",
+    "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.5",
+    "X-Timeout": "12",
+    "X-Token-Budget": "6000",
 }
 
 SOURCES = {
@@ -108,7 +117,7 @@ def _extract_dom_pairs(html: str, today: date, wanted: set[date]) -> list[tuple[
             continue
         parent = element
         event_date = None
-        for _ in range(5):
+        for _ in range(6):
             parent = parent.parent
             if not parent:
                 break
@@ -156,7 +165,7 @@ def _extract_text_pairs(lines: list[str], today: date, wanted: set[date]) -> lis
             recent_window -= 1
         if current_date not in wanted:
             continue
-        sample = " ".join(lines[idx:idx + 3])
+        sample = " ".join(lines[idx:idx + 4])
         for match in _PAIR_RE.finditer(sample):
             home = _normalise_space(match.group("home"))
             away = _normalise_space(match.group("away"))
@@ -168,31 +177,66 @@ def _extract_text_pairs(lines: list[str], today: date, wanted: set[date]) -> lis
     return found
 
 
+def _dedupe_pairs(pairs: list[tuple[date, str, str]]) -> list[tuple[date, str, str]]:
+    unique: dict[tuple[date, str, str], tuple[date, str, str]] = {}
+    for item in pairs:
+        unique[(item[0], item[1].lower(), item[2].lower())] = item
+    return list(unique.values())
+
+
+def _fetch_reader(url: str, today: date, wanted: set[date]) -> tuple[list[tuple[date, str, str]], str | None]:
+    """Render the same public page through Jina Reader when direct HTML is sparse."""
+    reader_url = f"https://r.jina.ai/{url}"
+    try:
+        response = requests.get(reader_url, headers=READER_HEADERS, timeout=25)
+        response.raise_for_status()
+        pairs = _extract_text_pairs(_extract_lines(response.text), today, wanted)
+        return _dedupe_pairs(pairs), None
+    except requests.HTTPError as exc:
+        status = getattr(exc.response, "status_code", None)
+        return [], f"reader_http_{status or 'error'}"
+    except Exception as exc:
+        return [], f"reader_{str(exc)[:160]}"
+
+
 def _fetch_source(source: str, sport: str, wanted_dates: list[date]) -> tuple[list[tuple[date, str, str]], str | None]:
     url = urljoin(SOURCES[source], SPORT_PATHS[sport])
+    today = date.today()
+    wanted = set(wanted_dates)
+    direct_error = None
     try:
         response = requests.get(url, headers=HEADERS, timeout=18)
         response.raise_for_status()
-        today = date.today()
-        wanted = set(wanted_dates)
         pairs = _extract_dom_pairs(response.text, today, wanted)
         pairs.extend(_extract_text_pairs(_extract_lines(response.text), today, wanted))
-        unique = {}
-        for item in pairs:
-            unique[(item[0], item[1].lower(), item[2].lower())] = item
-        return list(unique.values()), None
+        pairs = _dedupe_pairs(pairs)
+        # Client-rendered score sites often return a valid HTML shell but no
+        # fixture rows. In that case use the same public URL through Jina Reader,
+        # whose default engine renders JavaScript before extracting the page.
+        if pairs:
+            return pairs, None
+        reader_pairs, reader_error = _fetch_reader(url, today, wanted)
+        if reader_pairs:
+            return reader_pairs, "reader_ok"
+        return [], reader_error or "empty"
     except requests.HTTPError as exc:
         status = getattr(exc.response, "status_code", None)
-        return [], f"http_{status or 'error'}"
+        direct_error = f"http_{status or 'error'}"
     except Exception as exc:
-        return [], str(exc)[:180]
+        direct_error = str(exc)[:180]
+
+    reader_pairs, reader_error = _fetch_reader(url, today, wanted)
+    if reader_pairs:
+        return reader_pairs, f"direct_{direct_error}_reader_ok"
+    return [], direct_error or reader_error or "error"
 
 
 def ingest_web_score_sources(db: Session, target_dates: list[str], max_sports: int = 9) -> dict:
     """Ingest upcoming fixtures from both public score sites across sports.
 
-    Each site is requested at most once per sport during a run (18 requests for
-    nine sports total), and a failed source never blocks another provider.
+    Each site is requested at most once per sport during a run. If the page is
+    JS-rendered, one additional Jina Reader request is made only when direct
+    extraction produced no fixture rows.
     """
     wanted_dates: list[date] = []
     for value in target_dates:
