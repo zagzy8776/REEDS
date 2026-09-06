@@ -22,6 +22,8 @@ from app.core.config import get_settings
 from app.db.models import Fixture, Prediction
 from app.scraper.loaders import (
     ingest_allsportsapi_events,
+    ingest_api_basketball_games,
+    ingest_api_football_fixtures,
     ingest_apifootball_com_events,
     ingest_football_data_org_matches,
     ingest_thesportsdb_events,
@@ -268,9 +270,9 @@ def _ingest_openfoot(db: Session, dates: list[str]) -> int:
 def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
     """Fan out across every enabled provider, then let AI analysis begin.
 
-    The floor controls whether this expensive fanout is needed, not which
-    providers are allowed to contribute. Once a coverage run starts, every
-    available source gets queried regardless of the running row count.
+    The coverage floor decides when this expensive run is needed. Once started,
+    the fanout does not stop early because the board has already reached some
+    intermediate count; every provider in this function gets its turn.
     """
 
     settings = get_settings()
@@ -299,14 +301,45 @@ def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
             report["sources"][name] = {"rows": int(value or 0), "status": "ok"}
         except requests.HTTPError as exc:
             status = getattr(exc.response, "status_code", None)
-            report["sources"][name] = {"rows": 0, "status": f"http_{status or 'error'}", "error": str(exc)[:220]}
+            report["sources"][name] = {
+                "rows": 0,
+                "status": f"http_{status or 'error'}",
+                "error": str(exc)[:220],
+            }
             log.warning("Fixture provider %s failed with HTTP %s: %s", name, status, exc)
         except Exception as exc:
             report["sources"][name] = {"rows": 0, "status": "error", "error": str(exc)[:220]}
             log.exception("Fixture provider %s failed", name)
 
-    # Every enabled provider participates. The normal 2-hour refresh already
-    # calls these keyed feeds; deep coverage adds the broad/ranged passes.
+    # Every enabled provider participates. These two primary feeds are also
+    # called by the normal scheduler. API-Football is restricted to today's
+    # fixture request here so a free 100/day plan is not exhausted by duplicate
+    # deep-coverage passes (the normal scheduler covers the remaining dates).
+    if settings.api_football_key or settings.api_sports_key:
+        run(
+            "api_football_today",
+            ingest_api_football_fixtures,
+            db,
+            settings.api_football_key or settings.api_sports_key,
+            [start_date],
+            False,
+            None,
+            None,
+        )
+    else:
+        report["sources"]["api_football_today"] = {"rows": 0, "status": "not_configured"}
+
+    if settings.api_basketball_key or settings.api_sports_key:
+        run(
+            "basketball_range",
+            ingest_api_basketball_games,
+            db,
+            settings.api_basketball_key or settings.api_sports_key,
+            dates,
+        )
+    else:
+        report["sources"]["basketball_range"] = {"rows": 0, "status": "not_configured"}
+
     if settings.sportmonks_api_key:
         run("sportmonks_range", _ingest_sportmonks, db, settings.sportmonks_api_key, start_date, end_date)
     else:
