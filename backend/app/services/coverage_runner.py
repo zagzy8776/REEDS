@@ -10,7 +10,9 @@ log = logging.getLogger(__name__)
 
 _worker_lock = threading.Lock()
 _last_started = 0.0
-_COOLDOWN_SECONDS = 20 * 60
+# cron-job.org wakes every 15 minutes; keep a 10-minute worker cooldown so each
+# scheduled wake can contribute while concurrent requests are still coalesced.
+_COOLDOWN_SECONDS = 10 * 60
 
 
 def start_coverage_refresh(reason: str = "unknown") -> bool:
