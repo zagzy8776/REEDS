@@ -100,7 +100,7 @@ def fetch_upcoming_fixtures(sport: str = "soccer", limit: int = 100) -> list[dic
 
     data = _get(tournaments_url, params)
     if not data:
-        # Fallback: try the odds endpoint directly
+        # Alternate public listing endpoint when tournament metadata is unavailable.
         return _fetch_via_odds_endpoint(sport, limit)
 
     tournaments = []
@@ -109,7 +109,7 @@ def fetch_upcoming_fixtures(sport: str = "soccer", limit: int = 100) -> list[dic
     elif isinstance(data, list):
         tournaments = data
 
-    for tournament in tournaments[:20]:  # cap to avoid hammering
+    for tournament in tournaments[:20]:
         t_id = tournament.get("id") or tournament.get("tournamentId")
         league_name = tournament.get("name") or tournament.get("tournamentName", "Unknown")
 
@@ -141,13 +141,13 @@ def fetch_upcoming_fixtures(sport: str = "soccer", limit: int = 100) -> list[dic
             except Exception:
                 continue
 
-        time.sleep(0.3)  # polite rate limiting
+        time.sleep(0.3)
 
     return results
 
 
 def _fetch_via_odds_endpoint(sport: str, limit: int) -> list[dict]:
-    """Fallback: use SportyBet's main odds page API."""
+    """Use SportyBet's main event listing endpoint when tournaments are unavailable."""
     sport_id = SPORT_IDS.get(sport, SPORT_IDS["soccer"])
     url = f"{_BASE}/query/sportEvents"
     params = {
@@ -180,12 +180,10 @@ def _parse_event(event: dict, league_name: str, sport: str) -> dict | None:
         if not home or not away:
             return None
 
-        # Match time
         start_time = event.get("estimateStartTime") or event.get("startTime") or event.get("matchTime")
         match_dt = None
         if start_time:
             try:
-                # SportyBet often gives epoch ms
                 if isinstance(start_time, (int, float)) and start_time > 1e10:
                     match_dt = datetime.fromtimestamp(start_time / 1000, tz=timezone.utc).isoformat()
                 else:
@@ -193,7 +191,6 @@ def _parse_event(event: dict, league_name: str, sport: str) -> dict | None:
             except Exception:
                 match_dt = str(start_time)
 
-        # Extract 1X2 / Moneyline odds
         home_odds = draw_odds = away_odds = None
         markets = event.get("markets", []) or event.get("odds", []) or []
 
@@ -214,7 +211,6 @@ def _parse_event(event: dict, league_name: str, sport: str) -> dict | None:
                 raw_odds = outcome.get("odds") or outcome.get("price")
                 if raw_odds:
                     try:
-                        # SportyBet sometimes gives odds as integer × 100
                         f = float(raw_odds)
                         odds_val = f / 100 if f > 100 else f
                     except (TypeError, ValueError):
@@ -248,15 +244,18 @@ def _parse_event(event: dict, league_name: str, sport: str) -> dict | None:
 
 
 def fetch_all_sports(sports: list[str] | None = None, limit_per_sport: int = 50) -> list[dict]:
-    """Fetch upcoming fixtures across all sports."""
-    target = sports or ["soccer", "basketball", "tennis", "american_football", "hockey"]
+    """Fetch upcoming fixtures across all supported SportyBet sports."""
+    target = sports or [
+        "soccer", "basketball", "tennis", "american_football",
+        "hockey", "baseball", "cricket",
+    ]
     all_fixtures = []
     for sport in target:
         try:
             fixtures = fetch_upcoming_fixtures(sport, limit=limit_per_sport)
             all_fixtures.extend(fixtures)
             log.info("SportyBet: fetched %d %s fixtures", len(fixtures), sport)
-            time.sleep(1)  # polite delay between sports
+            time.sleep(1)
         except Exception as exc:
             log.warning("SportyBet %s fetch failed: %s", sport, exc)
     return all_fixtures
