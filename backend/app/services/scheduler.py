@@ -22,6 +22,7 @@ from app.scraper.loaders import (
     refresh_odds_from_the_odds_api,
     sync_live_scores,
 )
+from app.scraper.web_score_sources import ingest_web_score_sources
 from app.services.deep_coverage import purge_showcase_rows, run_deep_coverage
 from app.services.fixture_normalizer import normalize_fixture_sports
 from app.services.predictions import generate_today_predictions
@@ -41,7 +42,7 @@ def _date_window(days: int) -> list[str]:
 
 
 def run_lightweight_refresh() -> dict:
-    """Ingest live data, recover thin coverage, normalize it, then build picks."""
+    """Fan out across every configured fixture source, then analyze the saved board."""
     db = SessionLocal()
     settings = get_settings()
     report: dict = {
@@ -70,35 +71,67 @@ def run_lightweight_refresh() -> dict:
                 },
             ))
         if settings.sportmonks_api_key:
-            providers.append(("sportmonks", ingest_sportmonks_football_fixtures,
-                              (db, settings.sportmonks_api_key, dates), {}))
+            providers.append((
+                "sportmonks", ingest_sportmonks_football_fixtures,
+                (db, settings.sportmonks_api_key, dates),
+                {},
+            ))
         if settings.football_data_api_key:
-            providers.append(("football_data_org", ingest_football_data_org_matches,
-                              (db, settings.football_data_api_key, dates), {}))
+            providers.append((
+                "football_data_org", ingest_football_data_org_matches,
+                (db, settings.football_data_api_key, dates),
+                {},
+            ))
         if settings.api_football_com_key:
-            providers.append(("apifootball_com", ingest_apifootball_com_events,
-                              (db, settings.api_football_com_key, dates), {}))
+            providers.append((
+                "apifootball_com", ingest_apifootball_com_events,
+                (db, settings.api_football_com_key, dates),
+                {},
+            ))
         if settings.bzzoiro_api_key:
-            providers.append(("bzzoiro", ingest_bzzoiro_football,
-                              (db, settings.bzzoiro_api_key, dates), {}))
+            providers.append((
+                "bzzoiro", ingest_bzzoiro_football,
+                (db, settings.bzzoiro_api_key, dates),
+                {},
+            ))
         if settings.openfoot_api_key:
-            providers.append(("openfoot", ingest_openfoot_football,
-                              (db, settings.openfoot_api_key, dates), {}))
+            providers.append((
+                "openfoot", ingest_openfoot_football,
+                (db, settings.openfoot_api_key, dates),
+                {},
+            ))
         if basketball_key:
-            providers.append(("basketball", ingest_api_basketball_games,
-                              (db, basketball_key, dates), {}))
+            providers.append((
+                "basketball", ingest_api_basketball_games,
+                (db, basketball_key, dates),
+                {},
+            ))
         if settings.allsportsapi_key:
-            providers.append(("allsportsapi", ingest_allsportsapi_events,
-                              (db, settings.allsportsapi_key, dates, settings.allsportsapi_sport_list), {}))
+            providers.append((
+                "allsportsapi", ingest_allsportsapi_events,
+                (db, settings.allsportsapi_key, dates, settings.allsportsapi_sport_list),
+                {},
+            ))
         if settings.thesportsdb_enabled:
-            providers.append(("thesportsdb", ingest_thesportsdb_events,
-                              (db, settings.thesportsdb_api_key, dates,
-                               settings.thesportsdb_sport_list, settings.thesportsdb_max_calls), {}))
+            providers.append((
+                "thesportsdb", ingest_thesportsdb_events,
+                (db, settings.thesportsdb_api_key, dates,
+                 settings.thesportsdb_sport_list, settings.thesportsdb_max_calls),
+                {},
+            ))
+
+        # Public score-site aggregation is always a contributor. It does not
+        # wait for the coverage floor and it does not replace API providers.
+        providers.append((
+            "web_score_sources", ingest_web_score_sources,
+            (db, dates, 9),
+            {},
+        ))
 
         configured_names = {name for name, *_ in providers}
         for expected in (
             "api_football", "sportmonks", "football_data_org", "apifootball_com",
-            "bzzoiro", "openfoot", "allsportsapi", "thesportsdb",
+            "bzzoiro", "openfoot", "allsportsapi", "thesportsdb", "web_score_sources",
         ):
             if expected not in configured_names:
                 report["skipped"].append({"provider": expected, "reason": "not configured"})
@@ -106,26 +139,30 @@ def run_lightweight_refresh() -> dict:
         for name, fn, args, kwargs in providers:
             try:
                 result = fn(*args, **kwargs)
-                report["ingested"][name] = int(result or 0)
+                # Web ingestion returns a report dict; preserve its useful
+                # per-source telemetry rather than reducing it to an integer.
+                if isinstance(result, dict):
+                    rows = result.get("rows", result.get("total", 0))
+                    report["ingested"][name] = {
+                        "rows": int(rows or 0),
+                        "sources": result.get("sources", {}),
+                    }
+                else:
+                    report["ingested"][name] = int(result or 0)
             except Exception as exc:
                 report["skipped"].append({"provider": name, "reason": str(exc)[:300]})
                 log.exception("Fixture provider failed: %s", name)
 
-        # Clean old placeholder rows left by earlier releases before coverage
-        # recovery and before prediction generation.
         try:
             report["purged_showcase"] = purge_showcase_rows(db)
         except Exception as exc:
             report["skipped"].append({"stage": "purge_showcase", "reason": str(exc)[:300]})
 
-        # Correct provider sport metadata before predictions see the fixtures.
         try:
             report["normalization"] = normalize_fixture_sports(db)
         except Exception as exc:
             report["skipped"].append({"stage": "fixture_normalization", "reason": str(exc)[:300]})
 
-        # Ranged/paged/public sources are the coverage escalator. It runs only
-        # while genuine future coverage is below the real production floor.
         try:
             report["coverage_recovery"] = run_deep_coverage(db, min_coverage=300)
         except Exception as exc:
@@ -276,7 +313,8 @@ def start_scheduler() -> BackgroundScheduler:
             if result.get("value_bets_found"):
                 log.info(
                     "Value scan: %d bets from %d fixtures",
-                    result.get("value_bets_found", 0), result.get("scanned", 0),
+                    result.get("value_bets_found", 0),
+                    result.get("scanned", 0),
                 )
         except Exception:
             log.exception("Value scan failed")
@@ -298,5 +336,5 @@ def start_scheduler() -> BackgroundScheduler:
     )
 
     scheduler.start()
-    log.info("Scheduler started — real coverage recovery enabled")
+    log.info("Scheduler started — real multi-source fixture coverage enabled")
     return scheduler
