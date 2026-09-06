@@ -59,6 +59,21 @@ def _serialize_fixture(fx: Fixture) -> dict:
     }
 
 
+def _serialize_fixture_rows(rows: list[Fixture]) -> list[dict]:
+    """Serialize rows individually so one malformed JSON value cannot blank the board."""
+    serialized: list[dict] = []
+    skipped = 0
+    for fx in rows:
+        try:
+            serialized.append(_serialize_fixture(fx))
+        except Exception:
+            skipped += 1
+            log.exception("Skipping malformed fixture id=%s during public serialization", getattr(fx, "id", None))
+    if skipped:
+        log.warning("Fixture board skipped %d malformed rows out of %d", skipped, len(rows))
+    return serialized
+
+
 @router.get("/fixtures/upcoming")
 def upcoming_fixtures(
     scope: str = "upcoming",
@@ -144,7 +159,7 @@ def upcoming_fixtures(
         except Exception:
             log.exception("Could not queue low-coverage fixture recovery")
 
-    return [_serialize_fixture(fx) for fx in fixtures]
+    return _serialize_fixture_rows(fixtures)
 
 
 @router.get("/fixtures/status")
