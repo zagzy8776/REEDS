@@ -9,11 +9,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.models import Fixture, Prediction
 from app.db.session import get_db
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+
+COVERAGE_FLOOR = 120
 
 
 def _serialize_fixture(fx: Fixture) -> dict:
@@ -149,13 +152,29 @@ def upcoming_fixtures(
         except Exception:
             log.exception("OpenFoot emergency fixture recovery failed")
 
-        # Also queue the normal full multi-provider refresh. This keeps the DB
-        # populated beyond the small synchronous recovery window.
+    # A non-empty board can still be badly under-covered. Queue the deeper
+    # multi-provider fanout instead of accepting 20–50 rows as a healthy feed.
+    # The worker is cooldown/coalesced, so opening the page does not cause a
+    # provider storm and the HTTP request itself stays fast.
+    if scope in {"all", "upcoming"} and not sport and not league:
         try:
-            from app.services.coverage_runner import start_coverage_refresh
-            start_coverage_refresh(reason="public_fixture_board_empty")
+            future_count = (
+                db.query(Fixture.id)
+                .filter(Fixture.match_date >= today)
+                .count()
+            )
+            if future_count < COVERAGE_FLOOR:
+                from app.services.coverage_runner import start_coverage_refresh
+
+                queued = start_coverage_refresh(reason=f"low_fixture_coverage_{future_count}")
+                log.info(
+                    "Fixture coverage below floor: count=%d floor=%d queued=%s",
+                    future_count,
+                    COVERAGE_FLOOR,
+                    queued,
+                )
         except Exception:
-            log.exception("Could not queue fixture coverage recovery")
+            log.exception("Could not queue low-coverage fixture recovery")
 
     return [_serialize_fixture(fx) for fx in fixtures]
 
@@ -188,6 +207,20 @@ def fixtures_status(db: Session = Depends(get_db)):
     else:
         feed_health = "active"
 
+    settings = get_settings()
+    providers = {
+        "sportmonks": bool(settings.sportmonks_api_key),
+        "api_football": bool(settings.api_football_key or settings.api_sports_key),
+        "football_data_org": bool(settings.football_data_api_key),
+        "apifootball_com": bool(settings.api_football_com_key),
+        "bzzoiro": bool(settings.bzzoiro_api_key),
+        "openfoot": True,
+        "fixture_download": True,
+        "sporting_events": True,
+        "allsportsapi": bool(settings.allsportsapi_key),
+        "thesportsdb": bool(settings.thesportsdb_enabled),
+    }
+
     return {
         "feed_health": feed_health,
         "api_rows": total,
@@ -196,7 +229,9 @@ def fixtures_status(db: Session = Depends(get_db)):
         "with_odds": with_odds,
         "leagues": leagues,
         "window_days": 7,
+        "coverage_floor": COVERAGE_FLOOR,
         "today": today,
+        "configured_providers": providers,
         "source_counts": {
             source: count
             for source, count in db.query(Fixture.source, func.count(Fixture.id))
