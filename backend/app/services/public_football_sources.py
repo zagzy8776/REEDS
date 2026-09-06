@@ -153,7 +153,7 @@ def ingest_fixture_download_football(db: Session, target_dates: list[str], max_c
 
 
 def ingest_sporting_events_football(db: Session, target_dates: list[str]) -> int:
-    """Pull the no-key Sporting Events football JSON dataset plus web score feeds."""
+    """Pull the no-key Sporting Events football JSON dataset."""
     if not target_dates:
         return 0
     wanted_dates = set(target_dates)
@@ -201,17 +201,6 @@ def ingest_sporting_events_football(db: Session, target_dates: list[str]) -> int
         )
         upsert_fixture(db, fx)
         count += 1
-
-    # The public score sites are additional contributors. Each source is bounded
-    # to one public listing request per sport and failures are isolated.
-    try:
-        from app.scraper.web_score_sources import ingest_web_score_sources
-        web_report = ingest_web_score_sources(db, target_dates)
-        count += int(web_report.get("rows", 0) or 0)
-    except Exception as exc:
-        # Never let a score-site block the existing public/API fan-out.
-        import logging
-        logging.getLogger(__name__).warning("Web score sources unavailable: %s", exc)
 
     db.commit()
     return count
