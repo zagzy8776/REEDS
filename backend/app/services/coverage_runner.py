@@ -1,4 +1,4 @@
-"""Background runner for recovering missing fixture coverage on Render."""
+"""Background runner for recovering missing and low fixture coverage on Render."""
 
 from __future__ import annotations
 
@@ -14,13 +14,7 @@ _COOLDOWN_SECONDS = 20 * 60
 
 
 def start_coverage_refresh(reason: str = "unknown") -> bool:
-    """Queue one lightweight coverage refresh without blocking an HTTP request.
-
-    The process-local cooldown prevents an external cron from repeatedly starting
-    provider-heavy ingestion while the board is empty. The scheduler remains the
-    normal periodic path; this is a recovery path for deployments where the
-    scheduler is disabled or the service has just been woken from sleep.
-    """
+    """Queue one lightweight/deep coverage refresh without blocking HTTP."""
     global _last_started
 
     now = time.monotonic()
@@ -37,8 +31,26 @@ def start_coverage_refresh(reason: str = "unknown") -> bool:
         try:
             from app.services.scheduler import run_lightweight_refresh
 
-            report = run_lightweight_refresh()
-            log.info("Background coverage refresh complete: ingested=%s reason=%s", report.get("ingested", {}), reason)
+            light_report = run_lightweight_refresh()
+            deep_report = None
+            try:
+                from app.db.session import SessionLocal
+                from app.scraper.deep_coverage import run_deep_coverage
+
+                db = SessionLocal()
+                try:
+                    deep_report = run_deep_coverage(db)
+                finally:
+                    db.close()
+            except Exception:
+                log.exception("Deep fixture coverage failed: reason=%s", reason)
+
+            log.info(
+                "Background coverage refresh complete: lightweight=%s deep=%s reason=%s",
+                light_report.get("ingested", {}),
+                deep_report,
+                reason,
+            )
         except Exception:
             log.exception("Background coverage refresh failed: reason=%s", reason)
         finally:
