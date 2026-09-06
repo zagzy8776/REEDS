@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import Fixture
+from app.db.models import Fixture, Prediction
 from app.db.session import get_db
 
 log = logging.getLogger(__name__)
@@ -94,7 +94,38 @@ def upcoming_fixtures(
 
     fixtures = query.order_by(*order).limit(limit).all()
 
+    # Predictions and fixtures live in the same table, so when the prediction
+    # board is healthy but an over-filtered/stale fixture query comes back empty,
+    # reuse the exact fixtures that currently back published picks. This makes
+    # the match centre consistent with the AI board instead of showing nothing.
     if not fixtures and scope not in {"results"}:
+        prediction_query = (
+            db.query(Fixture)
+            .join(Prediction, Prediction.fixture_id == Fixture.id)
+            .filter(
+                Prediction.is_published == True,
+                Prediction.status == "active",
+                Fixture.match_date >= today,
+            )
+        )
+        if sport:
+            prediction_query = prediction_query.filter(Fixture.sport == sport)
+        if league:
+            prediction_query = prediction_query.filter(Fixture.league.ilike(f"%{league.strip()}%"))
+        fixtures = (
+            prediction_query
+            .distinct(Fixture.id)
+            .order_by(Fixture.match_date.asc(), Fixture.id.asc())
+            .limit(limit)
+            .all()
+        )
+        if fixtures:
+            log.warning(
+                "Fixture board recovered %d rows directly from active predictions",
+                len(fixtures),
+            )
+
+    if not fixtures and scope not in {"results"} and not sport and not league:
         # Fast last-resort recovery: OpenFoot exposes public fixture reads, so
         # a newly-awakened Render instance can populate the board immediately
         # without waiting for the background coverage worker or another cron.
