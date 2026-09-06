@@ -46,20 +46,14 @@ def _bootstrap_models_background() -> None:
 
 @app.on_event("startup")
 def on_startup():
-    # DB schema initialization stays on the critical path; model downloads do not.
     init_db()
 
-    # admin.py imports the training module during application import, so this
-    # patch is cheap here and guarantees Render-side training does not use the
-    # legacy test-leaking meta learner.
     try:
         from app.services.model_bootstrap import install_quality_training
         install_quality_training()
     except Exception:
         log.exception("Could not install quality training guard")
 
-    # Render filesystems are ephemeral. Restore missing artifacts in the
-    # background so a slow GitHub download can never block HTTP startup.
     threading.Thread(target=_bootstrap_models_background, name="model-bootstrap", daemon=True).start()
 
     from app.services.prediction_guard import install_prediction_guard
@@ -72,7 +66,6 @@ def on_startup():
 
 @app.get("/health")
 def health():
-    """Cheap liveness probe. It intentionally does not require the database."""
     return {"ok": True, "brand": settings.public_brand_name}
 
 
@@ -83,13 +76,12 @@ def api_health():
 
 @app.get("/ready")
 def readiness():
-    """Readiness probe: verify the application can reach its database."""
     from fastapi.responses import JSONResponse
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
         return {"ok": True, "ready": True, "database": "ok"}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("Readiness database check failed")
         return JSONResponse(
             status_code=503,
@@ -114,7 +106,7 @@ def api_feed_health():
 
 @app.get("/api/wake")
 def wake(request: Request):
-    """Cron heartbeat: wake Render, recover fixture coverage, then recover predictions."""
+    """Cron heartbeat: synchronously recover thin fixture coverage before returning."""
     if settings.cron_secret:
         supplied = request.headers.get("x-cron-secret", "")
         if not supplied:
@@ -138,7 +130,9 @@ def wake(request: Request):
     prediction_queued = False
     coverage_queued = False
     coverage_trigger = "not_needed"
+    coverage_report = None
     error = None
+
     try:
         scores_synced = sync_live_scores(
             db,
@@ -150,35 +144,38 @@ def wake(request: Request):
         coverage_horizon = today + timedelta(days=2)
         upcoming_count = (
             db.query(Fixture.id)
-            .filter(
-                func.date(Fixture.match_date) >= today,
-                func.date(Fixture.match_date) <= coverage_horizon,
-            )
+            .filter(func.date(Fixture.match_date) >= today, func.date(Fixture.match_date) <= coverage_horizon, Fixture.source != "coverage_seed")
             .count()
         )
         all_future_count = (
             db.query(Fixture.id)
-            .filter(func.date(Fixture.match_date) >= today)
+            .filter(func.date(Fixture.match_date) >= today, Fixture.source != "coverage_seed")
             .count()
         )
 
-        # The external cron is also the wake mechanism for Render. Previously it
-        # only synced scores, so a sleeping/unscheduled instance could remain
-        # permanently empty even though the fixture ingestion code was healthy.
-        if upcoming_count == 0:
-            coverage_trigger = "no_fixtures_next_48h"
-        elif upcoming_count < 10:
-            coverage_trigger = "low_fixtures_next_48h"
-
-        if coverage_trigger != "not_needed":
-            coverage_queued = start_coverage_refresh(reason=f"cron_{coverage_trigger}")
-            log.info(
-                "Wake endpoint coverage recovery: trigger=%s queued=%s upcoming_48h=%d future=%d",
-                coverage_trigger,
-                coverage_queued,
-                upcoming_count,
-                all_future_count,
+        # External cron is the reliable wake path for a Render service that may
+        # sleep. Do the real coverage escalation in this request so the process
+        # cannot return immediately and then be suspended before background work
+        # has persisted the fixtures.
+        if all_future_count < 300:
+            coverage_trigger = "low_real_fixture_coverage"
+            from app.scraper.deep_coverage import run_deep_coverage
+            coverage_report = run_deep_coverage(db, min_coverage=300)
+            all_future_count = (
+                db.query(Fixture.id)
+                .filter(func.date(Fixture.match_date) >= today, Fixture.source != "coverage_seed")
+                .count()
             )
+            log.info(
+                "Wake synchronous fixture recovery: before=%s after=%s report=%s",
+                coverage_report.get("before") if coverage_report else None,
+                all_future_count,
+                coverage_report,
+            )
+        elif upcoming_count < 10:
+            # Still queue normal scheduled fanout for a very short near-term gap.
+            coverage_trigger = "low_fixtures_next_48h"
+            coverage_queued = start_coverage_refresh(reason=f"cron_{coverage_trigger}")
 
         active_today = (
             db.query(Prediction)
@@ -187,12 +184,11 @@ def wake(request: Request):
                 Prediction.is_published == True,
                 Prediction.status == "active",
                 func.date(Fixture.match_date) == today,
+                Fixture.source != "coverage_seed",
             )
             .count()
         )
 
-        # Do not race the coverage worker with prediction generation. The next
-        # heartbeat will generate predictions after fixtures have been ingested.
         if active_today == 0 and all_future_count > 0 and not coverage_queued:
             prediction_queued = start_prediction_generation(reason="cron_wake_empty_board")
             log.info("Wake endpoint queued prediction recovery: queued=%s", prediction_queued)
@@ -207,6 +203,7 @@ def wake(request: Request):
         "scores_synced": scores_synced,
         "coverage_refresh_queued": coverage_queued,
         "coverage_trigger": coverage_trigger,
+        "coverage_report": coverage_report,
         "prediction_build_queued": prediction_queued,
     }
     if error:
