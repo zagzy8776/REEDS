@@ -26,6 +26,7 @@ from app.scraper.loaders import (
     upsert_fixture,
 )
 from app.services.data_quality import resolve_team_name
+from app.services.fixture_normalizer import normalize_fixture_sports
 from app.services.public_football_sources import (
     ingest_fixture_download_football,
     ingest_sporting_events_football,
@@ -98,11 +99,7 @@ def purge_showcase_rows(db: Session) -> int:
     if not seed_ids:
         return 0
     db.query(Prediction).filter(Prediction.fixture_id.in_(seed_ids)).delete(synchronize_session=False)
-    deleted = (
-        db.query(Fixture)
-        .filter(Fixture.id.in_(seed_ids))
-        .delete(synchronize_session=False)
-    )
+    deleted = db.query(Fixture).filter(Fixture.id.in_(seed_ids)).delete(synchronize_session=False)
     db.commit()
     return int(deleted or 0)
 
@@ -266,8 +263,18 @@ def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
 
     settings = get_settings()
     purged = purge_showcase_rows(db)
+    normalized_before = normalize_fixture_sports(db)
     before = _future_count(db)
-    report = {"before": before, "after": before, "target": min_coverage, "ran": False, "showcase_purged": purged, "sources": {}}
+    report = {
+        "before": before,
+        "after": before,
+        "target": min_coverage,
+        "ran": False,
+        "showcase_purged": purged,
+        "normalized_before": normalized_before,
+        "normalized_after": None,
+        "sources": {},
+    }
     if before >= min_coverage:
         return report
 
@@ -299,6 +306,7 @@ def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
     if _future_count(db) < min_coverage:
         run("openfoot", _ingest_openfoot, db, dates)
 
+    report["normalized_after"] = normalize_fixture_sports(db)
     after = _future_count(db)
     report["after"] = after
     log.info("Deep fixture coverage: %s", report)
