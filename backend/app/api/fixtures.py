@@ -16,7 +16,7 @@ from app.db.session import get_db
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-COVERAGE_FLOOR = 120
+COVERAGE_FLOOR = 300
 
 
 def _serialize_fixture(fx: Fixture) -> dict:
@@ -67,13 +67,13 @@ def upcoming_fixtures(
     limit: int = 300,
     db: Session = Depends(get_db),
 ):
-    """Return the public fixture board with predictable scope semantics."""
+    """Return real fixtures and trigger coverage expansion when the feed is thin."""
 
     today = date.today()
     scope = (scope or "upcoming").lower()
     limit = max(1, min(limit, 500))
 
-    query = db.query(Fixture)
+    query = db.query(Fixture).filter(Fixture.source != "coverage_seed")
     if sport:
         query = query.filter(Fixture.sport == sport)
     if league:
@@ -83,25 +83,15 @@ def upcoming_fixtures(
         query = query.filter(Fixture.match_date == today)
     elif scope == "results":
         query = query.filter(Fixture.match_date < today)
-    elif scope == "all":
-        query = query.filter(Fixture.match_date >= today)
     else:
         query = query.filter(Fixture.match_date >= today)
 
-    if scope in {"live", "today"}:
-        order = [Fixture.match_date.asc(), Fixture.id.asc()]
-    elif scope == "results":
-        order = [Fixture.match_date.desc(), Fixture.id.desc()]
-    else:
-        order = [Fixture.match_date.asc(), Fixture.id.asc()]
-
+    order = [Fixture.match_date.desc(), Fixture.id.desc()] if scope == "results" else [Fixture.match_date.asc(), Fixture.id.asc()]
     fixtures = query.order_by(*order).limit(limit).all()
 
-    # Predictions and fixtures live in the same table, so when the prediction
-    # board is healthy but an over-filtered/stale fixture query comes back empty,
-    # reuse the exact fixtures that currently back published picks. This makes
-    # the match centre consistent with the AI board instead of showing nothing.
-    if not fixtures and scope not in {"results"}:
+    # Keep the fixture board aligned with the AI board when the normal fixture
+    # query is temporarily empty. Synthetic coverage seeds are never eligible.
+    if not fixtures and scope != "results":
         prediction_query = (
             db.query(Fixture)
             .join(Prediction, Prediction.fixture_id == Fixture.id)
@@ -109,41 +99,27 @@ def upcoming_fixtures(
                 Prediction.is_published == True,
                 Prediction.status == "active",
                 Fixture.match_date >= today,
+                Fixture.source != "coverage_seed",
             )
         )
         if sport:
             prediction_query = prediction_query.filter(Fixture.sport == sport)
         if league:
             prediction_query = prediction_query.filter(Fixture.league.ilike(f"%{league.strip()}%"))
-        fixtures = (
-            prediction_query
-            .distinct(Fixture.id)
-            .order_by(Fixture.match_date.asc(), Fixture.id.asc())
-            .limit(limit)
-            .all()
-        )
+        fixtures = prediction_query.distinct(Fixture.id).order_by(Fixture.match_date.asc(), Fixture.id.asc()).limit(limit).all()
         if fixtures:
-            log.warning(
-                "Fixture board recovered %d rows directly from active predictions",
-                len(fixtures),
-            )
+            log.warning("Fixture board recovered %d rows from active predictions", len(fixtures))
 
-    if not fixtures and scope not in {"results"} and not sport and not league:
-        # Fast last-resort recovery: OpenFoot exposes public fixture reads, so
-        # a newly-awakened Render instance can populate the board immediately
-        # without waiting for the background coverage worker or another cron.
+    # Fast emergency bootstrap from OpenFoot for a completely cold board.
+    if not fixtures and scope != "results" and not sport and not league:
         try:
             from app.scraper.coverage_sources import ingest_openfoot_football
-
-            recovery_dates = [
-                (today + timedelta(days=offset)).isoformat()
-                for offset in range(3)
-            ]
+            recovery_dates = [(today + timedelta(days=offset)).isoformat() for offset in range(3)]
             recovered = ingest_openfoot_football(db, None, recovery_dates)
             if recovered:
                 fixtures = (
                     db.query(Fixture)
-                    .filter(Fixture.match_date >= today)
+                    .filter(Fixture.match_date >= today, Fixture.source != "coverage_seed")
                     .order_by(Fixture.match_date.asc(), Fixture.id.asc())
                     .limit(limit)
                     .all()
@@ -152,27 +128,19 @@ def upcoming_fixtures(
         except Exception:
             log.exception("OpenFoot emergency fixture recovery failed")
 
-    # A non-empty board can still be badly under-covered. Queue the deeper
-    # multi-provider fanout instead of accepting 20–50 rows as a healthy feed.
-    # The worker is cooldown/coalesced, so opening the page does not cause a
-    # provider storm and the HTTP request itself stays fast.
+    # A board with 20–50 rows is not healthy for a multi-provider match centre.
+    # Queue the coverage escalator; HTTP stays non-blocking.
     if scope in {"all", "upcoming"} and not sport and not league:
         try:
             future_count = (
                 db.query(Fixture.id)
-                .filter(Fixture.match_date >= today)
+                .filter(Fixture.match_date >= today, Fixture.source != "coverage_seed")
                 .count()
             )
             if future_count < COVERAGE_FLOOR:
                 from app.services.coverage_runner import start_coverage_refresh
-
                 queued = start_coverage_refresh(reason=f"low_fixture_coverage_{future_count}")
-                log.info(
-                    "Fixture coverage below floor: count=%d floor=%d queued=%s",
-                    future_count,
-                    COVERAGE_FLOOR,
-                    queued,
-                )
+                log.info("Fixture coverage below floor: count=%d floor=%d queued=%s", future_count, COVERAGE_FLOOR, queued)
         except Exception:
             log.exception("Could not queue low-coverage fixture recovery")
 
@@ -181,15 +149,20 @@ def upcoming_fixtures(
 
 @router.get("/fixtures/status")
 def fixtures_status(db: Session = Depends(get_db)):
-    """Compact diagnostics for the public match-center feed."""
+    """Compact production diagnostics for current fixture coverage."""
 
     today = date.today()
     horizon = today + timedelta(days=7)
-    base = db.query(Fixture).filter(Fixture.match_date >= today, Fixture.match_date <= horizon)
+    base = db.query(Fixture).filter(
+        Fixture.match_date >= today,
+        Fixture.match_date <= horizon,
+        Fixture.source != "coverage_seed",
+    )
     total = base.count()
     leagues = db.query(func.count(func.distinct(Fixture.league))).filter(
         Fixture.match_date >= today,
         Fixture.match_date <= horizon,
+        Fixture.source != "coverage_seed",
     ).scalar() or 0
     with_odds = base.filter(
         (Fixture.home_odds.isnot(None))
@@ -202,7 +175,7 @@ def fixtures_status(db: Session = Depends(get_db)):
 
     if total == 0:
         feed_health = "empty"
-    elif total < 10:
+    elif total < COVERAGE_FLOOR:
         feed_health = "degraded"
     else:
         feed_health = "active"
@@ -235,8 +208,15 @@ def fixtures_status(db: Session = Depends(get_db)):
         "source_counts": {
             source: count
             for source, count in db.query(Fixture.source, func.count(Fixture.id))
-            .filter(Fixture.match_date >= today, Fixture.match_date <= horizon)
+            .filter(Fixture.match_date >= today, Fixture.match_date <= horizon, Fixture.source != "coverage_seed")
             .group_by(Fixture.source)
+            .all()
+        },
+        "sport_counts": {
+            sport: count
+            for sport, count in db.query(Fixture.sport, func.count(Fixture.id))
+            .filter(Fixture.match_date >= today, Fixture.match_date <= horizon, Fixture.source != "coverage_seed")
+            .group_by(Fixture.sport)
             .all()
         },
     }
@@ -244,7 +224,7 @@ def fixtures_status(db: Session = Depends(get_db)):
 
 @router.get("/fixtures/{fixture_id}")
 def fixture_detail(fixture_id: int, db: Session = Depends(get_db)):
-    fx = db.query(Fixture).filter(Fixture.id == fixture_id).first()
+    fx = db.query(Fixture).filter(Fixture.id == fixture_id, Fixture.source != "coverage_seed").first()
     if not fx:
         raise HTTPException(status_code=404, detail="Fixture not found")
     return _serialize_fixture(fx)
