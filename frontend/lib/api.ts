@@ -1,15 +1,22 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://reeds-phj1.onrender.com";
 
-async function safeFetchJson(url: string, fallback: any) {
+const DEFAULT_API_TIMEOUT_MS = 70000;
+
+async function safeFetchJson(url: string, fallback: any, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000); // 12s instead of 5s
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const r = await fetch(url, {
       cache: "no-store",
       signal: controller.signal,
     });
-    return r.ok ? r.json() : fallback;
-  } catch {
+    if (!r.ok) {
+      console.error(`[REEDS API] ${r.status} ${r.statusText}: ${url}`);
+      return fallback;
+    }
+    return await r.json();
+  } catch (error) {
+    console.error(`[REEDS API] request failed: ${url}`, error);
     return fallback;
   } finally {
     clearTimeout(timeout);
@@ -43,13 +50,13 @@ export async function getUpcomingFixtures() {
 }
 
 export async function getFixtures(params: Record<string, string> = {}) {
-  const withDefaults = { scope: "upcoming", limit: "300", ...params };
+  const withDefaults = { scope: "all", limit: "300", ...params };
   const qs = new URLSearchParams(Object.entries(withDefaults).filter(([, v]) => v)).toString();
-  return safeFetchJson(`${API_URL}/api/fixtures/upcoming${qs ? `?${qs}` : "?limit=300"}`, []);
+  return safeFetchJson(`${API_URL}/api/fixtures/upcoming${qs}`, []);
 }
 
 export async function getFixtureStatus() {
-  return safeFetchJson(`${API_URL}/api/fixtures/status`, null);
+  return safeFetchJson(`${API_URL}/api/fixtures/status`, null, 30000);
 }
 
 export async function getFixture(id: string) {
