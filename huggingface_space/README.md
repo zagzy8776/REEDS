@@ -23,7 +23,7 @@ Add the following **Repository Secrets** in your Space Settings → Repository s
 | `DATABASE_URL` | Your Neon Postgres connection string |
 | `ADMIN_API_KEY` | Your Render admin key |
 | `RENDER_URL` | `https://reeds-phj1.onrender.com` |
-| `CRON_SECRET` | Optional secret used to authenticate Render wake requests |
+| `CRON_SECRET` | Secret used to authenticate Render wake requests |
 
 ## Usage
 
@@ -34,3 +34,5 @@ Open the Space UI and use the buttons to:
 - **Start Auto-Polling** — keeps the Space alive, auto-retrains when Render signals new data
 
 The worker installs the same leakage-safe chronological ensemble used by production before training and uses the safe model synchronization endpoint for durable recovery.
+
+Deployment note: updates to this file intentionally trigger the HF Space sync workflow so the live worker receives the latest Render wake/auth integration.
