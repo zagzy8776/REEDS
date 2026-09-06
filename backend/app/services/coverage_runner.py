@@ -14,7 +14,7 @@ _COOLDOWN_SECONDS = 20 * 60
 
 
 def start_coverage_refresh(reason: str = "unknown") -> bool:
-    """Queue one lightweight/deep coverage refresh without blocking HTTP."""
+    """Queue one coalesced coverage refresh without blocking HTTP."""
     global _last_started
 
     now = time.monotonic()
@@ -30,25 +30,12 @@ def start_coverage_refresh(reason: str = "unknown") -> bool:
     def worker() -> None:
         try:
             from app.services.scheduler import run_lightweight_refresh
-
-            light_report = run_lightweight_refresh()
-            deep_report = None
-            try:
-                from app.db.session import SessionLocal
-                from app.scraper.deep_coverage import run_deep_coverage
-
-                db = SessionLocal()
-                try:
-                    deep_report = run_deep_coverage(db)
-                finally:
-                    db.close()
-            except Exception:
-                log.exception("Deep fixture coverage failed: reason=%s", reason)
-
+            report = run_lightweight_refresh()
             log.info(
-                "Background coverage refresh complete: lightweight=%s deep=%s reason=%s",
-                light_report.get("ingested", {}),
-                deep_report,
+                "Background coverage refresh complete: providers=%s coverage=%s purged_showcase=%s reason=%s",
+                report.get("ingested", {}),
+                report.get("coverage_recovery"),
+                report.get("purged_showcase", 0),
                 reason,
             )
         except Exception:
