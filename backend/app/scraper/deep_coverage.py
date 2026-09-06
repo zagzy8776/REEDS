@@ -1,8 +1,9 @@
 """Demand-driven fixture coverage expansion.
 
-This is a safety-net around the normal scheduler. It only does provider work when
-future coverage is genuinely low, so it does not duplicate healthy scheduled
-refreshes on every wake.
+The normal Render scheduler is intentionally lightweight. This module is the
+coverage escalator: when the live board is genuinely thin, it fans out across
+ranged/public providers and persists the result to the same Neon fixtures table.
+No synthetic fixtures are used to satisfy the coverage target.
 """
 
 from __future__ import annotations
@@ -16,9 +17,19 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Fixture
-from app.scraper.loaders import upsert_fixture
+from app.db.models import Fixture, Prediction
+from app.scraper.loaders import (
+    ingest_allsportsapi_events,
+    ingest_apifootball_com_events,
+    ingest_football_data_org_matches,
+    ingest_thesportsdb_events,
+    upsert_fixture,
+)
 from app.services.data_quality import resolve_team_name
+from app.services.public_football_sources import (
+    ingest_fixture_download_football,
+    ingest_sporting_events_football,
+)
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +37,7 @@ BZZOIRO_BASE = "https://sports.bzzoiro.com/api/v2"
 OPENFOOT_BASE = "https://openfootapi.com/v1"
 SPORTMONKS_BASE = "https://api.sportmonks.com/v3/football"
 
-MIN_COVERAGE = 120
+MIN_COVERAGE = 300
 WINDOW_DAYS = 7
 
 
@@ -74,21 +85,35 @@ def _future_count(db: Session, today: date | None = None) -> int:
     today = today or date.today()
     return int(
         db.query(func.count(Fixture.id))
-        .filter(Fixture.match_date >= today)
+        .filter(Fixture.match_date >= today, Fixture.source != "coverage_seed")
         .scalar()
         or 0
     )
 
 
+def purge_showcase_rows(db: Session) -> int:
+    """Remove old synthetic showcase fixtures and their predictions."""
+
+    seed_ids = [row[0] for row in db.query(Fixture.id).filter(Fixture.source == "coverage_seed").all()]
+    if not seed_ids:
+        return 0
+    db.query(Prediction).filter(Prediction.fixture_id.in_(seed_ids)).delete(synchronize_session=False)
+    deleted = (
+        db.query(Fixture)
+        .filter(Fixture.id.in_(seed_ids))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return int(deleted or 0)
+
+
 def _ingest_sportmonks(db: Session, token: str, start_date: str, end_date: str) -> int:
-    """Use SportMonks' date-range endpoint: one request for the whole window."""
+    """Use one SportMonks ranged fixture request for the whole coverage window."""
+
     response = requests.get(
         f"{SPORTMONKS_BASE}/fixtures/between/{start_date}/{end_date}",
-        params={
-            "api_token": token,
-            "include": "participants;scores;league",
-        },
-        timeout=40,
+        params={"api_token": token, "include": "participants;scores;league"},
+        timeout=45,
     )
     response.raise_for_status()
     payload = response.json()
@@ -102,6 +127,16 @@ def _ingest_sportmonks(db: Session, token: str, start_date: str, end_date: str) 
         kickoff = pd.to_datetime(item.get("starting_at"), errors="coerce", utc=True)
         if pd.isna(kickoff) or not home or not away:
             continue
+
+        scores = item.get("scores") or []
+        def score_for(participant_id):
+            for score in scores:
+                if score.get("participant_id") == participant_id and str(score.get("description", "")).upper() in {"CURRENT", "FT", "FULLTIME"}:
+                    value = _int_or_none((score.get("score") or {}).get("goals"))
+                    if value is not None:
+                        return value
+            return None
+
         league = (item.get("league") or {}).get("name") or "Football"
         fx = Fixture(
             sport="soccer",
@@ -110,27 +145,11 @@ def _ingest_sportmonks(db: Session, token: str, start_date: str, end_date: str) 
             match_date=kickoff.date(),
             home_team=resolve_team_name(db, str(home.get("name")), "soccer", "sportmonks"),
             away_team=resolve_team_name(db, str(away.get("name")), "soccer", "sportmonks"),
-            home_score=None,
-            away_score=None,
+            home_score=score_for(home.get("id")),
+            away_score=score_for(away.get("id")),
             source="sportmonks_range",
-            extra={
-                "sportmonks_fixture_id": item.get("id"),
-                "state_id": item.get("state_id"),
-                "coverage_mode": "date_range",
-            },
+            extra={"sportmonks_fixture_id": item.get("id"), "state_id": item.get("state_id"), "coverage_mode": "date_range"},
         )
-        for side, participant in (("home", home), ("away", away)):
-            scores = item.get("scores") or []
-            value = None
-            for score in scores:
-                if score.get("participant_id") == participant.get("id") and str(score.get("description", "")).upper() in {"CURRENT", "FT", "FULLTIME"}:
-                    value = _int_or_none((score.get("score") or {}).get("goals"))
-                    if value is not None:
-                        break
-            if side == "home":
-                fx.home_score = value
-            else:
-                fx.away_score = value
         upsert_fixture(db, fx)
         count += 1
 
@@ -138,8 +157,9 @@ def _ingest_sportmonks(db: Session, token: str, start_date: str, end_date: str) 
     return count
 
 
-def _ingest_bzzoiro(db: Session, token: str, start_date: str, end_date: str) -> int:
-    """Page through Bzzoiro instead of silently stopping at its 200-row page."""
+def _ingest_bzzoiro_paged(db: Session, token: str, start_date: str, end_date: str) -> int:
+    """Page through Bzzoiro so the first 200 rows do not cap coverage."""
+
     if not token:
         return 0
     count = 0
@@ -158,11 +178,9 @@ def _ingest_bzzoiro(db: Session, token: str, start_date: str, end_date: str) -> 
         if not rows:
             break
         for item in rows:
-            kickoff = pd.to_datetime(
-                item.get("kickoff") or item.get("start_time") or item.get("starting_at"),
-                errors="coerce",
-                utc=True,
-            )
+            if not isinstance(item, dict):
+                continue
+            kickoff = pd.to_datetime(item.get("kickoff") or item.get("start_time") or item.get("starting_at"), errors="coerce", utc=True)
             home = item.get("home_team") or item.get("homeTeam")
             away = item.get("away_team") or item.get("awayTeam")
             if isinstance(home, dict):
@@ -171,7 +189,9 @@ def _ingest_bzzoiro(db: Session, token: str, start_date: str, end_date: str) -> 
                 away = away.get("name")
             if pd.isna(kickoff) or not home or not away:
                 continue
-            match_day = kickoff.date()
+            match_day = kickoff.date().isoformat()
+            if not start_date <= match_day <= end_date:
+                continue
             league = item.get("league") or item.get("competition") or "Football"
             if isinstance(league, dict):
                 league = league.get("name") or "Football"
@@ -179,7 +199,7 @@ def _ingest_bzzoiro(db: Session, token: str, start_date: str, end_date: str) -> 
                 sport="soccer",
                 league=str(league)[:80],
                 season=str(item.get("season") or kickoff.year)[:20],
-                match_date=match_day,
+                match_date=kickoff.date(),
                 home_team=resolve_team_name(db, str(home), "soccer", "bzzoiro"),
                 away_team=resolve_team_name(db, str(away), "soccer", "bzzoiro"),
                 home_score=_score(item, "home"),
@@ -197,18 +217,22 @@ def _ingest_bzzoiro(db: Session, token: str, start_date: str, end_date: str) -> 
 
 
 def _ingest_openfoot(db: Session, dates: list[str]) -> int:
+    """Use OpenFoot's no-key daily endpoint as a public fallback."""
+
     count = 0
     session = requests.Session()
     session.headers.update({"Accept": "application/json"})
     for target_date in dates:
         try:
-            response = session.get(f"{OPENFOOT_BASE}/matches", params={"date": target_date}, timeout=20)
+            response = session.get(f"{OPENFOOT_BASE}/matches", params={"date": target_date}, timeout=25)
             response.raise_for_status()
             payload = response.json()
         except Exception:
             continue
         rows = payload.get("data", []) if isinstance(payload, dict) else []
         for item in rows:
+            if not isinstance(item, dict):
+                continue
             kickoff = pd.to_datetime(item.get("kickoffAt"), errors="coerce", utc=True)
             home = item.get("homeTeam") or {}
             away = item.get("awayTeam") or {}
@@ -238,41 +262,42 @@ def _ingest_openfoot(db: Session, dates: list[str]) -> int:
 
 
 def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
-    """Expand only when future coverage is below the desired floor."""
+    """Expand real coverage across providers until the board reaches its floor."""
+
     settings = get_settings()
+    purged = purge_showcase_rows(db)
     before = _future_count(db)
-    report = {"before": before, "after": before, "target": min_coverage, "ran": False, "sources": {}}
+    report = {"before": before, "after": before, "target": min_coverage, "ran": False, "showcase_purged": purged, "sources": {}}
     if before >= min_coverage:
         return report
 
     report["ran"] = True
     start_date, end_date, dates = _window()
 
-    if settings.sportmonks_api_key:
+    def run(name: str, fn, *args):
         try:
-            report["sources"]["sportmonks_range"] = _ingest_sportmonks(db, settings.sportmonks_api_key, start_date, end_date)
+            report["sources"][name] = fn(*args)
         except Exception as exc:
-            report["sources"]["sportmonks_range_error"] = str(exc)[:200]
+            report["sources"][f"{name}_error"] = str(exc)[:220]
 
-    if _future_count(db) < min_coverage and settings.bzzoiro_api_key:
-        try:
-            report["sources"]["bzzoiro_paged"] = _ingest_bzzoiro(db, settings.bzzoiro_api_key, start_date, end_date)
-        except Exception as exc:
-            report["sources"]["bzzoiro_paged_error"] = str(exc)[:200]
-
+    if settings.sportmonks_api_key and _future_count(db) < min_coverage:
+        run("sportmonks_range", _ingest_sportmonks, db, settings.sportmonks_api_key, start_date, end_date)
+    if settings.bzzoiro_api_key and _future_count(db) < min_coverage:
+        run("bzzoiro_paged", _ingest_bzzoiro_paged, db, settings.bzzoiro_api_key, start_date, end_date)
+    if settings.football_data_api_key and _future_count(db) < min_coverage:
+        run("football_data_org", ingest_football_data_org_matches, db, settings.football_data_api_key, dates)
+    if settings.api_football_com_key and _future_count(db) < min_coverage:
+        run("apifootball_com", ingest_apifootball_com_events, db, settings.api_football_com_key, dates)
+    if settings.allsportsapi_key and _future_count(db) < min_coverage:
+        run("allsportsapi", ingest_allsportsapi_events, db, settings.allsportsapi_key, dates, settings.allsportsapi_sport_list)
+    if settings.thesportsdb_enabled and _future_count(db) < min_coverage:
+        run("thesportsdb", ingest_thesportsdb_events, db, settings.thesportsdb_api_key, dates[:2], settings.thesportsdb_sport_list, min(settings.thesportsdb_max_calls, 20))
     if _future_count(db) < min_coverage:
-        try:
-            from app.services.public_football_sources import ingest_fixture_download_football
-
-            report["sources"]["fixture_download"] = ingest_fixture_download_football(db, dates, max_competitions=32)
-        except Exception as exc:
-            report["sources"]["fixture_download_error"] = str(exc)[:200]
-
+        run("fixture_download", ingest_fixture_download_football, db, dates, 32)
     if _future_count(db) < min_coverage:
-        try:
-            report["sources"]["openfoot"] = _ingest_openfoot(db, dates)
-        except Exception as exc:
-            report["sources"]["openfoot_error"] = str(exc)[:200]
+        run("sporting_events", ingest_sporting_events_football, db, dates)
+    if _future_count(db) < min_coverage:
+        run("openfoot", _ingest_openfoot, db, dates)
 
     after = _future_count(db)
     report["after"] = after
