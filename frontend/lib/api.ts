@@ -23,6 +23,18 @@ async function safeFetchJson(url: string, fallback: any, timeoutMs = DEFAULT_API
   }
 }
 
+async function getFixturesWithRetry(url: string, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
+  const first = await safeFetchJson(url, null, timeoutMs);
+  if (Array.isArray(first) && first.length > 0) return first;
+
+  // Render can be waking from sleep or briefly recycling while the status
+  // endpoint is already available. Retry once before the page falls back to
+  // prediction-backed rows.
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const second = await safeFetchJson(url, null, timeoutMs);
+  return Array.isArray(second) ? second : [];
+}
+
 export async function getTodayPredictions(params: Record<string, string> = {}) {
   const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
   return safeFetchJson(`${API_URL}/api/predictions/today${qs ? `?${qs}` : ""}`, []);
@@ -46,13 +58,13 @@ export async function getStats() {
 }
 
 export async function getUpcomingFixtures() {
-  return safeFetchJson(`${API_URL}/api/fixtures/upcoming?limit=100`, []);
+  return getFixtures({ scope: "all", limit: "300" });
 }
 
 export async function getFixtures(params: Record<string, string> = {}) {
   const withDefaults = { scope: "all", limit: "300", ...params };
   const qs = new URLSearchParams(Object.entries(withDefaults).filter(([, v]) => v)).toString();
-  return safeFetchJson(`${API_URL}/api/fixtures/upcoming${qs}`, []);
+  return getFixturesWithRetry(`${API_URL}/api/fixtures/upcoming?${qs}`);
 }
 
 export async function getFixtureStatus() {
