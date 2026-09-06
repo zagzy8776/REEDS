@@ -104,6 +104,64 @@ def api_feed_health():
         db.close()
 
 
+@app.get("/api/stats/backtest")
+def api_stats_backtest():
+    """Read-only model status endpoint used by the HF worker diagnostics."""
+    from app.db.session import SessionLocal
+    from app.db.models import ModelVersion, BacktestRun
+
+    db = SessionLocal()
+    try:
+        model_rows = (
+            db.query(ModelVersion)
+            .order_by(ModelVersion.sport.asc(), ModelVersion.trained_at.desc())
+            .all()
+        )
+        latest_by_sport = {}
+        for model in model_rows:
+            if model.sport not in latest_by_sport:
+                latest_by_sport[model.sport] = model
+
+        backtests = (
+            db.query(BacktestRun)
+            .order_by(BacktestRun.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        return {
+            "models": [
+                {
+                    "id": model.id,
+                    "sport": model.sport,
+                    "type": model.model_type,
+                    "sample_size": model.sample_size,
+                    "accuracy": model.accuracy,
+                    "active": model.is_active,
+                    "trained_at": model.trained_at,
+                }
+                for model in latest_by_sport.values()
+            ],
+            "backtests": [
+                {
+                    "id": run.id,
+                    "sport": run.sport,
+                    "model_type": run.model_type,
+                    "sample_size": run.sample_size,
+                    "accuracy": run.accuracy,
+                    "brier_score": run.brier_score,
+                    "log_loss": run.log_loss,
+                    "created_at": run.created_at,
+                }
+                for run in backtests
+            ],
+        }
+    except Exception as exc:
+        log.exception("Model status endpoint failed")
+        raise HTTPException(status_code=503, detail="Model status unavailable") from exc
+    finally:
+        db.close()
+
+
 @app.get("/api/wake")
 def wake(request: Request):
     """Fast authenticated cron heartbeat; enqueue all fixture/model work."""
@@ -139,8 +197,6 @@ def wake(request: Request):
         }
     except Exception as exc:
         log.exception("Wake endpoint failed")
-        # Keep the heartbeat itself healthy so an external scheduler does not
-        # disable the recurring job because of a transient DB/worker condition.
         return {"ok": False, "heartbeat": True, "error": str(exc)[:300]}
     finally:
         db.close()
