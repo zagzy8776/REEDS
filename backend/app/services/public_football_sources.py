@@ -1,7 +1,7 @@
-"""No-key public football coverage fallbacks.
+"""Public fixture coverage sources.
 
-These sources are intentionally low-frequency fallbacks. They add fixtures that
-may be missing from API providers without requiring another paid API key.
+These sources are independent contributors to the fixture pool. They are
+bounded, public-page readers and never replace the API providers.
 """
 
 from datetime import date
@@ -20,6 +20,19 @@ from app.services.data_quality import resolve_team_name
 FIXTURE_DOWNLOAD_INDEX = "https://fixturedownload.com/sport/football"
 FIXTURE_DOWNLOAD_BASE = "https://fixturedownload.com"
 SPORTING_EVENTS_URL = "https://sporting-events.org/data/football.json"
+
+
+def _text(value) -> str:
+    return str(value or "").strip()
+
+
+def _int_or_none(value):
+    try:
+        if value in (None, "", "null"):
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 _LEAGUE_HINTS = {
@@ -42,19 +55,6 @@ _LEAGUE_HINTS = {
     "j1-league": "J1 League",
     "a-league": "A-League",
 }
-
-
-def _text(value) -> str:
-    return str(value or "").strip()
-
-
-def _int_or_none(value):
-    try:
-        if value in (None, "", "null"):
-            return None
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None
 
 
 def _slug_to_league(url: str) -> str:
@@ -81,8 +81,7 @@ def _safe_date(value):
 
 
 def ingest_fixture_download_football(db: Session, target_dates: list[str], max_competitions: int = 8) -> int:
-    """Pull a small set of current FixtureDownload JSON feeds as a fallback."""
-
+    """Pull a bounded set of current FixtureDownload JSON feeds."""
     if not target_dates:
         return 0
     wanted_dates = set(target_dates)
@@ -154,11 +153,11 @@ def ingest_fixture_download_football(db: Session, target_dates: list[str], max_c
 
 
 def ingest_sporting_events_football(db: Session, target_dates: list[str]) -> int:
-    """Pull the no-key Sporting Events football JSON dataset."""
-
+    """Pull the no-key Sporting Events football JSON dataset plus web score feeds."""
     if not target_dates:
         return 0
     wanted_dates = set(target_dates)
+    count = 0
     try:
         response = requests.get(
             SPORTING_EVENTS_URL,
@@ -168,10 +167,9 @@ def ingest_sporting_events_football(db: Session, target_dates: list[str]) -> int
         response.raise_for_status()
         payload = response.json()
     except Exception:
-        return 0
+        payload = {}
 
     rows = payload.get("events", []) if isinstance(payload, dict) else []
-    count = 0
     for item in rows:
         if not isinstance(item, dict):
             continue
@@ -203,6 +201,17 @@ def ingest_sporting_events_football(db: Session, target_dates: list[str]) -> int
         )
         upsert_fixture(db, fx)
         count += 1
+
+    # The public score sites are additional contributors. Each source is bounded
+    # to one public listing request per sport and failures are isolated.
+    try:
+        from app.scraper.web_score_sources import ingest_web_score_sources
+        web_report = ingest_web_score_sources(db, target_dates)
+        count += int(web_report.get("rows", 0) or 0)
+    except Exception as exc:
+        # Never let a score-site block the existing public/API fan-out.
+        import logging
+        logging.getLogger(__name__).warning("Web score sources unavailable: %s", exc)
 
     db.commit()
     return count
