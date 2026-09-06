@@ -1,9 +1,11 @@
-"""Demand-driven fixture coverage expansion.
+"""Real multi-provider fixture fanout.
 
-The normal Render scheduler is intentionally lightweight. This module is the
-coverage escalator: when the live board is genuinely thin, it fans out across
-ranged/public providers and persists the result to the same Neon fixtures table.
-No synthetic fixtures are used to satisfy the coverage target.
+Every enabled fixture provider gets a turn in a coverage run. Providers are
+never treated as fallbacks for one another and one provider failure never
+prevents the remaining feeds from contributing data.
+
+Request volume is bounded per provider so the fanout does not blindly exhaust
+free-tier quotas. The AI/prediction pipeline runs after this ingestion stage.
 """
 
 from __future__ import annotations
@@ -40,6 +42,9 @@ SPORTMONKS_BASE = "https://api.sportmonks.com/v3/football"
 
 MIN_COVERAGE = 300
 WINDOW_DAYS = 7
+BZZOIRO_MAX_PAGES = 12
+FIXTURE_DOWNLOAD_MAX_COMPETITIONS = 24
+THESPORTSDB_MAX_CALLS = 20
 
 
 def _window(days: int = WINDOW_DAYS) -> tuple[str, str, list[str]]:
@@ -105,7 +110,7 @@ def purge_showcase_rows(db: Session) -> int:
 
 
 def _ingest_sportmonks(db: Session, token: str, start_date: str, end_date: str) -> int:
-    """Use one SportMonks ranged fixture request for the whole coverage window."""
+    """Use one SportMonks ranged fixture request for the coverage window."""
 
     response = requests.get(
         f"{SPORTMONKS_BASE}/fixtures/between/{start_date}/{end_date}",
@@ -126,6 +131,7 @@ def _ingest_sportmonks(db: Session, token: str, start_date: str, end_date: str) 
             continue
 
         scores = item.get("scores") or []
+
         def score_for(participant_id):
             for score in scores:
                 if score.get("participant_id") == participant_id and str(score.get("description", "")).upper() in {"CURRENT", "FT", "FULLTIME"}:
@@ -155,14 +161,14 @@ def _ingest_sportmonks(db: Session, token: str, start_date: str, end_date: str) 
 
 
 def _ingest_bzzoiro_paged(db: Session, token: str, start_date: str, end_date: str) -> int:
-    """Page through Bzzoiro so the first 200 rows do not cap coverage."""
+    """Page through Bzzoiro without allowing an unbounded loop."""
 
     if not token:
         return 0
     count = 0
     offset = 0
     session = requests.Session()
-    while True:
+    for _page in range(BZZOIRO_MAX_PAGES):
         response = session.get(
             f"{BZZOIRO_BASE}/events/",
             params={"date_from": start_date, "date_to": end_date, "limit": 200, "offset": offset},
@@ -214,7 +220,7 @@ def _ingest_bzzoiro_paged(db: Session, token: str, start_date: str, end_date: st
 
 
 def _ingest_openfoot(db: Session, dates: list[str]) -> int:
-    """Use OpenFoot's no-key daily endpoint as a public fallback."""
+    """Ingest the public OpenFoot daily feed for every requested date."""
 
     count = 0
     session = requests.Session()
@@ -224,7 +230,8 @@ def _ingest_openfoot(db: Session, dates: list[str]) -> int:
             response = session.get(f"{OPENFOOT_BASE}/matches", params={"date": target_date}, timeout=25)
             response.raise_for_status()
             payload = response.json()
-        except Exception:
+        except requests.RequestException as exc:
+            log.warning("OpenFoot request failed for %s: %s", target_date, exc)
             continue
         rows = payload.get("data", []) if isinstance(payload, dict) else []
         for item in rows:
@@ -259,7 +266,12 @@ def _ingest_openfoot(db: Session, dates: list[str]) -> int:
 
 
 def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
-    """Expand real coverage across providers until the board reaches its floor."""
+    """Fan out across every enabled provider, then let AI analysis begin.
+
+    The floor controls whether this expensive fanout is needed, not which
+    providers are allowed to contribute. Once a coverage run starts, every
+    available source gets queried regardless of the running row count.
+    """
 
     settings = get_settings()
     purged = purge_showcase_rows(db)
@@ -283,31 +295,69 @@ def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
 
     def run(name: str, fn, *args):
         try:
-            report["sources"][name] = fn(*args)
+            value = fn(*args)
+            report["sources"][name] = {"rows": int(value or 0), "status": "ok"}
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            report["sources"][name] = {"rows": 0, "status": f"http_{status or 'error'}", "error": str(exc)[:220]}
+            log.warning("Fixture provider %s failed with HTTP %s: %s", name, status, exc)
         except Exception as exc:
-            report["sources"][f"{name}_error"] = str(exc)[:220]
+            report["sources"][name] = {"rows": 0, "status": "error", "error": str(exc)[:220]}
+            log.exception("Fixture provider %s failed", name)
 
-    if settings.sportmonks_api_key and _future_count(db) < min_coverage:
+    # Every enabled provider participates. The normal 2-hour refresh already
+    # calls these keyed feeds; deep coverage adds the broad/ranged passes.
+    if settings.sportmonks_api_key:
         run("sportmonks_range", _ingest_sportmonks, db, settings.sportmonks_api_key, start_date, end_date)
-    if settings.bzzoiro_api_key and _future_count(db) < min_coverage:
+    else:
+        report["sources"]["sportmonks_range"] = {"rows": 0, "status": "not_configured"}
+
+    if settings.bzzoiro_api_key:
         run("bzzoiro_paged", _ingest_bzzoiro_paged, db, settings.bzzoiro_api_key, start_date, end_date)
-    if settings.football_data_api_key and _future_count(db) < min_coverage:
+    else:
+        report["sources"]["bzzoiro_paged"] = {"rows": 0, "status": "not_configured"}
+
+    if settings.football_data_api_key:
         run("football_data_org", ingest_football_data_org_matches, db, settings.football_data_api_key, dates)
-    if settings.api_football_com_key and _future_count(db) < min_coverage:
+    else:
+        report["sources"]["football_data_org"] = {"rows": 0, "status": "not_configured"}
+
+    if settings.api_football_com_key:
         run("apifootball_com", ingest_apifootball_com_events, db, settings.api_football_com_key, dates)
-    if settings.allsportsapi_key and _future_count(db) < min_coverage:
+    else:
+        report["sources"]["apifootball_com"] = {"rows": 0, "status": "not_configured"}
+
+    if settings.allsportsapi_key:
         run("allsportsapi", ingest_allsportsapi_events, db, settings.allsportsapi_key, dates, settings.allsportsapi_sport_list)
-    if settings.thesportsdb_enabled and _future_count(db) < min_coverage:
-        run("thesportsdb", ingest_thesportsdb_events, db, settings.thesportsdb_api_key, dates[:2], settings.thesportsdb_sport_list, min(settings.thesportsdb_max_calls, 20))
-    if _future_count(db) < min_coverage:
-        run("fixture_download", ingest_fixture_download_football, db, dates, 32)
-    if _future_count(db) < min_coverage:
-        run("sporting_events", ingest_sporting_events_football, db, dates)
-    if _future_count(db) < min_coverage:
-        run("openfoot", _ingest_openfoot, db, dates)
+    else:
+        report["sources"]["allsportsapi"] = {"rows": 0, "status": "not_configured"}
+
+    if settings.thesportsdb_enabled:
+        run(
+            "thesportsdb",
+            ingest_thesportsdb_events,
+            db,
+            settings.thesportsdb_api_key,
+            dates[:2],
+            settings.thesportsdb_sport_list,
+            min(settings.thesportsdb_max_calls, THESPORTSDB_MAX_CALLS),
+        )
+    else:
+        report["sources"]["thesportsdb"] = {"rows": 0, "status": "disabled"}
+
+    # Public feeds are independent contributors, not a last-resort switch.
+    run("fixture_download", ingest_fixture_download_football, db, dates, FIXTURE_DOWNLOAD_MAX_COMPETITIONS)
+    run("sporting_events", ingest_sporting_events_football, db, dates)
+    run("openfoot", _ingest_openfoot, db, dates)
 
     report["normalized_after"] = normalize_fixture_sports(db)
     after = _future_count(db)
     report["after"] = after
-    log.info("Deep fixture coverage: %s", report)
+    report["provider_count"] = len(report["sources"])
+    report["providers_with_rows"] = {
+        name: details.get("rows", 0)
+        for name, details in report["sources"].items()
+        if isinstance(details, dict) and details.get("rows", 0) > 0
+    }
+    log.info("Deep fixture provider fanout: %s", report)
     return report
