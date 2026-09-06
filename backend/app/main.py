@@ -106,7 +106,7 @@ def api_feed_health():
 
 @app.get("/api/wake")
 def wake(request: Request):
-    """Fast cron heartbeat; enqueue heavy fixture/model work and return immediately."""
+    """Fast authenticated cron heartbeat; enqueue all fixture/model work."""
     if settings.cron_secret:
         supplied = request.headers.get("x-cron-secret", "")
         if not supplied:
@@ -116,75 +116,31 @@ def wake(request: Request):
         if not supplied or not secrets.compare_digest(supplied, settings.cron_secret):
             raise HTTPException(status_code=401, detail="Invalid cron credential")
 
-    from datetime import date, timedelta
+    from datetime import date
     from sqlalchemy import func
-    from app.db.models import Fixture, Prediction
+    from app.db.models import Fixture
     from app.db.session import SessionLocal
-    from app.services.prediction_runner import start_prediction_generation
     from app.services.coverage_runner import start_coverage_refresh
-    from app.scraper.loaders import sync_live_scores
 
     db = SessionLocal()
     try:
-        scores_synced = sync_live_scores(
-            db,
-            settings.api_football_key or settings.api_sports_key,
-            settings.api_basketball_key or settings.api_sports_key,
-        )
-
         today = date.today()
-        coverage_horizon = today + timedelta(days=2)
-        upcoming_count = (
-            db.query(Fixture.id)
-            .filter(
-                func.date(Fixture.match_date) >= today,
-                func.date(Fixture.match_date) <= coverage_horizon,
-                Fixture.source != "coverage_seed",
-            )
-            .count()
-        )
-        all_future_count = (
+        future_count = (
             db.query(Fixture.id)
             .filter(func.date(Fixture.match_date) >= today, Fixture.source != "coverage_seed")
             .count()
         )
-
-        # Never perform the expensive multi-provider fanout inside the cron HTTP
-        # request. This prevents external cron services from timing out while the
-        # worker continues ingestion in-process. The refresh itself fans out to
-        # all configured API + public/web sources and then lets prediction work run.
-        coverage_queued = start_coverage_refresh(reason="cron_wake")
-
-        active_today = (
-            db.query(Prediction.id)
-            .join(Fixture, Prediction.fixture_id == Fixture.id)
-            .filter(
-                Prediction.is_published == True,
-                Prediction.status == "active",
-                func.date(Fixture.match_date) == today,
-                Fixture.source != "coverage_seed",
-            )
-            .count()
-        )
-
-        prediction_queued = False
-        if active_today == 0 and (all_future_count > 0 or upcoming_count > 0):
-            prediction_queued = start_prediction_generation(reason="cron_wake_empty_board")
-
+        queued = start_coverage_refresh(reason="cron_wake")
         return {
             "ok": True,
-            "scores_synced": scores_synced,
-            "coverage_refresh_queued": coverage_queued,
-            "coverage_trigger": "cron_fanout",
-            "existing_fixtures": all_future_count,
-            "upcoming_48h": upcoming_count,
-            "prediction_build_queued": prediction_queued,
+            "heartbeat": True,
+            "coverage_refresh_queued": queued,
+            "existing_fixtures": future_count,
         }
     except Exception as exc:
         log.exception("Wake endpoint failed")
-        # Cron should only be marked failed for an authentication/routing error;
-        # report transient application errors as a successful heartbeat so the
-        # external scheduler keeps waking the Render service.
+        # Keep the heartbeat itself healthy so an external scheduler does not
+        # disable the recurring job because of a transient DB/worker condition.
         return {"ok": False, "heartbeat": True, "error": str(exc)[:300]}
     finally:
         db.close()
