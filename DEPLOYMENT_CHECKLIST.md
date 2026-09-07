@@ -4,120 +4,73 @@
 
 ### Environment Setup
 - [ ] Set `DATABASE_URL` in Render (Neon PostgreSQL)
-- [ ] Set `ADMIN_API_KEY` in Render (your secure key: 23235567Jjmt)
+- [ ] Set `ADMIN_API_KEY` in Render using the secret manager (never commit it)
+- [ ] Set `CRON_SECRET` in Render and the Hugging Face Space; keep both values identical
 - [ ] Set `AUDIT_MODE=true` for initial 7-day testing period
 - [ ] Set `ENABLE_SCHEDULER=true`
 - [ ] Set `CORS_ORIGINS=https://reeds-phi.vercel.app`
-- [ ] Set any API keys (`API_FOOTBALL_KEY`, `THE_ODDS_API_KEY`, etc.)
+- [ ] Set required API keys in Render secrets
 
 ### Database Verification
 - [ ] Run `python backend/scripts/create_drift_tables.py` to create monitoring tables
-- [ ] Verify connection: `python -c "from app.db.session import SessionLocal; db = SessionLocal(); print('Connected'); db.close()"`
-- [ ] Check existing data: Verify fixtures and predictions tables have data
+- [ ] Verify PostgreSQL connectivity
+- [ ] Check fixtures and predictions tables contain data
 
 ### Model Testing
-- [ ] Run `python backend/test_mathematical_models.py` to verify all models work
-- [ ] Run `python backend/test_prediction_gen.py` to test prediction generation
+- [ ] Run `python backend/test_mathematical_models.py`
+- [ ] Run `python backend/test_prediction_gen.py`
 
 ## Deployment Day
 
 ### Code Push
-- [ ] Commit all changes: `git add . && git commit -m "Production release with mathematical models"`
-- [ ] Push to GitHub: `git push origin main`
-- [ ] Verify Render deployment starts automatically
+- [ ] Push changes to `main`
+- [ ] Verify Render deploys automatically from `main`
+- [ ] Verify Hugging Face sync workflow publishes `huggingface_space/*` to `Zagzy/reeds-ml-worker`
 
 ### Post-Deployment Verification
-- [ ] Check Render logs for errors
-- [ ] Visit `https://reeds-phj1.onrender.com/api/public/predictions/today` to verify API works
-- [ ] Visit `https://reeds-phj1.onrender.com/api/public/fixtures/status` to check data
-- [ ] Verify frontend at `https://reeds-phi.vercel.app` loads correctly
+- [ ] Render health check uses `/ready`
+- [ ] Visit the public prediction endpoint
+- [ ] Visit the fixture status endpoint
+- [ ] Verify the Hugging Face Space starts and its auto-poll loop reports Render status
+- [ ] Use the Space's Wake Render button and confirm `/api/wake` returns HTTP 200
 
 ### Monitoring Setup
-- [ ] Set up Render alerts for crashes
-- [ ] Create daily reminder to check drift reports
-- [ ] Bookmark admin endpoints for monitoring
+- [ ] Set up Render crash/deploy alerts
+- [ ] Monitor `/health` and `/ready`
+- [ ] Monitor HF worker logs for poll/wake failures
 
-## Daily Audit Mode Tasks (Days 1-7)
+## Security
 
-### Each Day
-- [ ] Check prediction volume: `/api/public/predictions/today`
-- [ ] Review drift status: Check `drift_check_logs` table
-- [ ] Monitor system health: Check Render logs
-- [ ] Record daily metrics in spreadsheet:
-  - Predictions generated
-  - Hit rate (simulated)
-  - ROI (simulated)
-  - Any errors/warnings
+- Never store `ADMIN_API_KEY`, `CRON_SECRET`, database passwords, provider API keys, or GitHub tokens in tracked documentation.
+- After any credential is exposed in source control or chat, rotate it before production use.
 
-### After 7 Days
-- [ ] Analyze full week of audit data
-- [ ] Calculate overall hit rate and ROI
-- [ ] Check for drift warnings
-- [ ] Decide: Proceed to live or continue tuning
+## Go-Live Controls
 
-## Go-Live Checklist
-
-### Before Enabling Live Betting
-- [ ] Verify 7-day audit showed >55% hit rate on +EV bets
-- [ ] Verify positive simulated ROI
-- [ ] No critical drift warnings
-- [ ] Set `AUDIT_MODE=false`
-- [ ] Start with minimal stakes (0.25% bankroll)
-
-### First 24 Hours Live
-- [ ] Monitor every prediction
-- [ ] Verify bets are being placed correctly
-- [ ] Check bankroll manager constraints
-- [ ] Watch for any technical issues
-
-### After 3 Days Live
-- [ ] If stable, increase to 0.5% bankroll
-- [ ] Continue monitoring performance
-
-### After 7 Days Live
-- [ ] If performance good, enable full Kelly (25% fraction)
-- [ ] Implement ongoing monitoring routine
+- Keep model and prediction quality in audit mode until the agreed validation window is complete.
+- Do not treat model accuracy alone as evidence of profitability.
 
 ## Emergency Procedures
 
-### If System Crashes
-1. Check Render logs for error details
-2. Restart deployment if needed
-3. Verify database connection
-4. Check if scheduler is running
+### If Render Crashes
+1. Check Render logs and the latest deployment.
+2. Verify `/ready` and PostgreSQL connectivity.
+3. Confirm `ENABLE_SCHEDULER=true` only when the service is healthy.
+4. Redeploy `main` if the image/runtime is corrupted.
 
-### If Performance Danks
-1. Run drift analysis: Check `drift_check_logs`
-2. Review recent predictions for patterns
-3. Consider reducing stakes
-4. If hit rate <50% for 3 days, pause betting
-
-### If Drawdown >20%
-1. Stop all betting immediately
-2. Analyze root cause
-3. Retrain models if needed
-4. Restart with minimal stakes
+### If HF Worker Cannot Reach Render
+1. Check the Space's `RENDER_URL`.
+2. Check that `CRON_SECRET` exists on both sides and matches.
+3. Use the Space diagnostic output; it compares only non-secret hashes/lengths.
+4. Verify Render `/api/wake` logs show HTTP 200 rather than 401/5xx.
 
 ## Ongoing Maintenance
 
 ### Weekly
-- [ ] Review performance by market
-- [ ] Check for data drift
-- [ ] Analyze edge decay
-- [ ] Adjust parameters if needed
+- Review model performance and data drift.
+- Check provider coverage and failed sources.
+- Verify HF worker synchronization.
 
 ### Monthly
-- [ ] Full backtest on accumulated data
-- [ ] Review bankroll growth
-- [ ] Assess model accuracy
-- [ ] Plan improvements
-
-## Contact Information
-
-- **GitHub**: https://github.com/zagzy8776/REEDS
-- **Render Dashboard**: https://dashboard.render.com
-- **Vercel Dashboard**: https://vercel.com/dashboard
-
----
-
-**Remember**: The 7-day audit period is critical. Do not skip it. Better to miss a week of betting than to lose money on an unvalidated system.
+- Full backtest on accumulated data.
+- Review model registry and active versions.
+- Rotate credentials where operational policy requires it.
