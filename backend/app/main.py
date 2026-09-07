@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import secrets
 import threading
@@ -70,6 +71,18 @@ def health():
 @app.get("/api/health")
 def api_health():
     return health()
+
+
+@app.get("/api/admin/cron-diagnostics", dependencies=[__import__("fastapi").Depends(admin.require_admin)])
+def cron_diagnostics():
+    """Non-secret diagnostic for comparing the running cron credential."""
+    value = (settings.cron_secret or "").strip()
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else ""
+    return {
+        "configured": bool(value),
+        "length": len(value),
+        "sha256_prefix": digest,
+    }
 
 
 @app.get("/ready")
@@ -177,8 +190,10 @@ def wake(request: Request):
         if not supplied:
             auth = request.headers.get("authorization", "")
             if auth.lower().startswith("bearer "):
-                supplied = auth[7:].strip()
-        if not supplied or not secrets.compare_digest(supplied, settings.cron_secret):
+                supplied = auth[7:]
+        supplied = supplied.strip()
+        expected = (settings.cron_secret or "").strip()
+        if not supplied or not secrets.compare_digest(supplied, expected):
             raise HTTPException(status_code=401, detail="Invalid cron credential")
 
     from datetime import date
