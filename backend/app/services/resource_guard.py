@@ -64,7 +64,12 @@ def _looks_malformed(fixture: Fixture) -> bool:
 
 
 def _validate_fixture(fixture: Fixture) -> None:
-    provider_sport = _provider_sport(fixture.extra)
+    if _looks_malformed(fixture):
+        raise ValueError("malformed fixture payload: team fields contain invalid combined-event data")
+
+
+def _apply_provider_sport(fixture: Fixture, provider_sport: str | None) -> None:
+    """Apply authoritative provider sport after conflict checks have been made."""
     if provider_sport and provider_sport != str(fixture.sport or "").strip().lower():
         log.warning(
             "Correcting provider sport mismatch: provider=%s stored=%s fixture=%s",
@@ -73,8 +78,22 @@ def _validate_fixture(fixture: Fixture) -> None:
             fixture.id,
         )
         fixture.sport = provider_sport
-    if _looks_malformed(fixture):
-        raise ValueError("malformed fixture payload: team fields contain invalid combined-event data")
+
+
+def _provider_target_exists(db, fixture: Fixture, provider_sport: str | None) -> bool:
+    """Return whether changing sport would collide with an existing unique fixture."""
+    if not provider_sport or provider_sport == str(fixture.sport or "").strip().lower():
+        return False
+    query = db.query(Fixture.id).filter(
+        Fixture.sport == provider_sport,
+        Fixture.league == fixture.league,
+        Fixture.match_date == fixture.match_date,
+        Fixture.home_team == fixture.home_team,
+        Fixture.away_team == fixture.away_team,
+    )
+    if fixture.id is not None:
+        query = query.filter(Fixture.id != fixture.id)
+    return query.first() is not None
 
 
 def bounded_prediction_history(db, max_age_days: int | None = 180) -> pd.DataFrame:
@@ -119,6 +138,18 @@ def _wrap_upsert(module, name: str, original):
     @wraps(original)
     def guarded(db, fixture, *args, **kwargs):
         _validate_fixture(fixture)
+        provider_sport = _provider_sport(fixture.extra)
+        if _provider_target_exists(db, fixture, provider_sport):
+            log.info(
+                "Provider sport correction skipped because canonical fixture already exists: "
+                "provider=%s stored=%s fixture=%s",
+                provider_sport,
+                fixture.sport,
+                fixture.id,
+            )
+            _apply_provider_sport(fixture, provider_sport)
+            return original(db, fixture, *args, **kwargs)
+        _apply_provider_sport(fixture, provider_sport)
         return original(db, fixture, *args, **kwargs)
 
     guarded._reeds_resource_guard = True
@@ -127,8 +158,14 @@ def _wrap_upsert(module, name: str, original):
 
 
 def _repair_existing_provider_mismatches(db) -> int:
-    """Repair recent rows polluted by the old league-based inference bug."""
+    """Repair recent rows polluted by the old league-based inference bug.
+
+    A sport change is only applied when the destination unique key is free.
+    If the canonical row already exists, keep both rows untouched rather than
+    turning a data-cleanup pass into a transaction-breaking merge operation.
+    """
     repaired = 0
+    skipped_conflicts = 0
     rows = (
         db.query(Fixture)
         .filter(Fixture.source.in_(["allsportsapi", "thesportsdb"]))
@@ -138,12 +175,22 @@ def _repair_existing_provider_mismatches(db) -> int:
     )
     for fixture in rows:
         provider_sport = _provider_sport(fixture.extra)
-        if provider_sport and provider_sport != str(fixture.sport or "").strip().lower():
-            fixture.sport = provider_sport
-            repaired += 1
+        if not provider_sport or provider_sport == str(fixture.sport or "").strip().lower():
+            continue
+        if _provider_target_exists(db, fixture, provider_sport):
+            skipped_conflicts += 1
+            continue
+        fixture.sport = provider_sport
+        repaired += 1
     if repaired:
         db.commit()
-        log.warning("Repaired %s existing provider sport mismatches", repaired)
+    else:
+        db.rollback()
+    log.info(
+        "Provider sport repair completed: repaired=%s skipped_unique_conflicts=%s",
+        repaired,
+        skipped_conflicts,
+    )
     return repaired
 
 
