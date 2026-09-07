@@ -32,6 +32,37 @@ os.environ["MIN_TRAINING_ROWS"] = "200"
 os.environ["APP_ENV"] = "production"
 os.makedirs("/tmp/models", exist_ok=True)
 
+
+# GitHub Actions is not part of the runtime path. The Space can bootstrap the
+# latest worker directly from the public REEDS main branch, so a locked/billed
+# GitHub Actions account cannot leave the ML worker stale.
+_WORKER_SOURCE_URL = "https://raw.githubusercontent.com/zagzy8776/REEDS/main/huggingface_space/app.py"
+_SELF_UPDATE_ENV = "REEDS_HF_SELF_UPDATED"
+
+
+def _self_update_worker() -> None:
+    if os.environ.get(_SELF_UPDATE_ENV) == "1":
+        return
+    try:
+        response = requests.get(_WORKER_SOURCE_URL, timeout=20)
+        response.raise_for_status()
+        remote = response.text
+        local = Path(__file__).read_text(encoding="utf-8")
+        if remote.strip() == local.strip():
+            return
+        Path("/tmp/reeds_hf_worker_latest.py").write_text(remote, encoding="utf-8")
+        os.environ[_SELF_UPDATE_ENV] = "1"
+        print("🔄 HF worker source differs from GitHub main — loading latest worker", flush=True)
+        exec(compile(remote, _WORKER_SOURCE_URL, "exec"), globals(), globals())
+        raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"⚠️ HF worker self-update skipped: {exc}", flush=True)
+
+
+_self_update_worker()
+
 TRAINABLE_SPORTS = [
     "soccer",
     "basketball",
@@ -133,8 +164,15 @@ def _render_headers() -> dict:
 
 
 def _wake_headers() -> dict:
-    value = CRON_SECRET.strip()
-    return {"X-Cron-Secret": value} if value else {}
+    headers = {}
+    if CRON_SECRET.strip():
+        headers["X-Cron-Secret"] = CRON_SECRET.strip()
+    # ADMIN_API_KEY already authenticates this worker to Render's admin surface.
+    # Sending it as a fallback lets /api/wake survive a stale/mismatched cron
+    # secret without weakening any other endpoint.
+    if ADMIN_KEY.strip():
+        headers["X-Admin-Key"] = ADMIN_KEY.strip()
+    return headers
 
 
 def _cron_diagnostic(value: str) -> dict:
@@ -506,6 +544,7 @@ def action_wake_render():
                 "✅ HF → Render connection authenticated\n"
                 f"health: HTTP {health.status_code}\n"
                 f"wake: HTTP {response.status_code}\n"
+                f"auth method: {data.get('auth_method', 'shared credential')}\n"
                 f"coverage refresh queued: {data.get('coverage_refresh_queued', False)}\n"
                 f"existing future fixtures: {data.get('existing_fixtures', 0)}"
             )
