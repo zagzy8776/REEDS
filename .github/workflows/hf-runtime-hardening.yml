@@ -1,0 +1,144 @@
+name: HF runtime hardening
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/hf-runtime-hardening.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout latest main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch HF wake diagnostics
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import re
+
+          path = Path("huggingface_space/app.py")
+          text = path.read_text(encoding="utf-8")
+
+          if "import hashlib\n" not in text:
+              text = text.replace("import os\n", "import hashlib\nimport os\n", 1)
+
+          old = '''def _wake_headers() -> dict:
+    return {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}
+'''
+          new = '''def _wake_headers() -> dict:
+    value = CRON_SECRET.strip()
+    return {"X-Cron-Secret": value} if value else {}
+
+
+def _local_cron_diagnostic() -> dict:
+    value = CRON_SECRET.strip()
+    return {
+        "configured": bool(value),
+        "length": len(value),
+        "sha256_prefix": hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else "",
+    }
+'''
+          if old not in text:
+              raise SystemExit("wake header target not found")
+          text = text.replace(old, new, 1)
+
+          wake_pattern = re.compile(r'def action_wake_render\(\):\n.*?\n\ndef _poll_loop\(', re.S)
+          wake_replacement = '''def action_wake_render():
+    local = _local_cron_diagnostic()
+    _log(
+        "🔐 HF cron credential: "
+        f"configured={local['configured']} length={local['length']} sha256={local['sha256_prefix']}"
+    )
+    try:
+        health = requests.get(f"{RENDER_URL}/api/health", timeout=20)
+        diagnostic = None
+        if ADMIN_KEY:
+            try:
+                diag_response = requests.get(
+                    f"{RENDER_URL}/api/admin/cron-diagnostics",
+                    headers=_render_headers(),
+                    timeout=20,
+                )
+                if diag_response.ok:
+                    diagnostic = diag_response.json()
+                    _log(
+                        "🔎 Render cron credential: "
+                        f"configured={diagnostic.get('configured')} "
+                        f"length={diagnostic.get('length')} "
+                        f"sha256={diagnostic.get('sha256_prefix')}"
+                    )
+            except Exception as exc:
+                _log(f"⚠️ Render credential diagnostic unavailable: {exc}")
+
+        response = requests.get(f"{RENDER_URL}/api/wake", headers=_wake_headers(), timeout=60)
+        if response.ok:
+            data = response.json()
+            message = (
+                "✅ HF → Render connection authenticated\n"
+                f"health: HTTP {health.status_code}\n"
+                f"wake: HTTP {response.status_code}\n"
+                f"coverage refresh queued: {data.get('coverage_refresh_queued', False)}\n"
+                f"existing future fixtures: {data.get('existing_fixtures', 0)}"
+            )
+        else:
+            mismatch = "unknown"
+            if diagnostic:
+                mismatch = "MATCH" if (
+                    diagnostic.get("configured") == local.get("configured")
+                    and diagnostic.get("length") == local.get("length")
+                    and diagnostic.get("sha256_prefix") == local.get("sha256_prefix")
+                ) else "MISMATCH"
+            message = (
+                f"⚠️ HF reached Render but wake returned HTTP {response.status_code}\n"
+                f"cron credential comparison: {mismatch}\n"
+                f"HF configured={local.get('configured')} length={local.get('length')}\n"
+                f"Render configured={diagnostic.get('configured') if diagnostic else 'unknown'} "
+                f"length={diagnostic.get('length') if diagnostic else 'unknown'}"
+            )
+    except Exception as exc:
+        message = f"❌ HF → Render connection failed: {exc}"
+    _log(message)
+    return message, _get_log()
+
+
+def _poll_loop('''
+          text, count = wake_pattern.subn(wake_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("action_wake_render target not found")
+
+          # Keep the manual free-data UI from poisoning its shared transaction
+          # after one source fails.
+          text = text.replace(
+              '            except Exception as exc:\n                results.append(f"{name}: ERROR {exc}")\n                _log(f"  ❌ {results[-1]}")\n',
+              '            except Exception as exc:\n                try:\n                    db.rollback()\n                except Exception:\n                    pass\n                results.append(f"{name}: ERROR {exc}")\n                _log(f"  ❌ {results[-1]}")\n',
+              1,
+          )
+
+          path.write_text(text, encoding="utf-8")
+          print("HF runtime hardening source update complete")
+          PY
+
+      - name: Validate worker
+        run: python -m py_compile huggingface_space/app.py
+
+      - name: Commit patch and remove one-shot workflow
+        run: |
+          set -euo pipefail
+          git add huggingface_space/app.py .github/workflows/hf-runtime-hardening.yml
+          git rm .github/workflows/hf-runtime-hardening.yml
+          git commit -m "Add HF cron credential diagnostics"
+          git push origin HEAD:main
