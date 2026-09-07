@@ -1,6 +1,5 @@
 """REEDS Kaggle training worker.
 
-Run this notebook-side script when a fresh production model is needed.
 Kaggle provides compute; Render remains the production API and model registry.
 Secrets are read from Kaggle User Secrets and are never printed.
 """
@@ -33,7 +32,6 @@ def secret(name: str) -> str:
 DATABASE_URL = secret("DATABASE_URL")
 ADMIN_API_KEY = secret("ADMIN_API_KEY")
 RENDER_URL = secret("RENDER_URL").rstrip("/")
-
 if not DATABASE_URL or not ADMIN_API_KEY or not RENDER_URL:
     raise RuntimeError("Missing DATABASE_URL, ADMIN_API_KEY, or RENDER_URL Kaggle secret")
 
@@ -48,34 +46,47 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
-def post(path: str, *, timeout: int = 180, **kwargs):
-    """POST to Render with retry for transient gateway/restart failures."""
+def wait_for_render_ready(max_wait_seconds: int = 600) -> None:
+    """Never upload models into a Render instance while it is restarting."""
+    deadline = time.time() + max_wait_seconds
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            response = requests.get(f"{RENDER_URL}/ready", timeout=20)
+            if response.ok:
+                payload = response.json()
+                if payload.get("ready") is True:
+                    print(f"Render readiness confirmed on attempt {attempt}")
+                    return
+            print(f"Render not ready yet: HTTP {response.status_code}; waiting...")
+        except requests.RequestException as exc:
+            print(f"Render readiness request failed; waiting: {exc}")
+        time.sleep(min(5 + attempt, 20))
+    raise RuntimeError("Render did not become ready within 10 minutes")
+
+
+def post(path: str, *, timeout: int = 180, retries: int = 12, **kwargs):
+    """POST to Render with long retry tolerance for deploy/restart windows."""
     headers = {"X-Admin-Key": ADMIN_API_KEY}
     headers.update(kwargs.pop("headers", {}))
     last_response = None
-    for attempt in range(1, 5):
+    for attempt in range(1, retries + 1):
         try:
-            response = requests.post(
-                f"{RENDER_URL}{path}",
-                headers=headers,
-                timeout=timeout,
-                **kwargs,
-            )
+            response = requests.post(f"{RENDER_URL}{path}", headers=headers, timeout=timeout, **kwargs)
             last_response = response
             if response.ok:
                 return response
             if response.status_code not in {502, 503, 504}:
                 raise RuntimeError(f"{path} returned HTTP {response.status_code}: {response.text[:500]}")
-            print(f"{path}: transient HTTP {response.status_code}; retry {attempt}/4")
-        except (requests.RequestException, RuntimeError) as exc:
-            if isinstance(exc, RuntimeError):
-                raise
-            print(f"{path}: transient request error; retry {attempt}/4: {exc}")
-        if attempt < 4:
-            time.sleep(5 * attempt)
+            print(f"{path}: transient HTTP {response.status_code}; retry {attempt}/{retries}")
+        except requests.RequestException as exc:
+            print(f"{path}: transient request error; retry {attempt}/{retries}: {exc}")
+        if attempt < retries:
+            time.sleep(min(10 * attempt, 60))
     detail = last_response.text[:500] if last_response is not None else "no response"
     status = last_response.status_code if last_response is not None else "request-error"
-    raise RuntimeError(f"{path} failed after retries: HTTP {status}: {detail}")
+    raise RuntimeError(f"{path} failed after {retries} retries: HTTP {status}: {detail}")
 
 
 # 1. Fresh REEDS source.
@@ -85,13 +96,12 @@ if WORKDIR.exists():
 else:
     run(["git", "clone", "--depth=1", REPO_URL, str(WORKDIR)])
 
-# 2. Install the same ML stack used by REEDS.
 run([sys.executable, "-m", "pip", "install", "-q", "-r", "backend/requirements.txt"], WORKDIR)
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 train_file = WORKDIR / "backend" / "app" / "ml" / "train.py"
 train_text = train_file.read_text()
-train_text = train_text.replace("if len(X) >= 60000:", "if len(X) >= 20000:")
+train_text = train_text.replace("if len(X) >= 60000:", "if len(X) >= 20000")
 train_text = train_text.replace("n_trials=15", "n_trials=3")
 train_text = train_text.replace("n_trials=10", "n_trials=3")
 train_file.write_text(train_text)
@@ -102,15 +112,13 @@ sys.path.insert(0, str(WORKDIR / "backend"))
 from app.db.session import SessionLocal, init_db
 from app.db.models import Fixture
 from app.services.predictions import dataframe_from_db
-from app.ml.train import (
-    train_soccer_model,
-    train_basketball_model,
-    train_generic_sport_model,
-)
+from app.ml.train import train_soccer_model, train_basketball_model, train_generic_sport_model
 
 init_db()
 
-# 3. Refresh a broader completed API window before training.
+print("\n=== WAIT FOR RENDER ===")
+wait_for_render_ready()
+
 print("\n=== PROVIDER HISTORY SYNC ===")
 try:
     sync = post("/api/admin/ml/sync-provider-history", params={"days_back": 30}, timeout=600)
@@ -118,45 +126,31 @@ try:
 except Exception as exc:
     print(f"History sync warning: {exc}")
 
-# 4. Snapshot all completed Neon fixtures, excluding synthetic coverage seeds.
+# Snapshot completed Neon fixtures, excluding synthetic coverage seeds.
 db = SessionLocal()
 try:
     data = dataframe_from_db(db, max_age_days=None)
     source_rows = (
         db.query(Fixture.source, __import__("sqlalchemy").func.count(Fixture.id))
-        .filter(
-            Fixture.home_score.isnot(None),
-            Fixture.away_score.isnot(None),
-            Fixture.source != "coverage_seed",
-        )
+        .filter(Fixture.home_score.isnot(None), Fixture.away_score.isnot(None), Fixture.source != "coverage_seed")
         .group_by(Fixture.source)
         .order_by(__import__("sqlalchemy").func.count(Fixture.id).desc())
         .all()
     )
-    coverage_seed_ids = {
-        row[0]
-        for row in db.query(Fixture.id)
-        .filter(Fixture.source == "coverage_seed")
-        .all()
-    }
+    coverage_seed_ids = {row[0] for row in db.query(Fixture.id).filter(Fixture.source == "coverage_seed").all()}
 finally:
     db.close()
 
 print("\n=== TRAINING DATA PROVENANCE ===")
 for source, count in source_rows:
     print(f"{source or 'unknown'}: {int(count):,} completed rows")
-
-api_sources = {
-    "api_football", "sportmonks", "football_data_org", "apifootball_com",
-    "api_basketball", "allsportsapi", "thesportsdb", "bzzoiro", "openfoot",
-}
+api_sources = {"api_football", "sportmonks", "football_data_org", "apifootball_com", "api_basketball", "allsportsapi", "thesportsdb", "bzzoiro", "openfoot"}
 api_rows = sum(int(count) for source, count in source_rows if str(source or "").lower() in api_sources)
 print(f"API-sourced completed rows: {api_rows:,}")
 print("Training policy: hybrid historical DB + freshly synced API history; source provenance is reported before every run.")
 
 if data.empty:
     raise RuntimeError("Neon returned no training data")
-
 if "sport" not in data.columns:
     raise RuntimeError("Training data has no sport column")
 if "id" in data.columns and coverage_seed_ids:
@@ -166,7 +160,6 @@ data = data[data["home_score"].notna() & data["away_score"].notna()].copy()
 print(f"\nCompleted training rows: {len(data):,}")
 print(data.groupby("sport").size().sort_values(ascending=False).to_string())
 
-# 5. Train using the production REEDS trainers.
 trainers = {
     "soccer": train_soccer_model,
     "basketball": train_basketball_model,
@@ -198,28 +191,36 @@ for sport, trainer in trainers.items():
 if not results:
     raise RuntimeError("No sport model could be trained")
 
-# 6. Upload only the slim production bundles to Render.
 print("\n=== MODEL UPLOAD ===")
+wait_for_render_ready()
 for result in results:
     path = Path(result["path"])
     if not path.exists():
         print(f"SKIP upload: missing artifact {path}")
         continue
-    with path.open("rb") as handle:
-        response = post(
-            "/api/admin/upload-model",
-            timeout=300,
-            files={"model": (path.name, handle, "application/octet-stream")},
-            data={
-                "sport": result["sport"] if "sport" in result else path.name.split("_")[0],
-                "model_type": result["model_type"],
-                "accuracy": str(result["accuracy"]),
-                "sample_size": str(result["sample_size"]),
-            },
-        )
-    print(response.json())
+    for upload_attempt in range(1, 4):
+        try:
+            with path.open("rb") as handle:
+                response = post(
+                    "/api/admin/upload-model",
+                    timeout=300,
+                    retries=12,
+                    files={"model": (path.name, handle, "application/octet-stream")},
+                    data={
+                        "sport": result.get("sport") or path.name.split("_")[0],
+                        "model_type": result["model_type"],
+                        "accuracy": str(result["accuracy"]),
+                        "sample_size": str(result["sample_size"]),
+                    },
+                )
+            print(response.json())
+            break
+        except Exception as exc:
+            if upload_attempt == 3:
+                raise
+            print(f"Upload attempt {upload_attempt}/3 failed; waiting for Render before retry: {exc}")
+            wait_for_render_ready()
 
-# 7. Recompute production predictions and fill missing fair-value odds.
 print("\n=== PRODUCTION REFRESH ===")
 for endpoint in ("/api/admin/predict", "/api/admin/backfill-odds", "/api/admin/clear-train-flag"):
     try:
