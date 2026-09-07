@@ -54,11 +54,9 @@ def wait_for_render_ready(max_wait_seconds: int = 600) -> None:
         attempt += 1
         try:
             response = requests.get(f"{RENDER_URL}/ready", timeout=20)
-            if response.ok:
-                payload = response.json()
-                if payload.get("ready") is True:
-                    print(f"Render readiness confirmed on attempt {attempt}")
-                    return
+            if response.ok and response.json().get("ready") is True:
+                print(f"Render readiness confirmed on attempt {attempt}")
+                return
             print(f"Render not ready yet: HTTP {response.status_code}; waiting...")
         except requests.RequestException as exc:
             print(f"Render readiness request failed; waiting: {exc}")
@@ -66,13 +64,24 @@ def wait_for_render_ready(max_wait_seconds: int = 600) -> None:
     raise RuntimeError("Render did not become ready within 10 minutes")
 
 
+def _rewind_files(files) -> None:
+    if not isinstance(files, dict):
+        return
+    for value in files.values():
+        handle = value[1] if isinstance(value, tuple) and len(value) >= 2 else None
+        if hasattr(handle, "seek"):
+            handle.seek(0)
+
+
 def post(path: str, *, timeout: int = 180, retries: int = 12, **kwargs):
-    """POST to Render with long retry tolerance for deploy/restart windows."""
+    """POST to Render with restart tolerance and safe multipart retries."""
     headers = {"X-Admin-Key": ADMIN_API_KEY}
     headers.update(kwargs.pop("headers", {}))
+    files = kwargs.get("files")
     last_response = None
     for attempt in range(1, retries + 1):
         try:
+            _rewind_files(files)
             response = requests.post(f"{RENDER_URL}{path}", headers=headers, timeout=timeout, **kwargs)
             last_response = response
             if response.ok:
@@ -89,7 +98,6 @@ def post(path: str, *, timeout: int = 180, retries: int = 12, **kwargs):
     raise RuntimeError(f"{path} failed after {retries} retries: HTTP {status}: {detail}")
 
 
-# 1. Fresh REEDS source.
 if WORKDIR.exists():
     run(["git", "-C", str(WORKDIR), "fetch", "origin", "main"])
     run(["git", "-C", str(WORKDIR), "reset", "--hard", "origin/main"])
@@ -126,7 +134,6 @@ try:
 except Exception as exc:
     print(f"History sync warning: {exc}")
 
-# Snapshot completed Neon fixtures, excluding synthetic coverage seeds.
 db = SessionLocal()
 try:
     data = dataframe_from_db(db, max_age_days=None)
