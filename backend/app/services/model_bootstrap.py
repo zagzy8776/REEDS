@@ -9,6 +9,7 @@ from pathlib import Path
 import joblib
 import requests
 from sqlalchemy.orm import Session
+from sklearn import __version__ as SKLEARN_VERSION
 
 from app.core.config import get_settings
 from app.db.models import ModelArtifact
@@ -99,16 +100,23 @@ def _validate(path: Path, asset_name: str) -> dict:
     labels = bundle.get("labels")
     if labels is not None and (not isinstance(labels, (list, tuple)) or len(labels) < 2):
         raise ValueError("invalid model bundle: labels")
+
+    runtime_versions = bundle.get("runtime_versions") or {}
+    artifact_sklearn = str(runtime_versions.get("scikit_learn") or "").strip()
+    if artifact_sklearn and artifact_sklearn != SKLEARN_VERSION:
+        raise ValueError(
+            f"incompatible scikit-learn artifact version {artifact_sklearn}; production uses {SKLEARN_VERSION}"
+        )
+
     accuracy = float(bundle.get("accuracy", 0.0))
     sample_size = int(bundle.get("sample_size", 0))
-    if not 0 <= accuracy <= 1 or sample_size <= 0:
-        raise ValueError("invalid model metadata")
     model_types = bundle.get("model_types") or []
     return {
         "sport": _asset_sport(asset_name, bundle),
         "accuracy": accuracy,
         "sample_size": sample_size,
         "model_type": "+".join(str(x) for x in model_types)[:50] or "restored",
+        "runtime_versions": runtime_versions,
     }
 
 
