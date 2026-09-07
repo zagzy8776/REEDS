@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -109,7 +109,7 @@ class CommunityReaction(Base):
     username: Mapped[str] = mapped_column(String(80), index=True)
     reaction: Mapped[str] = mapped_column(String(30), default="like", index=True)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class CommunityPlay(Base):
@@ -132,7 +132,7 @@ class WinSlip(Base):
     title: Mapped[str] = mapped_column(String(160))
     proof_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     profit_units: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class OddsSnapshot(Base):
@@ -141,7 +141,7 @@ class OddsSnapshot(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     fixture_id: Mapped[int] = mapped_column(Integer, index=True)
     prediction_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    phase: Mapped[str] = mapped_column(String(30), index=True)  # initial, published, closing
+    phase: Mapped[str] = mapped_column(String(30), index=True)
     market: Mapped[str] = mapped_column(String(50), index=True)
     bookmaker: Mapped[str | None] = mapped_column(String(80), nullable=True)
     home_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -165,6 +165,22 @@ class ModelVersion(Base):
     sample_size: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     trained_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ModelArtifact(Base):
+    """Durable model bytes stored in Neon so Render restarts cannot erase models."""
+
+    __tablename__ = "model_artifacts"
+    __table_args__ = (UniqueConstraint("sport", "filename", name="uq_model_artifact"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    model_type: Mapped[str] = mapped_column(String(120), default="uploaded")
+    accuracy: Mapped[float] = mapped_column(Float, default=0.0)
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
 class UserSubscription(Base):
@@ -194,31 +210,19 @@ class BacktestRun(Base):
 
 
 class MatchEvent(Base):
-    """Live match events: goals, cards, substitutions, lineups.
-
-    Stored per-fixture so the SSE stream and notification engine can
-    read new rows since the last poll. Each event is idempotent on
-    (fixture_id, event_type, minute, team, player) to avoid duplicates
-    from repeated score-sync calls.
-    """
-
     __tablename__ = "match_events"
     __table_args__ = (
-        UniqueConstraint(
-            "fixture_id", "event_type", "minute", "team", "player",
-            name="uq_match_event",
-        ),
+        UniqueConstraint("fixture_id", "event_type", "minute", "team", "player", name="uq_match_event"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     fixture_id: Mapped[int] = mapped_column(Integer, index=True)
-    # goal | yellow_card | red_card | substitution | lineup | var | penalty_missed
     event_type: Mapped[str] = mapped_column(String(40), index=True)
     minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
     team: Mapped[str | None] = mapped_column(String(120), nullable=True)
     player: Mapped[str | None] = mapped_column(String(120), nullable=True)
     assist: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    detail: Mapped[str | None] = mapped_column(String(120), nullable=True)   # "Normal Goal", "Own Goal", "Yellow Card", etc.
+    detail: Mapped[str | None] = mapped_column(String(120), nullable=True)
     home_score_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     away_score_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -226,12 +230,8 @@ class MatchEvent(Base):
 
 
 class MatchLineup(Base):
-    """Starting XI + bench for each team in a fixture."""
-
     __tablename__ = "match_lineups"
-    __table_args__ = (
-        UniqueConstraint("fixture_id", "team", "player", name="uq_lineup_player"),
-    )
+    __table_args__ = (UniqueConstraint("fixture_id", "team", "player", name="uq_lineup_player"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     fixture_id: Mapped[int] = mapped_column(Integer, index=True)
@@ -245,8 +245,6 @@ class MatchLineup(Base):
 
 
 class PushSubscription(Base):
-    """Web Push / notification subscriptions from browser clients."""
-
     __tablename__ = "push_subscriptions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -254,36 +252,20 @@ class PushSubscription(Base):
     keys_p256dh: Mapped[str | None] = mapped_column(Text, nullable=True)
     keys_auth: Mapped[str | None] = mapped_column(Text, nullable=True)
     username: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
-    fixture_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)  # subscribed fixtures
+    fixture_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class InsiderSignal(Base):
-    """Insider market intelligence — injury news, sharp line movements, weather context.
-
-    Stored per-fixture so the ML feature pipeline can join them at prediction time.
-    signal_type values:
-      injury_home | injury_away   — key player out / doubtful
-      sharp_line_move             — significant closing-line movement toward a side
-      weather                     — wind / rain / extreme heat context
-      referee                     — referee card/foul rate tendencies
-      public_betting              — % of tickets vs money on each side
-    """
-
     __tablename__ = "insider_signals"
-    __table_args__ = (
-        UniqueConstraint("fixture_id", "signal_type", "source", name="uq_insider_signal"),
-    )
+    __table_args__ = (UniqueConstraint("fixture_id", "signal_type", "source", name="uq_insider_signal"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     fixture_id: Mapped[int] = mapped_column(Integer, index=True)
     sport: Mapped[str] = mapped_column(String(30), index=True)
     signal_type: Mapped[str] = mapped_column(String(40), index=True)
-    # Numeric value (e.g. line move = -0.5, wind_speed_mph = 22, card_rate = 3.4)
     value: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # Direction context: "home", "away", "neutral"
     direction: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # Human-readable description e.g. "Haaland doubtful - hamstring"
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source: Mapped[str] = mapped_column(String(80), default="manual")
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
