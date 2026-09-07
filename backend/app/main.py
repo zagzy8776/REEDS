@@ -4,7 +4,7 @@ import threading
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
+from sqlalchemy import and_, text, func
 
 from app.api import admin, public, live, fixtures, model_sync, ml_pipeline, ai_reads
 from app.core.config import get_settings
@@ -21,7 +21,7 @@ app.add_middleware(
     allow_origins=settings.allowed_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=["*"] ,
 )
 app.include_router(public.router, prefix="/api")
 app.include_router(admin.router, prefix="/api/admin")
@@ -49,18 +49,14 @@ def _bootstrap_models_background() -> None:
 @app.on_event("startup")
 def on_startup():
     init_db()
-
     try:
         from app.services.model_bootstrap import install_quality_training
         install_quality_training()
     except Exception:
         log.exception("Could not install quality training guard")
-
     threading.Thread(target=_bootstrap_models_background, name="model-bootstrap", daemon=True).start()
-
     from app.services.prediction_guard import install_prediction_guard
     install_prediction_guard()
-
     if settings.enable_scheduler:
         from app.services.scheduler import start_scheduler
         start_scheduler()
@@ -85,10 +81,7 @@ def readiness():
         return {"ok": True, "ready": True, "database": "ok"}
     except Exception as exc:
         log.exception("Readiness database check failed")
-        return JSONResponse(
-            status_code=503,
-            content={"ok": False, "ready": False, "database": "error", "detail": str(exc)[:200]},
-        )
+        return JSONResponse(status_code=503, content={"ok": False, "ready": False, "database": "error", "detail": str(exc)[:200]})
 
 
 @app.get("/api/readiness")
@@ -108,26 +101,38 @@ def api_feed_health():
 
 @app.get("/api/stats/backtest")
 def api_stats_backtest():
-    """Read-only model status endpoint used by the HF worker diagnostics."""
+    """Fast read-only model diagnostics: only latest model per sport + recent backtests."""
     from app.db.session import SessionLocal
     from app.db.models import ModelVersion, BacktestRun
 
     db = SessionLocal()
     try:
+        latest_times = (
+            db.query(
+                ModelVersion.sport.label("sport"),
+                func.max(ModelVersion.trained_at).label("trained_at"),
+            )
+            .group_by(ModelVersion.sport)
+            .subquery()
+        )
         model_rows = (
             db.query(ModelVersion)
-            .order_by(ModelVersion.sport.asc(), ModelVersion.trained_at.desc())
+            .join(
+                latest_times,
+                and_(
+                    ModelVersion.sport == latest_times.c.sport,
+                    ModelVersion.trained_at == latest_times.c.trained_at,
+                ),
+            )
+            .order_by(ModelVersion.sport.asc())
+            .limit(24)
             .all()
         )
-        latest_by_sport = {}
-        for model in model_rows:
-            if model.sport not in latest_by_sport:
-                latest_by_sport[model.sport] = model
 
         backtests = (
             db.query(BacktestRun)
             .order_by(BacktestRun.created_at.desc())
-            .limit(50)
+            .limit(20)
             .all()
         )
         return {
@@ -141,7 +146,7 @@ def api_stats_backtest():
                     "active": model.is_active,
                     "trained_at": model.trained_at,
                 }
-                for model in latest_by_sport.values()
+                for model in model_rows
             ],
             "backtests": [
                 {
@@ -177,7 +182,6 @@ def wake(request: Request):
             raise HTTPException(status_code=401, detail="Invalid cron credential")
 
     from datetime import date
-    from sqlalchemy import func
     from app.db.models import Fixture
     from app.db.session import SessionLocal
     from app.services.coverage_runner import start_coverage_refresh
@@ -191,12 +195,7 @@ def wake(request: Request):
             .count()
         )
         queued = start_coverage_refresh(reason="cron_wake")
-        return {
-            "ok": True,
-            "heartbeat": True,
-            "coverage_refresh_queued": queued,
-            "existing_fixtures": future_count,
-        }
+        return {"ok": True, "heartbeat": True, "coverage_refresh_queued": queued, "existing_fixtures": future_count}
     except Exception as exc:
         log.exception("Wake endpoint failed")
         return {"ok": False, "heartbeat": True, "error": str(exc)[:300]}
