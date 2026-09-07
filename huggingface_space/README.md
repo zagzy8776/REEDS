@@ -36,3 +36,5 @@ Open the Space UI and use the buttons to:
 The worker installs the same leakage-safe chronological ensemble used by production before training and uses the safe model synchronization endpoint for durable recovery.
 
 Deployment note: updates to this file intentionally trigger the HF Space sync workflow so the live worker receives the latest Render wake/auth integration.
+
+**Worker sync revision:** 2026-09-07 production integrity pass.
