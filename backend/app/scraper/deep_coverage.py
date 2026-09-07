@@ -221,15 +221,27 @@ def _ingest_bzzoiro_paged(db: Session, token: str, start_date: str, end_date: st
     return count
 
 
-def _ingest_openfoot(db: Session, dates: list[str]) -> int:
-    """Ingest the public OpenFoot daily feed for every requested date."""
+def _ingest_openfoot(db: Session, api_key: str | None, dates: list[str]) -> int:
+    """Use OpenFoot only when a real production credential is configured."""
+    if not api_key or not dates:
+        return 0
 
     count = 0
     session = requests.Session()
-    session.headers.update({"Accept": "application/json"})
+    session.headers.update({
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    })
     for target_date in dates:
         try:
-            response = session.get(f"{OPENFOOT_BASE}/matches", params={"date": target_date}, timeout=25)
+            response = session.get(
+                f"{OPENFOOT_BASE}/matches",
+                params={"date": target_date},
+                timeout=25,
+            )
+            if response.status_code in {401, 403}:
+                log.warning("OpenFoot unavailable: HTTP %s", response.status_code)
+                return count
             response.raise_for_status()
             payload = response.json()
         except requests.RequestException as exc:
@@ -254,8 +266,8 @@ def _ingest_openfoot(db: Session, dates: list[str]) -> int:
                 league=str(competition)[:80],
                 season=str(item.get("season") or kickoff.year)[:20],
                 match_date=kickoff.date(),
-                home_team=resolve_team_name(db, home_name, "soccer", "openfoot_range"),
-                away_team=resolve_team_name(db, away_name, "soccer", "openfoot_range"),
+                home_team=resolve_team_name(db, home_name, "soccer", "openfoot"),
+                away_team=resolve_team_name(db, away_name, "soccer", "openfoot"),
                 home_score=_score(item, "home"),
                 away_score=_score(item, "away"),
                 source="openfoot_range",
@@ -268,12 +280,7 @@ def _ingest_openfoot(db: Session, dates: list[str]) -> int:
 
 
 def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
-    """Fan out across every enabled provider, then let AI analysis begin.
-
-    The coverage floor decides when this expensive run is needed. Once started,
-    the fanout does not stop early because the board has already reached some
-    intermediate count; every provider in this function gets its turn.
-    """
+    """Fan out across every enabled provider, then let AI analysis begin."""
 
     settings = get_settings()
     purged = purge_showcase_rows(db)
@@ -311,10 +318,6 @@ def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
             report["sources"][name] = {"rows": 0, "status": "error", "error": str(exc)[:220]}
             log.exception("Fixture provider %s failed", name)
 
-    # Every enabled provider participates. These two primary feeds are also
-    # called by the normal scheduler. API-Football is restricted to today's
-    # fixture request here so a free 100/day plan is not exhausted by duplicate
-    # deep-coverage passes (the normal scheduler covers the remaining dates).
     if settings.api_football_key or settings.api_sports_key:
         run(
             "api_football_today",
@@ -378,10 +381,12 @@ def run_deep_coverage(db: Session, min_coverage: int = MIN_COVERAGE) -> dict:
     else:
         report["sources"]["thesportsdb"] = {"rows": 0, "status": "disabled"}
 
-    # Public feeds are independent contributors, not a last-resort switch.
     run("fixture_download", ingest_fixture_download_football, db, dates, FIXTURE_DOWNLOAD_MAX_COMPETITIONS)
     run("sporting_events", ingest_sporting_events_football, db, dates)
-    run("openfoot", _ingest_openfoot, db, dates)
+    if settings.openfoot_api_key:
+        run("openfoot", _ingest_openfoot, db, settings.openfoot_api_key, dates)
+    else:
+        report["sources"]["openfoot"] = {"rows": 0, "status": "not_configured"}
 
     report["normalized_after"] = normalize_fixture_sports(db)
     after = _future_count(db)
