@@ -6,9 +6,10 @@ import logging
 from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.core.config import get_settings
+from app.db.models import Fixture
 from app.db.session import SessionLocal
 from app.scraper.coverage_sources import ingest_bzzoiro_football, ingest_openfoot_football
 from app.scraper.loaders import (
@@ -73,60 +74,23 @@ def run_lightweight_refresh() -> dict:
                 },
             ))
         if settings.sportmonks_api_key:
-            providers.append((
-                "sportmonks", ingest_sportmonks_football_fixtures,
-                (db, settings.sportmonks_api_key, dates),
-                {},
-            ))
+            providers.append(("sportmonks", ingest_sportmonks_football_fixtures, (db, settings.sportmonks_api_key, dates), {}))
         if settings.football_data_api_key:
-            providers.append((
-                "football_data_org", ingest_football_data_org_matches,
-                (db, settings.football_data_api_key, dates),
-                {},
-            ))
+            providers.append(("football_data_org", ingest_football_data_org_matches, (db, settings.football_data_api_key, dates), {}))
         if settings.api_football_com_key:
-            providers.append((
-                "apifootball_com", ingest_apifootball_com_events,
-                (db, settings.api_football_com_key, dates),
-                {},
-            ))
+            providers.append(("apifootball_com", ingest_apifootball_com_events, (db, settings.api_football_com_key, dates), {}))
         if settings.bzzoiro_api_key:
-            providers.append((
-                "bzzoiro", ingest_bzzoiro_football,
-                (db, settings.bzzoiro_api_key, dates),
-                {},
-            ))
+            providers.append(("bzzoiro", ingest_bzzoiro_football, (db, settings.bzzoiro_api_key, dates), {}))
         if settings.openfoot_api_key:
-            providers.append((
-                "openfoot", ingest_openfoot_football,
-                (db, settings.openfoot_api_key, dates),
-                {},
-            ))
+            providers.append(("openfoot", ingest_openfoot_football, (db, settings.openfoot_api_key, dates), {}))
         if basketball_key:
-            providers.append((
-                "basketball", ingest_api_basketball_games,
-                (db, basketball_key, dates),
-                {},
-            ))
+            providers.append(("basketball", ingest_api_basketball_games, (db, basketball_key, dates), {}))
         if settings.allsportsapi_key:
-            providers.append((
-                "allsportsapi", ingest_allsportsapi_events,
-                (db, settings.allsportsapi_key, dates, settings.allsportsapi_sport_list),
-                {},
-            ))
+            providers.append(("allsportsapi", ingest_allsportsapi_events, (db, settings.allsportsapi_key, dates, settings.allsportsapi_sport_list), {}))
         if settings.thesportsdb_enabled:
-            providers.append((
-                "thesportsdb", ingest_thesportsdb_events,
-                (db, settings.thesportsdb_api_key, dates,
-                 settings.thesportsdb_sport_list, settings.thesportsdb_max_calls),
-                {},
-            ))
+            providers.append(("thesportsdb", ingest_thesportsdb_events, (db, settings.thesportsdb_api_key, dates, settings.thesportsdb_sport_list, settings.thesportsdb_max_calls), {}))
 
-        providers.append((
-            "web_score_sources", ingest_web_score_sources,
-            (db, dates, 9),
-            {},
-        ))
+        providers.append(("web_score_sources", ingest_web_score_sources, (db, dates, 9), {}))
 
         configured_names = {name for name, *_ in providers}
         for expected in (
@@ -141,10 +105,7 @@ def run_lightweight_refresh() -> dict:
                 result = fn(*args, **kwargs)
                 if isinstance(result, dict):
                     rows = result.get("rows", result.get("total", 0))
-                    report["ingested"][name] = {
-                        "rows": int(rows or 0),
-                        "sources": result.get("sources", {}),
-                    }
+                    report["ingested"][name] = {"rows": int(rows or 0), "sources": result.get("sources", {})}
                 else:
                     report["ingested"][name] = int(result or 0)
             except Exception as exc:
@@ -237,22 +198,12 @@ def start_scheduler() -> BackgroundScheduler:
         log.info(
             "Refresh: providers=%s coverage=%s predictions=%d learning=%s purged_showcase=%d skipped=%d",
             report.get("ingested", {}),
-            {
-                "before": coverage.get("before"),
-                "after": coverage.get("after"),
-                "target": coverage.get("target"),
-            },
-            report.get("predictions_generated", 0),
-            report.get("learning"),
-            report.get("purged_showcase", 0),
-            len(report.get("skipped", [])),
+            {"before": coverage.get("before"), "after": coverage.get("after"), "target": coverage.get("target")},
+            report.get("predictions_generated", 0), report.get("learning"),
+            report.get("purged_showcase", 0), len(report.get("skipped", [])),
         )
 
-    scheduler.add_job(
-        refresh_job, "interval", hours=2,
-        id="lightweight_refresh", replace_existing=True,
-        max_instances=1, coalesce=True,
-    )
+    scheduler.add_job(refresh_job, "interval", hours=2, id="lightweight_refresh", replace_existing=True, max_instances=1, coalesce=True)
 
     def public_coverage_job():
         db = SessionLocal()
@@ -261,10 +212,7 @@ def start_scheduler() -> BackgroundScheduler:
             fixture_download = ingest_fixture_download_football(db, dates, max_competitions=32)
             sporting_events = ingest_sporting_events_football(db, dates)
             normalize_fixture_sports(db)
-            log.info(
-                "Public football coverage: fixture_download=%d sporting_events=%d",
-                fixture_download, sporting_events,
-            )
+            log.info("Public football coverage: fixture_download=%d sporting_events=%d", fixture_download, sporting_events)
         except Exception:
             db.rollback()
             log.exception("Public football coverage failed")
@@ -272,24 +220,14 @@ def start_scheduler() -> BackgroundScheduler:
             db.close()
             gc.collect()
 
-    scheduler.add_job(
-        public_coverage_job, "interval", hours=6,
-        id="public_football_coverage", replace_existing=True,
-        max_instances=1, coalesce=True,
-    )
+    scheduler.add_job(public_coverage_job, "interval", hours=6, id="public_football_coverage", replace_existing=True, max_instances=1, coalesce=True)
 
     def score_sync_job():
         db = SessionLocal()
         try:
-            result = sync_live_scores(
-                db,
-                settings.api_football_key or settings.api_sports_key,
-                settings.api_basketball_key or settings.api_sports_key,
-            )
+            result = sync_live_scores(db, settings.api_football_key or settings.api_sports_key, settings.api_basketball_key or settings.api_sports_key)
             if settings.the_odds_api_key:
-                odds = refresh_odds_from_the_odds_api(
-                    db, settings.the_odds_api_key, settings.odds_api_sport_keys
-                )
+                odds = refresh_odds_from_the_odds_api(db, settings.the_odds_api_key, settings.odds_api_sport_keys)
                 result["odds_refreshed"] = odds.get("updated", 0)
             log.info("Score sync: %s", result)
         except Exception:
@@ -299,11 +237,7 @@ def start_scheduler() -> BackgroundScheduler:
             db.close()
             gc.collect()
 
-    scheduler.add_job(
-        score_sync_job, "interval", minutes=15,
-        id="score_sync", replace_existing=True,
-        max_instances=1, coalesce=True,
-    )
+    scheduler.add_job(score_sync_job, "interval", minutes=15, id="score_sync", replace_existing=True, max_instances=1, coalesce=True)
 
     def live_event_job():
         from app.services.live_events import sync_live_events
@@ -319,30 +253,21 @@ def start_scheduler() -> BackgroundScheduler:
             db.close()
             gc.collect()
 
-    scheduler.add_job(
-        live_event_job, "interval", seconds=60,
-        id="live_events", replace_existing=True,
-        max_instances=1, coalesce=True,
-    )
+    scheduler.add_job(live_event_job, "interval", seconds=60, id="live_events", replace_existing=True, max_instances=1, coalesce=True)
 
     def live_prediction_refresh_job():
         """Re-read the board during active play without waiting for the 2h ingestion cycle."""
         db = SessionLocal()
         try:
-            active_or_upcoming = db.query(__import__("app.db.models", fromlist=["Fixture"]).Fixture.id).filter(
-                __import__("sqlalchemy", fromlist=["func"]).func.date(__import__("app.db.models", fromlist=["Fixture"]).Fixture.match_date) >= date.today()
-            ).first()
-            if not active_or_upcoming:
+            has_fixtures = db.query(Fixture.id).filter(func.date(Fixture.match_date) >= date.today()).first()
+            if not has_fixtures:
                 return
             generated = generate_today_predictions(db)
             context = build_learning_context(db)
             log.info(
                 "Prediction heartbeat: generated=%d guard=%s daily_losses=%s recent_accuracy=%s streak=%s",
-                generated,
-                context.get("guard"),
-                context.get("daily_losses"),
-                context.get("recent_accuracy"),
-                context.get("current_loss_streak"),
+                generated, context.get("guard"), context.get("daily_losses"),
+                context.get("recent_accuracy"), context.get("current_loss_streak"),
             )
         except Exception:
             db.rollback()
@@ -351,11 +276,7 @@ def start_scheduler() -> BackgroundScheduler:
             db.close()
             gc.collect()
 
-    scheduler.add_job(
-        live_prediction_refresh_job, "interval", minutes=10,
-        id="live_prediction_refresh", replace_existing=True,
-        max_instances=1, coalesce=True,
-    )
+    scheduler.add_job(live_prediction_refresh_job, "interval", minutes=10, id="live_prediction_refresh", replace_existing=True, max_instances=1, coalesce=True)
 
     def learning_watch_job():
         db = SessionLocal()
@@ -376,11 +297,7 @@ def start_scheduler() -> BackgroundScheduler:
             db.close()
             gc.collect()
 
-    scheduler.add_job(
-        learning_watch_job, "interval", minutes=5,
-        id="learning_watch", replace_existing=True,
-        max_instances=1, coalesce=True,
-    )
+    scheduler.add_job(learning_watch_job, "interval", minutes=5, id="learning_watch", replace_existing=True, max_instances=1, coalesce=True)
 
     def value_scan_job():
         from app.services.value_bets import run_value_scan
@@ -388,11 +305,7 @@ def start_scheduler() -> BackgroundScheduler:
         try:
             result = run_value_scan(db, sports=["soccer", "basketball", "tennis"])
             if result.get("value_bets_found"):
-                log.info(
-                    "Value scan: %d bets from %d fixtures",
-                    result.get("value_bets_found", 0),
-                    result.get("scanned", 0),
-                )
+                log.info("Value scan: %d bets from %d fixtures", result.get("value_bets_found", 0), result.get("scanned", 0))
         except Exception:
             db.rollback()
             log.exception("Value scan failed")
@@ -400,19 +313,9 @@ def start_scheduler() -> BackgroundScheduler:
             db.close()
             gc.collect()
 
-    scheduler.add_job(
-        value_scan_job, "interval", minutes=30,
-        id="value_scan", replace_existing=True,
-        max_instances=1, coalesce=True,
-    )
-
-    scheduler.add_job(
-        refresh_job, "date",
-        run_date=datetime.utcnow() + timedelta(seconds=30),
-        id="startup_refresh", replace_existing=True,
-        max_instances=1,
-    )
+    scheduler.add_job(value_scan_job, "interval", minutes=30, id="value_scan", replace_existing=True, max_instances=1, coalesce=True)
+    scheduler.add_job(refresh_job, "date", run_date=datetime.utcnow() + timedelta(seconds=30), id="startup_refresh", replace_existing=True, max_instances=1)
 
     scheduler.start()
-    log.info("Scheduler started — real multi-source fixture coverage, live prediction refresh, and closed-loop learning enabled")
+    log.info("Scheduler started — multi-source coverage, live prediction refresh, and closed-loop learning enabled")
     return scheduler
