@@ -11,6 +11,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+import sklearn
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import TimeSeriesSplit
@@ -126,6 +127,7 @@ def _save_bundle(result, features, labels, sport, sample_size, calibrator_path=N
     stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     path = model_dir / f"{sport}_oof_ensemble_{stamp}.joblib"
     bundle = {
+        "bundle_version": 2,
         "sport": sport,
         "models": result["models"],
         "meta_learner": result["meta_learner"],
@@ -138,6 +140,12 @@ def _save_bundle(result, features, labels, sport, sample_size, calibrator_path=N
         "calibrator_path": calibrator_path,
         "labels": labels,
         "training_method": "expanding_window_oof_meta_no_holdout_leakage",
+        "runtime_versions": {
+            "python": f"{__import__('sys').version_info.major}.{__import__('sys').version_info.minor}.{__import__('sys').version_info.micro}",
+            "scikit_learn": sklearn.__version__,
+            "numpy": np.__version__,
+            "joblib": joblib.__version__,
+        },
     }
     joblib.dump(bundle, path, compress=3)
     return {
@@ -150,6 +158,7 @@ def _save_bundle(result, features, labels, sport, sample_size, calibrator_path=N
         "split": "chronological_70_30_oof_meta",
         "models_trained": result["model_types"],
         "training_method": "expanding_window_oof_meta_no_holdout_leakage",
+        "runtime_versions": bundle["runtime_versions"],
     }
 
 
