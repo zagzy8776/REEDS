@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import shutil
 import tempfile
@@ -35,37 +36,43 @@ def _safe_filename(name: str) -> str:
 
 def _validate_bundle(path: Path) -> dict:
     bundle = joblib.load(path)
-    if not isinstance(bundle, dict):
-        raise ValueError("model bundle must be a dictionary")
-    models = bundle.get("models")
-    sport = str(bundle.get("sport") or "").strip().lower()
-    accuracy = float(bundle.get("accuracy", 0.0))
-    sample_size = int(bundle.get("sample_size", 0))
-    model_types = bundle.get("model_types") or []
-    if not isinstance(models, dict) or not models:
-        raise ValueError("model bundle contains no models")
-    if not sport:
-        lowered = path.name.lower()
-        sport = "basketball" if "basketball" in lowered else "soccer"
+    try:
+        if not isinstance(bundle, dict):
+            raise ValueError("model bundle must be a dictionary")
+        models = bundle.get("models")
+        sport = str(bundle.get("sport") or "").strip().lower()
+        accuracy = float(bundle.get("accuracy", 0.0))
+        sample_size = int(bundle.get("sample_size", 0))
+        model_types = bundle.get("model_types") or []
+        if not isinstance(models, dict) or not models:
+            raise ValueError("model bundle contains no models")
+        if not sport:
+            lowered = path.name.lower()
+            sport = "basketball" if "basketball" in lowered else "soccer"
 
-    runtime_versions = bundle.get("runtime_versions") or {}
-    artifact_sklearn = str(runtime_versions.get("scikit_learn") or "").strip()
-    if artifact_sklearn and artifact_sklearn != SKLEARN_VERSION:
-        raise ValueError(
-            f"incompatible scikit-learn artifact version {artifact_sklearn}; production uses {SKLEARN_VERSION}"
-        )
+        runtime_versions = bundle.get("runtime_versions") or {}
+        artifact_sklearn = str(runtime_versions.get("scikit_learn") or "").strip()
+        if artifact_sklearn and artifact_sklearn != SKLEARN_VERSION:
+            raise ValueError(
+                f"incompatible scikit-learn artifact version {artifact_sklearn}; production uses {SKLEARN_VERSION}"
+            )
 
-    if not 0.0 <= accuracy <= 1.0:
-        raise ValueError(f"invalid accuracy: {accuracy}")
-    if sample_size <= 0:
-        raise ValueError(f"invalid sample_size: {sample_size}")
-    return {
-        "sport": sport,
-        "accuracy": accuracy,
-        "sample_size": sample_size,
-        "model_type": "+".join(str(x) for x in model_types)[:50] or "uploaded",
-        "runtime_versions": runtime_versions,
-    }
+        if not 0.0 <= accuracy <= 1.0:
+            raise ValueError(f"invalid accuracy: {accuracy}")
+        if sample_size <= 0:
+            raise ValueError(f"invalid sample_size: {sample_size}")
+        return {
+            "sport": sport,
+            "accuracy": accuracy,
+            "sample_size": sample_size,
+            "model_type": "+".join(str(x) for x in model_types)[:50] or "uploaded",
+            "runtime_versions": runtime_versions,
+        }
+    finally:
+        # The bundle can contain several fitted estimators. Release them before
+        # reading the artifact bytes into memory for the durable DB write.
+        del bundle
+        gc.collect()
 
 
 @router.post("/api/admin/upload-model", dependencies=[Depends(_admin_key)])
@@ -81,6 +88,10 @@ async def upload_model(
 
     Render's filesystem is ephemeral, so the database copy is the durable source
     of truth. The local file is still written for immediate inference.
+
+    The upload is streamed to disk before validation. This deliberately avoids
+    holding the raw upload bytes and all deserialized estimators in RAM at the
+    same time, which is important on Render's 512 MiB free instance.
     """
     settings = get_settings()
     model_dir = Path(settings.model_dir)
@@ -90,21 +101,40 @@ async def upload_model(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    payload = await model.read()
-    if not payload or len(payload) > 100 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Invalid or oversized model artifact")
-
     fd, temp_name = tempfile.mkstemp(prefix="reeds-upload-", suffix=".joblib", dir=str(model_dir))
     os.close(fd)
     temp_path = Path(temp_name)
+    payload = None
     try:
-        temp_path.write_bytes(payload)
+        # Stream instead of UploadFile.read(): never keep the entire incoming
+        # multipart body in memory while the artifact is being received.
+        total = 0
+        max_bytes = 100 * 1024 * 1024
+        with temp_path.open("wb") as handle:
+            while True:
+                chunk = await model.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(status_code=400, detail="Invalid or oversized model artifact")
+                handle.write(chunk)
+        await model.close()
+
+        if total <= 0:
+            raise HTTPException(status_code=400, detail="Invalid or empty model artifact")
+
+        # Validate while the only large representation is the on-disk file.
         metadata = _validate_bundle(temp_path)
+
         final_sport = str(sport or metadata["sport"]).strip().lower()
         final_type = str(model_type or metadata["model_type"])[:120]
         final_accuracy = float(accuracy or metadata["accuracy"])
         final_sample_size = int(sample_size or metadata["sample_size"])
 
+        # Only now materialize the bytes required by Neon. The deserialized
+        # bundle has already been released by _validate_bundle().
+        payload = temp_path.read_bytes()
         destination = model_dir / filename
         os.replace(temp_path, destination)
 
@@ -145,11 +175,15 @@ async def upload_model(
             "runtime_versions": metadata.get("runtime_versions") or {},
         }
     except HTTPException:
+        db.rollback()
         raise
     except Exception as exc:
         db.rollback()
-        temp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"Model upload failed: {str(exc)[:300]}") from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+        payload = None
+        gc.collect()
 
 
 @router.post("/api/admin/sync-models-safe", dependencies=[Depends(_admin_key)])
