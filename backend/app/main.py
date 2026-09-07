@@ -44,6 +44,11 @@ def _bootstrap_models_background() -> None:
 def on_startup():
     init_db()
     try:
+        from app.services.resource_guard import install_resource_guards
+        install_resource_guards()
+    except Exception:
+        log.exception("Could not install resource guards")
+    try:
         from app.services.runtime_hardening import install_provider_runtime_hardening
         install_provider_runtime_hardening()
     except Exception:
