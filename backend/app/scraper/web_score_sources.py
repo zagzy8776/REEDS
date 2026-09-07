@@ -15,6 +15,7 @@ from urllib.parse import urljoin
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture
@@ -89,6 +90,18 @@ def _is_navigation(value: str) -> bool:
     )
 
 
+def _valid_team_name(value: str) -> bool:
+    normalized = _normalise_space(value)
+    low = normalized.lower()
+    if len(normalized) < 2 or len(normalized) > 80:
+        return False
+    if any(token in low for token in ("http://", "https://", ".com/", "copyright", "google play", "app store")):
+        return False
+    if low.startswith(("score.com/", "www.", "android application")):
+        return False
+    return True
+
+
 def _extract_dom_pairs(html: str, today: date, wanted: set[date]) -> list[tuple[date, str, str]]:
     soup = BeautifulSoup(html, "html.parser")
     participants = soup.find_all(
@@ -102,7 +115,7 @@ def _extract_dom_pairs(html: str, today: date, wanted: set[date]) -> list[tuple[
         if "home" not in classes and "away" not in classes:
             continue
         name = _normalise_space(element.get_text(" ", strip=True))
-        if _is_navigation(name):
+        if _is_navigation(name) or not _valid_team_name(name):
             continue
         parent = element; event_date = None
         for _ in range(6):
@@ -123,7 +136,7 @@ def _extract_dom_pairs(html: str, today: date, wanted: set[date]) -> list[tuple[
                 cclasses = " ".join(candidate.get("class", [])).lower()
                 if (("away" in classes and "home" in cclasses) or ("home" in classes and "away" in cclasses)):
                     sibling = _normalise_space(candidate.get_text(" ", strip=True)); break
-        if sibling and not _is_navigation(sibling):
+        if sibling and not _is_navigation(sibling) and _valid_team_name(sibling):
             home, away = (name, sibling) if "home" in classes else (sibling, name)
             found.append((event_date, home[:80], away[:80]))
     return found
@@ -147,6 +160,7 @@ def _extract_text_pairs(lines: list[str], today: date, wanted: set[date]) -> lis
         for match in _PAIR_RE.finditer(sample):
             home = _normalise_space(match.group("home")); away = _normalise_space(match.group("away"))
             if _is_navigation(home) or _is_navigation(away): continue
+            if not _valid_team_name(home) or not _valid_team_name(away): continue
             if home.lower() in {"football", "basketball", "tennis", "hockey", "baseball", "handball", "volleyball", "cricket"}: continue
             found.append((current_date, home[:80], away[:80]))
     return found
@@ -191,18 +205,29 @@ def _fetch_source(source: str, sport: str, wanted_dates: list[date]) -> tuple[li
 def _persist_pairs(db: Session, pairs: list[tuple[date, str, str]], source: str, sport: str) -> int:
     persisted = 0
     for match_date, home, away in pairs:
+        if not _valid_team_name(home) or not _valid_team_name(away):
+            continue
         try:
             fx = Fixture(
                 sport=sport,
-                league=f"{source.title()} {sport.replace('_', ' ').title()}",
+                # Web score pages do not reliably expose competition metadata
+                # in the extracted participant block. Never invent a league.
+                league="Web fixtures",
                 season=str(match_date.year),
                 match_date=match_date,
                 home_team=resolve_team_name(db, home, sport, source),
                 away_team=resolve_team_name(db, away, sport, source),
                 source=source,
-                extra={"web_source": source, "web_sport": sport},
+                extra={"web_source": source, "web_sport": sport, "competition_status": "unresolved"},
             )
-            upsert_fixture(db, fx); persisted += 1
+            with db.begin_nested():
+                upsert_fixture(db, fx)
+                db.flush()
+            persisted += 1
+        except IntegrityError:
+            # A concurrent provider may have inserted the same natural key.
+            # The nested transaction keeps the rest of this source alive.
+            continue
         except Exception:
             log.exception("Web fixture persistence failed: %s %s", source, sport)
     return persisted
@@ -225,8 +250,6 @@ def ingest_web_score_sources(db: Session, target_dates: list[str], max_sports: i
             reports[f"{source}_{sport}"] = {"rows": persisted, "status": error or "ok", "url": urljoin(SOURCES[source], SPORT_PATHS[sport])}
             total += persisted
 
-    # SportyBet is the project's existing broad upcoming-fixture reader. Seven
-    # sports are sampled once per refresh to avoid excessive provider traffic.
     try:
         from app.scraper.sportybet import fetch_all_sports
         sporty_sports = ["soccer", "basketball", "tennis", "american_football", "hockey", "baseball", "cricket"]
@@ -237,7 +260,7 @@ def ingest_web_score_sources(db: Session, target_dates: list[str], max_sports: i
                 kickoff = pd.to_datetime(item.get("match_date"), errors="coerce", utc=True)
                 sport = str(item.get("sport") or "soccer").strip().lower()
                 home = str(item.get("home_team") or "").strip(); away = str(item.get("away_team") or "").strip()
-                if pd.isna(kickoff) or not home or not away: continue
+                if pd.isna(kickoff) or not home or not away or not _valid_team_name(home) or not _valid_team_name(away): continue
                 fx = Fixture(
                     sport=sport,
                     league=str(item.get("league") or "Unknown")[:80],
@@ -248,7 +271,13 @@ def ingest_web_score_sources(db: Session, target_dates: list[str], max_sports: i
                     source="sportybet",
                     extra={"sportybet_match_id": item.get("sportybet_match_id"), "provider": "sportybet"},
                 )
-                upsert_fixture(db, fx); sporty_persisted += 1
+                try:
+                    with db.begin_nested():
+                        upsert_fixture(db, fx)
+                        db.flush()
+                    sporty_persisted += 1
+                except IntegrityError:
+                    continue
             except Exception:
                 log.exception("SportyBet fixture persistence failed")
         reports["sportybet"] = {"rows": sporty_persisted, "status": "ok"}
