@@ -1,8 +1,7 @@
 """Additional football coverage sources with bounded request volume.
 
-These providers are optional. OpenFoot also supports public/no-key requests for
-basic fixture access, which gives REEDS a last-resort recovery path when keyed
-feeds are temporarily unavailable.
+These providers are optional. OpenFoot requires an API key for production requests.
+Provider failures are isolated so one upstream outage cannot abort the whole refresh.
 """
 
 from datetime import date
@@ -111,24 +110,35 @@ def ingest_bzzoiro_football(db: Session, api_key: str, target_dates: list[str]) 
 
 
 def ingest_openfoot_football(db: Session, api_key: str | None, target_dates: list[str]) -> int:
-    """Ingest OpenFoot fixture/result coverage, including public/no-key access."""
+    """Ingest OpenFoot fixtures/results when a real API key is configured."""
 
-    if not target_dates:
+    if not api_key or not target_dates:
         return 0
+
     count = 0
     session = requests.Session()
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
 
     for target_date in target_dates:
-        response = session.get(
-            f"{OPENFOOT_BASE}/matches",
-            params={"date": target_date},
-            headers=headers,
-            timeout=20,
-        )
-        response.raise_for_status()
+        try:
+            response = session.get(
+                f"{OPENFOOT_BASE}/matches",
+                params={"date": target_date},
+                headers=headers,
+                timeout=20,
+            )
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status in {401, 403}:
+                # Bad/expired credentials must not poison the scheduler.
+                # The scheduler records the provider as unavailable.
+                return count
+            raise
+
         payload = response.json()
         rows = payload.get("data", []) if isinstance(payload, dict) else []
         for item in rows:
