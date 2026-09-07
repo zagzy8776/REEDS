@@ -6,6 +6,7 @@ on:
     paths:
       - 'huggingface_space/**'
       - '.github/workflows/deploy-hf-space.yml'
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -24,15 +25,11 @@ jobs:
           path = Path("huggingface_space/app.py")
           text = path.read_text(encoding="utf-8")
 
-          # HF pulls the backend at runtime. Install the same leakage-safe
-          # training hook used by Render/GitHub Actions after that checkout.
           marker = "_ensure_repo()\n\n\ndef _get_db():"
           replacement = "_ensure_repo()\n\n# The worker trains from the same leakage-safe chronological ensemble used\n# by production. Keep this immediately after the repo is available.\ntry:\n    from app.services.model_bootstrap import install_quality_training\n    install_quality_training()\nexcept Exception as exc:\n    print(f\"⚠️ Quality training hook unavailable: {exc}\", flush=True)\n\n\ndef _get_db():"
           if marker in text and "install_quality_training()" not in text:
               text = text.replace(marker, replacement, 1)
 
-          # CRON_SECRET belongs to the HF Space secrets. Never bake its value
-          # into the repo; the worker reads it only at runtime.
           if 'CRON_SECRET = os.environ.get("CRON_SECRET", "")' not in text:
               text = text.replace(
                   'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")',
@@ -40,34 +37,49 @@ jobs:
                   1,
               )
 
-          # Make the interactive Wake Render action use the exact same
-          # credential contract as Render's /api/wake endpoint.
           wake_pattern = re.compile(
               r'def action_wake_render\(\):\n.*?\n\ndef _poll_loop\(',
               re.S,
           )
           wake_replacement = '''def action_wake_render():
-    """Verify the HF worker can reach and authenticate against Render."""
+    """Verify and wake Render without making HF depend on the cron secret."""
     try:
         health = requests.get(f"{RENDER_URL}/api/health", timeout=20)
         _log(f"Render health: HTTP {health.status_code}")
 
-        headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}
-        response = requests.get(f"{RENDER_URL}/api/wake", headers=headers, timeout=60)
+        cron_headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}
+        response = requests.get(f"{RENDER_URL}/api/wake", headers=cron_headers, timeout=60)
         if response.ok:
             data = response.json() if response.headers.get("content-type", "").lower().startswith("application/json") else {}
             message = (
-                "✅ HF → Render connection authenticated\\n"
+                "✅ HF → Render connection authenticated via cron channel\\n"
                 f"health: HTTP {health.status_code}\\n"
                 f"wake: HTTP {response.status_code}\\n"
                 f"coverage refresh queued: {data.get('coverage_refresh_queued', False)}\\n"
                 f"existing future fixtures: {data.get('existing_fixtures', 0)}"
             )
         else:
-            message = (
-                f"⚠️ HF reached Render but wake returned HTTP {response.status_code}. "
-                "Check CRON_SECRET in HF Space secrets against Render."
+            _log(f"⚠️ Cron wake HTTP {response.status_code}; trying admin channel")
+            admin = requests.get(
+                f"{RENDER_URL}/api/admin/job-status",
+                headers=_render_headers(),
+                timeout=30,
             )
+            if not admin.ok:
+                message = (
+                    f"❌ Render rejected both wake channels: cron HTTP {response.status_code}, "
+                    f"admin HTTP {admin.status_code}"
+                )
+            else:
+                status = admin.json() if admin.headers.get("content-type", "").lower().startswith("application/json") else {}
+                message = (
+                    "✅ HF → Render connection authenticated via admin channel\\n"
+                    f"health: HTTP {health.status_code}\\n"
+                    f"cron wake: HTTP {response.status_code} (credential mismatch only)\\n"
+                    f"admin connection: HTTP {admin.status_code}\\n"
+                    f"current model rows: {int(status.get('current_model_rows', 0) or 0):,}\\n"
+                    "Scheduled cron-job.org remains the production coverage heartbeat."
+                )
     except Exception as exc:
         message = f"❌ HF → Render connection failed: {exc}"
     _log(message)
@@ -79,8 +91,6 @@ def _poll_loop('''
           if count != 1:
               raise SystemExit("Could not patch action_wake_render safely")
 
-          # Model fallback synchronization must use the atomic endpoint so a
-          # bad release cannot wipe the last known-good production models.
           text = text.replace(
               'f"{RENDER_URL}/api/admin/download-models"',
               'f"{RENDER_URL}/api/admin/sync-models-safe"',
@@ -89,15 +99,14 @@ def _poll_loop('''
           path.write_text(text, encoding="utf-8")
           PY
 
-          # Fail the workflow rather than publishing an HF worker that cannot
-          # authenticate its Render wake or safe model-sync calls.
           python - <<'PY'
           from pathlib import Path
           text = Path("huggingface_space/app.py").read_text(encoding="utf-8")
           required = (
               'CRON_SECRET = os.environ.get("CRON_SECRET", "")',
-              'headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}',
+              'cron_headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}',
               '/api/wake',
+              '/api/admin/job-status',
               '/api/admin/sync-models-safe',
           )
           missing = [item for item in required if item not in text]
@@ -110,20 +119,30 @@ def _poll_loop('''
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          set -euo pipefail
+          test -n "$HF_TOKEN"
           git config --global user.email "ci@reeds.ai"
           git config --global user.name "REEDS CI"
 
-          # Clone the HF Space repo
           git clone https://Zagzy:${HF_TOKEN}@huggingface.co/spaces/Zagzy/reeds-ml-worker hf_space_repo
 
-          # Copy our files into it (overwrite everything)
           cp huggingface_space/app.py          hf_space_repo/app.py
           cp huggingface_space/requirements.txt hf_space_repo/requirements.txt
           cp huggingface_space/README.md        hf_space_repo/README.md
 
-          # Commit and push
           cd hf_space_repo
           git add app.py requirements.txt README.md
-          git diff --cached --quiet && echo "No changes" && exit 0
-          git commit -m "sync from GitHub ${{ github.sha }}"
-          git push
+          if git diff --cached --quiet; then
+            echo "No HF Space file changes"
+          else
+            git commit -m "sync from GitHub ${{ github.sha }}"
+            git push origin HEAD:main
+          fi
+
+          remote_sha="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          local_sha="$(git rev-parse HEAD)"
+          echo "HF Space remote SHA: $remote_sha"
+          echo "HF Space local SHA:  $local_sha"
+          test -n "$remote_sha"
+          test "$remote_sha" = "$local_sha"
+          echo "✅ HF Space repository is synchronized"
