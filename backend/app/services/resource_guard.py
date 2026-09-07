@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 import logging
 from datetime import date, timedelta
+from functools import wraps
 
 import pandas as pd
 from sqlalchemy import func
@@ -55,8 +56,6 @@ def _looks_malformed(fixture: Fixture) -> bool:
     if not home or not away or len(home) > 120 or len(away) > 120:
         return True
     combined = f"{home} {away}".lower()
-    # These patterns indicate a provider returned a flattened list of matches
-    # rather than one event. A normal team name may contain a single hyphen.
     if combined.count(" vs ") >= 2 or combined.count(" vs. ") >= 2:
         return True
     if combined.count(" - ") >= 4:
@@ -117,25 +116,24 @@ def _wrap_upsert(module, name: str, original):
     if original is None or getattr(original, "_reeds_resource_guard", False):
         return original
 
+    @wraps(original)
     def guarded(db, fixture, *args, **kwargs):
         _validate_fixture(fixture)
         return original(db, fixture, *args, **kwargs)
 
-    guarded.__name__ = getattr(original, "__name__", name)
-    guarded.__doc__ = getattr(original, "__doc__", None)
     guarded._reeds_resource_guard = True
     setattr(module, name, guarded)
     return guarded
 
 
 def _repair_existing_provider_mismatches(db) -> int:
-    """Repair rows already polluted by the old league-based inference bug."""
+    """Repair recent rows polluted by the old league-based inference bug."""
     repaired = 0
     rows = (
         db.query(Fixture)
         .filter(Fixture.source.in_(["allsportsapi", "thesportsdb"]))
         .order_by(Fixture.id.desc())
-        .limit(10_000)
+        .limit(3_000)
         .all()
     )
     for fixture in rows:
@@ -149,23 +147,32 @@ def _repair_existing_provider_mismatches(db) -> int:
     return repaired
 
 
+def _install_prediction_gc(predictions) -> None:
+    original = getattr(predictions, "generate_today_predictions", None)
+    if original is None or getattr(original, "_reeds_gc_guard", False):
+        return
+
+    @wraps(original)
+    def guarded_generation(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        finally:
+            collected = gc.collect()
+            log.info("Prediction job garbage collection completed: %s objects", collected)
+
+    guarded_generation._reeds_gc_guard = True
+    predictions.generate_today_predictions = guarded_generation
+
+
 def install_resource_guards() -> None:
     """Install lightweight memory and provider-data safeguards once per process."""
     try:
         import app.services.predictions as predictions
         predictions.dataframe_from_db = bounded_prediction_history
+        _install_prediction_gc(predictions)
 
         import app.scraper.loaders as loaders
-        guarded = _wrap_upsert(loaders, "upsert_fixture", getattr(loaders, "upsert_fixture", None))
-
-        # Some modules imported upsert_fixture directly; replace those references too.
-        for module_name in ("app.services.scheduler", "app.scraper.deep_coverage"):
-            try:
-                module = __import__(module_name, fromlist=["upsert_fixture"])
-                if guarded is not None:
-                    setattr(module, "upsert_fixture", guarded)
-            except Exception:
-                log.exception("Could not patch fixture writer: %s", module_name)
+        _wrap_upsert(loaders, "upsert_fixture", getattr(loaders, "upsert_fixture", None))
 
         from app.db.session import SessionLocal
         db = SessionLocal()
@@ -180,9 +187,3 @@ def install_resource_guards() -> None:
         )
     except Exception:
         log.exception("Could not install resource guards")
-
-
-def collect_after_prediction_job() -> None:
-    """Release transient pandas/model objects after scheduled prediction work."""
-    collected = gc.collect()
-    log.info("Prediction job garbage collection completed: %s objects", collected)
