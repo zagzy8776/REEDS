@@ -1,2 +1,0 @@
-HF worker sync trigger: 2026-09-07
-This file intentionally changes the huggingface_space path so the deployment workflow republishes the current app.py to the Hugging Face Space.
