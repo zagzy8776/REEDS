@@ -161,6 +161,89 @@ def _sync_provider_history() -> tuple[bool, str]:
         return False, f"provider history sync error: {exc}"
 
 
+def action_force_pull():
+    ok = _ensure_repo(force=True)
+    message = "✅ Force-pull complete" if ok else "❌ Force-pull failed"
+    return message, _get_log()
+
+
+def action_check_db():
+    if not DATABASE_URL:
+        return "❌ DATABASE_URL secret is missing", _get_log()
+    if not _ensure_repo():
+        return "❌ Could not load current REEDS code", _get_log()
+    db = None
+    try:
+        db = _get_db()
+        data = _load_data(db)
+        if data.empty:
+            return "📁 Neon is reachable but has no fixture rows", _get_log()
+        lines = [f"✅ Neon connected | {len(data):,} total rows"]
+        for sport, group in data.groupby("sport"):
+            completed = int((group["home_score"].notna() & group["away_score"].notna()).sum())
+            lines.append(f"  {sport:<20} {completed:>7,} completed / {len(group):>7,} total")
+        return "\n".join(lines), _get_log()
+    except Exception as exc:
+        return f"❌ DB error: {exc}", _get_log()
+    finally:
+        if db is not None:
+            db.close()
+
+
+def action_sync_provider_history():
+    if not DATABASE_URL or not ADMIN_KEY:
+        return "❌ Add DATABASE_URL and ADMIN_API_KEY to Space Settings first.", _get_log()
+    ok, detail = _sync_provider_history()
+    message = "✅ Provider history synchronized into Neon" if ok else f"❌ {detail}"
+    return message, _get_log()
+
+
+def action_ingest(max_leagues: int):
+    if not DATABASE_URL:
+        return "❌ DATABASE_URL secret is missing", _get_log()
+    if not _ensure_repo():
+        return "❌ Could not load current REEDS code", _get_log()
+    db = None
+    try:
+        db = _get_db()
+        from app.scraper.free_data import (
+            ingest_football_data_co_uk, ingest_openfootball,
+            ingest_tennis_atp, ingest_tennis_wta, ingest_tennis_data_co_uk,
+            ingest_nba_github, ingest_nfl_spreadspoke, ingest_nhl_api,
+            ingest_ipl_github, ingest_rugby_openfootball, ingest_mlb_retrosheet,
+        )
+        jobs = [
+            ("soccer football-data", ingest_football_data_co_uk, (None, None, int(max_leagues))),
+            ("soccer openfootball", ingest_openfootball, ()),
+            ("tennis ATP", ingest_tennis_atp, ()),
+            ("tennis WTA", ingest_tennis_wta, ()),
+            ("tennis data.co.uk", ingest_tennis_data_co_uk, ()),
+            ("basketball NBA", ingest_nba_github, ()),
+            ("american football NFL", ingest_nfl_spreadspoke, ()),
+            ("hockey NHL", ingest_nhl_api, ()),
+            ("cricket IPL", ingest_ipl_github, ()),
+            ("rugby", ingest_rugby_openfootball, ()),
+            ("baseball MLB", ingest_mlb_retrosheet, ()),
+        ]
+        results = []
+        for name, fn, args in jobs:
+            try:
+                _log(f"📥 {name}...")
+                result = fn(db, *args)
+                total = result.get("total", 0) if isinstance(result, dict) else int(result or 0)
+                results.append(f"{name}: {total:,}")
+                _log(f"  {results[-1]}")
+            except Exception as exc:
+                results.append(f"{name}: ERROR {exc}")
+                _log(f"  ❌ {results[-1]}")
+        return "\n".join(["✅ Free historical ingestion finished", *results]), _get_log()
+    except Exception as exc:
+        return f"❌ Free-data ingestion failed: {exc}", _get_log()
+    finally:
+        if db is not None:
+            db.close()
+
+
 def _upload_to_render(path: str, sport: str, model_type: str, accuracy: float, sample_size: int) -> tuple[bool, str]:
     """Upload a model directly; use an atomic GitHub-release sync fallback."""
     if not ADMIN_KEY:
@@ -238,89 +321,6 @@ def _upload_to_render(path: str, sport: str, model_type: str, accuracy: float, s
         return False, f"release fallback error: {exc}"
 
 
-def action_force_pull():
-    ok = _ensure_repo(force=True)
-    message = "✅ Force-pull complete" if ok else "❌ Force-pull failed"
-    return message, _get_log()
-
-
-def action_check_db():
-    if not DATABASE_URL:
-        return "❌ DATABASE_URL secret is missing", _get_log()
-    if not _ensure_repo():
-        return "❌ Could not load current REEDS code", _get_log()
-    db = None
-    try:
-        db = _get_db()
-        data = _load_data(db)
-        if data.empty:
-            return "📁 Neon is reachable but has no fixture rows", _get_log()
-        lines = [f"✅ Neon connected | {len(data):,} total rows"]
-        for sport, group in data.groupby("sport"):
-            completed = int(group["home_score"].notna().sum() & group["away_score"].notna().sum())
-            lines.append(f"  {sport:<20} {completed:>7,} completed / {len(group):>7,} total")
-
-        source_lines = ["", "Completed rows by provider source:"]
-        completed_rows = data[data["home_score"].notna() & data["away_score"].notna()].copy()
-        if "source" in completed_rows.columns:
-            for source, count in completed_rows.groupby("source").size().sort_values(ascending=False).items():
-                source_lines.append(f"  {str(source):<24} {int(count):>7,}")
-        else:
-            source_lines.append("  source metadata unavailable")
-        return "\n".join(lines + source_lines), _get_log()
-    except Exception as exc:
-        return f"❌ DB error: {exc}", _get_log()
-    finally:
-        if db is not None:
-            db.close()
-
-
-def action_ingest(max_leagues: int):
-    if not DATABASE_URL:
-        return "❌ DATABASE_URL secret is missing", _get_log()
-    if not _ensure_repo():
-        return "❌ Could not load current REEDS code", _get_log()
-    db = None
-    try:
-        db = _get_db()
-        from app.scraper.free_data import (
-            ingest_football_data_co_uk, ingest_openfootball,
-            ingest_tennis_atp, ingest_tennis_wta, ingest_tennis_data_co_uk,
-            ingest_nba_github, ingest_nfl_spreadspoke, ingest_nhl_api,
-            ingest_ipl_github, ingest_rugby_openfootball, ingest_mlb_retrosheet,
-        )
-        jobs = [
-            ("soccer football-data", ingest_football_data_co_uk, (None, None, int(max_leagues))),
-            ("soccer openfootball", ingest_openfootball, ()),
-            ("tennis ATP", ingest_tennis_atp, ()),
-            ("tennis WTA", ingest_tennis_wta, ()),
-            ("tennis data.co.uk", ingest_tennis_data_co_uk, ()),
-            ("basketball NBA", ingest_nba_github, ()),
-            ("american football NFL", ingest_nfl_spreadspoke, ()),
-            ("hockey NHL", ingest_nhl_api, ()),
-            ("cricket IPL", ingest_ipl_github, ()),
-            ("rugby", ingest_rugby_openfootball, ()),
-            ("baseball MLB", ingest_mlb_retrosheet, ()),
-        ]
-        results = []
-        for name, fn, args in jobs:
-            try:
-                _log(f"📥 {name}...")
-                result = fn(db, *args)
-                total = result.get("total", 0) if isinstance(result, dict) else int(result or 0)
-                results.append(f"{name}: {total:,}")
-                _log(f"  {results[-1]}")
-            except Exception as exc:
-                results.append(f"{name}: ERROR {exc}")
-                _log(f"  ❌ {results[-1]}")
-        return "\n".join(["✅ Free historical ingestion finished", *results]), _get_log()
-    except Exception as exc:
-        return f"❌ Free-data ingestion failed: {exc}", _get_log()
-    finally:
-        if db is not None:
-            db.close()
-
-
 def _train_all_sports() -> None:
     global _train_state
     logs: list[str] = []
@@ -333,8 +333,6 @@ def _train_all_sports() -> None:
         if not _ensure_repo():
             raise RuntimeError("Could not load current REEDS code")
 
-        # First make Render ingest recent completed data from the real API
-        # providers. HF itself does not own the provider credentials.
         ok, detail = _sync_provider_history()
         if not ok:
             _log(f"⚠️ Continuing with existing Neon history: {detail}")
@@ -347,8 +345,8 @@ def _train_all_sports() -> None:
             completed_mask = data["home_score"].notna() & data["away_score"].notna()
             data = data[completed_mask].copy()
             _log(f"⚡ ML training snapshot: {len(data):,} completed rows across Neon")
-            source_counts = data.groupby("sport").size().to_dict()
-            _log("📊 Completed rows by sport: " + ", ".join(f"{k}={v:,}" for k, v in sorted(source_counts.items())))
+            sport_counts = data.groupby("sport").size().to_dict()
+            _log("📊 Completed rows by sport: " + ", ".join(f"{k}={v:,}" for k, v in sorted(sport_counts.items())))
         finally:
             db.close()
 
@@ -378,8 +376,6 @@ def _train_all_sports() -> None:
                 result = trainers[sport](frame)
                 elapsed = int(time.time() - started)
 
-                # Never hold the DB connection open during CPU training. Register
-                # the finished artifact in a brand-new short-lived transaction.
                 db = _get_db()
                 try:
                     register_model(
@@ -430,7 +426,7 @@ def action_train():
     _train_lock.release()
     _train_thread = threading.Thread(target=_train_all_sports, name="ml-training", daemon=True)
     _train_thread.start()
-    return "🚀 Training job started in background. Use Refresh Log to watch provider sync, each sport, upload and Render refresh.", _get_log()
+    return "🚀 Training job started in background. Provider history sync runs first; use Refresh Log to watch each stage.", _get_log()
 
 
 def action_model_status():
@@ -539,10 +535,11 @@ Trains production models from completed Neon history, including recent history s
         btn_wake = gr.Button("🌐 Wake Render", variant="secondary")
         btn_log = gr.Button("🔃 Refresh Log", variant="secondary")
 
-    gr.Markdown(f"### 📥 Step 1 — Sync historical provider data + free datasets")
+    gr.Markdown("### 📥 Step 1 — Sync provider history + free historical datasets")
     with gr.Row():
-        ingest_slider = gr.Slider(1, 21, value=21, step=1, label="Max soccer leagues (free datasets)", scale=3)
-        btn_ingest = gr.Button("⬇️ Ingest ALL Sports", variant="primary")
+        btn_provider_history = gr.Button(f"🌐 Sync API Provider History ({PROVIDER_HISTORY_DAYS}d)", variant="secondary")
+        ingest_slider = gr.Slider(1, 21, value=21, step=1, label="Max soccer leagues (free datasets)", scale=2)
+        btn_ingest = gr.Button("⬇️ Ingest Free Historical Data", variant="primary")
 
     gr.Markdown("### 🏋️ Step 2 — Train and publish production models")
     with gr.Row():
@@ -557,11 +554,12 @@ Trains production models from completed Neon history, including recent history s
     btn_status.click(action_model_status, outputs=[result_box, log_box])
     btn_wake.click(action_wake_render, outputs=[result_box, log_box])
     btn_log.click(lambda: _get_log(), outputs=[log_box])
+    btn_provider_history.click(action_sync_provider_history, outputs=[result_box, log_box])
     btn_ingest.click(action_ingest, inputs=[ingest_slider], outputs=[result_box, log_box])
     btn_train.click(action_train, outputs=[result_box, log_box])
     btn_poll.click(action_toggle_poll, outputs=[result_box, log_box])
 
-    gr.Markdown("---\n**Workflow:** Force Pull → Check DB → provider history sync → free-data ingest → background training → Model Status → Auto-Poll")
+    gr.Markdown("---\n**Workflow:** Force Pull → Check DB → Sync API Provider History → Ingest Free History → Background Training → Model Status → Auto-Poll")
 
 
 if DATABASE_URL and ADMIN_KEY:
