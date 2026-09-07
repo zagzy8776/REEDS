@@ -69,6 +69,18 @@ else:
 run([sys.executable, "-m", "pip", "install", "-q", "-r", "backend/requirements.txt"], WORKDIR)
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+# Kaggle sessions are finite. The production trainer supports a deliberately
+# faster large-history path; use it here so a first production training run is
+# reliable instead of spending most of the session on dozens of Optuna fits.
+# This modifies only Kaggle's working clone; GitHub production code is untouched.
+train_file = WORKDIR / "backend" / "app" / "ml" / "train.py"
+train_text = train_file.read_text()
+train_text = train_text.replace("if len(X) >= 60000:", "if len(X) >= 20000:")
+train_text = train_text.replace("n_trials=15", "n_trials=3")
+train_text = train_text.replace("n_trials=10", "n_trials=3")
+train_file.write_text(train_text)
+print("Kaggle runtime optimization: large-history fast path + 3 Optuna trials")
+
 sys.path.insert(0, str(WORKDIR / "backend"))
 
 from app.db.session import SessionLocal, init_db
