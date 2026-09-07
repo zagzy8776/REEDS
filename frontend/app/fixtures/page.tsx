@@ -47,15 +47,10 @@ function predictionBackedFixtures(picks: any[]) {
 export default async function Fixtures({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams;
   const [fixtureRows, status] = await Promise.all([
-    getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "300" }),
+    getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "500" }),
     getFixtureStatus(),
   ]);
 
-  // The AI board and the fixture board are supposed to describe the same
-  // underlying matches. When the fixture endpoint is temporarily empty or
-  // degraded but published predictions are already available, build the
-  // visible match centre from those exact prediction rows rather than showing
-  // a blank board to users.
   let fixtures = Array.isArray(fixtureRows) ? fixtureRows : [];
   let boardRecoveredFromPredictions = false;
   if (!fixtures.length && params.scope !== "results") {
@@ -70,7 +65,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
   const leagues = Array.from(new Set(fixtures.map((f: any) => f.league))).filter(Boolean);
   const withOdds = fixtures.filter((f: any) => f.has_odds).length;
   const completed = fixtures.filter((f: any) => f.home_score !== null && f.away_score !== null).length;
-  const todayCount = fixtures.filter((f: any) => f.match_date === new Date().toISOString().slice(0, 10)).length;
+  const todayCount = fixtures.filter((f: any) => String(f.match_date).slice(0, 10) === new Date().toISOString().slice(0, 10)).length;
   const grouped = fixtures.reduce((acc: Record<string, any[]>, f: any) => {
     const key = String(f.match_date || "TBA");
     acc[key] = acc[key] || [];
@@ -83,8 +78,8 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
       <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] lg:items-end">
         <div>
           <p className="badge inline-block">Match center</p>
-          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Upcoming games, today’s board, and results.</h1>
-          <p className="mt-3 max-w-3xl text-slate-300">Find the match, check the score or odds, open the AI picks, or post your own take.</p>
+          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Upcoming games, today&rsquo;s board, and results.</h1>
+          <p className="mt-3 max-w-3xl text-slate-300">Find the match, check the score or odds, open the exact AI read, or post your own take.</p>
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
             <Link href="/predictions" className="rounded-xl bg-emerald-400 px-5 py-3 text-center font-black text-slate-950">View AI picks</Link>
             <Link href="/predictions/submit" className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-center font-bold">+ Post community pick</Link>
@@ -96,7 +91,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
             <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{fixtures.length}</b><br /><span className="text-xs text-slate-500">Fixtures</span></div>
             <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{leagues.length}</b><br /><span className="text-xs text-slate-500">Leagues</span></div>
             <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{withOdds}</b><br /><span className="text-xs text-slate-500">With odds</span></div>
-            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{completed || todayCount}</b><br /><span className="text-xs text-slate-500">Tracked</span></div>
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{todayCount}</b><br /><span className="text-xs text-slate-500">Today</span></div>
           </div>
         </div>
       </section>
@@ -114,7 +109,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
         <select name="league" defaultValue={params.league || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
           <option value="">All leagues</option>{leagues.map((x: any) => <option key={x} value={x}>{x}</option>)}
         </select>
-        <input name="limit" type="number" min="25" max="500" defaultValue={params.limit || "300"} className="rounded-xl border border-slate-800 bg-slate-950 p-3" />
+        <input name="limit" type="number" min="25" max="500" defaultValue={params.limit || "500"} className="rounded-xl border border-slate-800 bg-slate-950 p-3" />
         <button className="rounded-xl bg-emerald-400 px-4 py-3 font-bold text-slate-950">Refresh board</button>
       </form>
 
@@ -150,7 +145,7 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
                       <h3 className="mt-1 text-lg font-black">{f.home_team} vs {f.away_team}</h3>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <span className={f.home_score !== null && f.away_score !== null ? "rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs text-emerald-200" : "rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-1 text-xs text-sky-200"}>{f.home_score !== null && f.away_score !== null ? "Result" : f.match_date === new Date().toISOString().slice(0, 10) ? "Today" : "Upcoming"}</span>
+                      <span className={f.result_label === "completed" ? "rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs text-emerald-200" : "rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-1 text-xs text-sky-200"}>{f.result_label === "completed" ? "Result" : f.result_label === "live" ? "Live" : f.result_label === "today" ? "Today" : "Upcoming"}</span>
                       <span className={f.has_odds ? "badge w-fit" : "rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400"}>{f.has_odds ? "Odds live" : "Odds pending"}</span>
                     </div>
                   </div>
@@ -165,9 +160,9 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
                     <div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Away</span><br /><b>{formatOdds(f.away_odds)}</b></div>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-2 text-xs font-bold">
-                    <Link href={`/predictions?league=${encodeURIComponent(f.league)}`} className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-emerald-200">AI reads</Link>
-                    <Link href={`/fixtures/${f.id}`} className="rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-sky-200">Match hub</Link>
-                    <Link href={`/predictions/submit`} className="rounded-full border border-slate-700 bg-slate-900 px-3 py-2 text-slate-200">+ Community pick</Link>
+                    <Link href={`/fixtures/${f.id}/ai-reads`} className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-emerald-200">AI Reads</Link>
+                    <Link href={`/fixtures/${f.id}`} className="rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-sky-200">Match Hub</Link>
+                    <Link href="/predictions/submit" className="rounded-full border border-slate-700 bg-slate-900 px-3 py-2 text-slate-200">+ Community pick</Link>
                   </div>
                 </div>
               ))}
