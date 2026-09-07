@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 from app.scraper.http_client import HttpClient
 
 
@@ -167,13 +169,29 @@ class FootballDataOrgClient:
         return self.matches_by_range(target_date, target_date)
 
     def matches_by_range(self, from_date: str, to_date: str) -> dict:
+        """Fetch a possibly wide range in bounded chunks.
+
+        The production scheduler can ask for two weeks of fixtures. Keep each
+        upstream request to a maximum ten-day window and merge the results.
+        """
         if not self.api_key:
             return {"matches": []}
-        return self.http.get(
-            f"{self.base_url}/matches",
-            params={"dateFrom": from_date, "dateTo": to_date},
-            headers={"X-Auth-Token": self.api_key},
-        ).json()
+
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date)
+        matches: list[dict] = []
+        current = start
+        while current <= end:
+            chunk_end = min(current + timedelta(days=9), end)
+            payload = self.http.get(
+                f"{self.base_url}/matches",
+                params={"dateFrom": current.isoformat(), "dateTo": chunk_end.isoformat()},
+                headers={"X-Auth-Token": self.api_key},
+            ).json()
+            if isinstance(payload, dict):
+                matches.extend(payload.get("matches", []) or [])
+            current = chunk_end + timedelta(days=1)
+        return {"matches": matches}
 
 
 class AllSportsApiClient:
