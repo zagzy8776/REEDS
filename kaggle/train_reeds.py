@@ -89,10 +89,6 @@ else:
 run([sys.executable, "-m", "pip", "install", "-q", "-r", "backend/requirements.txt"], WORKDIR)
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-# Kaggle sessions are finite. The production trainer supports a deliberately
-# faster large-history path; use it here so a first production training run is
-# reliable instead of spending most of the session on dozens of Optuna fits.
-# This modifies only Kaggle's working clone; GitHub production code is untouched.
 train_file = WORKDIR / "backend" / "app" / "ml" / "train.py"
 train_text = train_file.read_text()
 train_text = train_text.replace("if len(X) >= 60000:", "if len(X) >= 20000:")
@@ -114,25 +110,35 @@ from app.ml.train import (
 
 init_db()
 
-# 3. Refresh recent completed provider history in Neon before training.
+# 3. Refresh a broader completed API window before training.
 print("\n=== PROVIDER HISTORY SYNC ===")
 try:
-    sync = post("/api/admin/ml/sync-provider-history", params={"days_back": 7}, timeout=300)
+    sync = post("/api/admin/ml/sync-provider-history", params={"days_back": 30}, timeout=600)
     print(sync.json())
 except Exception as exc:
     print(f"History sync warning: {exc}")
 
-# 4. Snapshot all completed Neon fixtures.
+# 4. Snapshot all completed Neon fixtures, excluding synthetic coverage seeds.
 db = SessionLocal()
 try:
     data = dataframe_from_db(db, max_age_days=None)
     source_rows = (
         db.query(Fixture.source, __import__("sqlalchemy").func.count(Fixture.id))
-        .filter(Fixture.home_score.isnot(None), Fixture.away_score.isnot(None))
+        .filter(
+            Fixture.home_score.isnot(None),
+            Fixture.away_score.isnot(None),
+            Fixture.source != "coverage_seed",
+        )
         .group_by(Fixture.source)
         .order_by(__import__("sqlalchemy").func.count(Fixture.id).desc())
         .all()
     )
+    coverage_seed_ids = {
+        row[0]
+        for row in db.query(Fixture.id)
+        .filter(Fixture.source == "coverage_seed")
+        .all()
+    }
 finally:
     db.close()
 
@@ -153,7 +159,8 @@ if data.empty:
 
 if "sport" not in data.columns:
     raise RuntimeError("Training data has no sport column")
-
+if "id" in data.columns and coverage_seed_ids:
+    data = data[~data["id"].isin(coverage_seed_ids)].copy()
 data["sport"] = data["sport"].astype(str).str.strip().str.lower()
 data = data[data["home_score"].notna() & data["away_score"].notna()].copy()
 print(f"\nCompleted training rows: {len(data):,}")
