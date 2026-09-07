@@ -12,13 +12,64 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-def _install_trained_generic_prediction_bridge() -> None:
-    """Make trained generic-sport artifacts the primary Moneyline engine.
+def _install_trained_soccer_meta_bridge() -> None:
+    """Use the leakage-safe meta learner when a trained soccer bundle provides one."""
+    try:
+        import numpy as np
+        import pandas as pd
+        from app.ml.ensemble import LoyalEdgeEngine
 
-    The original generic engines remain the safe fallback. This bridge exists
-    because older generic engines were heuristic-only even when a trained model
-    was registered for the sport.
-    """
+        original = getattr(LoyalEdgeEngine, "_ensemble_predict", None)
+        if original is None or getattr(original, "_reeds_meta_bridge", False):
+            return
+
+        def meta_ensemble_predict(self, features_row, labels):
+            result = original(self, features_row, labels)
+            bundle = getattr(self, "bundle", None)
+            meta = bundle.get("meta_learner") if isinstance(bundle, dict) else None
+            models = bundle.get("models") if isinstance(bundle, dict) else None
+            weights = bundle.get("weights") if isinstance(bundle, dict) else None
+            if meta is None or not isinstance(models, dict) or not models:
+                return result
+            try:
+                x = pd.DataFrame([features_row]).reindex(columns=bundle.get("features", []), fill_value=0)
+                stacked_parts = []
+                used_weights = []
+                for idx, (name, model) in enumerate(models.items()):
+                    p = model.predict_proba(x)[0]
+                    classes = list(getattr(model, "classes_", labels))
+                    aligned = np.zeros(len(labels), dtype=float)
+                    for pos, cls in enumerate(classes):
+                        if cls in labels:
+                            aligned[labels.index(cls)] = float(p[pos])
+                    stacked_parts.append(aligned)
+                    used_weights.append(float(weights[idx]) if isinstance(weights, list) and idx < len(weights) else 1.0)
+                if not stacked_parts:
+                    return result
+                stacked = np.column_stack(stacked_parts).reshape(1, -1)
+                meta_raw = meta.predict_proba(stacked)[0]
+                meta_aligned = np.zeros(len(labels), dtype=float)
+                for pos, cls in enumerate(getattr(meta, "classes_", labels)):
+                    if cls in labels:
+                        meta_aligned[labels.index(cls)] = float(meta_raw[pos])
+                total = sum(used_weights) or float(len(used_weights))
+                base = sum(part * (w / total) for part, w in zip(stacked_parts, used_weights))
+                final = 0.7 * base + 0.3 * meta_aligned
+                final = final / final.sum() if final.sum() > 0 else final
+                return {"away": float(final[0]), "draw": float(final[1]), "home": float(final[2])}
+            except Exception:
+                log.exception("Soccer meta-learner inference failed; using base ensemble")
+                return result
+
+        meta_ensemble_predict._reeds_meta_bridge = True
+        LoyalEdgeEngine._ensemble_predict = meta_ensemble_predict
+        log.info("Trained soccer meta-learner inference bridge installed")
+    except Exception:
+        log.exception("Could not install trained soccer meta-learner bridge")
+
+
+def _install_trained_generic_prediction_bridge() -> None:
+    """Make trained generic-sport artifacts the primary Moneyline engine."""
     try:
         import joblib
         import pandas as pd
@@ -60,10 +111,6 @@ def _install_trained_generic_prediction_bridge() -> None:
                 if not isinstance(models, dict) or not models:
                     return original(self, history, fixture)
 
-                # _build_generic_features creates features strictly before each
-                # completed match. Add a synthetic completed row for the target
-                # solely to obtain the exact same point-in-time feature vector;
-                # the synthetic row is never used as training history.
                 target = dict(fixture)
                 target["sport"] = sport
                 target["home_score"] = 1
@@ -231,6 +278,7 @@ def install_provider_runtime_hardening() -> None:
         if hasattr(deep, "_ingest_openfoot"):
             deep._ingest_openfoot = getattr(deep, "_ingest_openfoot")
 
+        _install_trained_soccer_meta_bridge()
         _install_trained_generic_prediction_bridge()
         log.info("Runtime provider hardening installed")
     except Exception:
