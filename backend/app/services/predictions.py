@@ -15,7 +15,6 @@ from app.services.prediction_learning import (
 )
 from app.services.prediction_quality import annotate_quality, evaluate_publication
 
-
 PUBLISH_THRESHOLDS = {
     "1X2": 55, "Moneyline": 55, "Goals": 55, "BTTS": 55, "Both Teams to Score": 55,
     "Double Chance": 58, "Over/Under 1.5": 58, "Over/Under 2.5": 55, "Over/Under 3.5": 58,
@@ -31,9 +30,7 @@ def should_publish_pick(item: dict) -> bool:
 
 def choose_provisional_public_pick(items: list[dict]) -> dict | None:
     candidates = [item for item in items if item.get("market") != "Correct Score"]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: float(item.get("confidence", 0)))
+    return max(candidates, key=lambda item: float(item.get("confidence", 0))) if candidates else None
 
 
 def select_public_picks(items: list[dict], max_picks: int = 2, *, fixture: Fixture | None = None, learning_context: dict | None = None) -> set[int]:
@@ -96,12 +93,7 @@ def dataframe_from_db(db: Session, max_age_days: int | None = 180) -> pd.DataFra
         cutoff = date.today() - timedelta(days=max_age_days)
         rows = rows.filter(func.date(Fixture.match_date) >= cutoff)
     rows = rows.limit(120000).all()
-    return pd.DataFrame([{
-        "id": r.id, "sport": r.sport, "league": r.league, "season": r.season,
-        "match_date": r.match_date, "home_team": r.home_team, "away_team": r.away_team,
-        "home_score": r.home_score, "away_score": r.away_score,
-        "home_odds": r.home_odds, "draw_odds": r.draw_odds, "away_odds": r.away_odds,
-    } for r in rows])
+    return pd.DataFrame([{"id": r.id, "sport": r.sport, "league": r.league, "season": r.season, "match_date": r.match_date, "home_team": r.home_team, "away_team": r.away_team, "home_score": r.home_score, "away_score": r.away_score, "home_odds": r.home_odds, "draw_odds": r.draw_odds, "away_odds": r.away_odds} for r in rows])
 
 
 def _next_prediction_version(db: Session, fixture_id: int, market: str) -> int:
@@ -112,8 +104,7 @@ def _next_prediction_version(db: Session, fixture_id: int, market: str) -> int:
 def _supersede_active_prediction(db: Session, fixture_id: int, market: str) -> None:
     db.query(Prediction).filter(Prediction.fixture_id == fixture_id, Prediction.market == market, Prediction.status == "active").update({"status": "superseded", "superseded_at": datetime.utcnow()})
     legacy_markets = {"Total Games": ["Total Points"], "Point Spread": ["Spread"], "Run Line": ["Spread"], "Both Teams to Score": ["BTTS"], "Over/Under 2.5": ["Goals"]}
-    new_to_old = {v: k for k, vals in legacy_markets.items() for v in vals}
-    old_market = new_to_old.get(market)
+    old_market = {v: k for k, vals in legacy_markets.items() for v in vals}.get(market)
     if old_market:
         db.query(Prediction).filter(Prediction.fixture_id == fixture_id, Prediction.market == old_market, Prediction.status == "active").update({"status": "superseded", "superseded_at": datetime.utcnow()})
 
@@ -150,9 +141,7 @@ def _backfill_fixture_odds(db: Session, fx: Fixture, items: list[dict]) -> bool:
     home_p, draw_p, away_p = probs.get("home_win"), probs.get("draw"), probs.get("away_win")
     if not home_p and not away_p:
         return False
-    fx.home_odds = _prob_to_decimal_odds(home_p)
-    fx.draw_odds = _prob_to_decimal_odds(draw_p) if draw_p else None
-    fx.away_odds = _prob_to_decimal_odds(away_p)
+    fx.home_odds, fx.draw_odds, fx.away_odds = _prob_to_decimal_odds(home_p), _prob_to_decimal_odds(draw_p) if draw_p else None, _prob_to_decimal_odds(away_p)
     extra = dict(fx.extra or {})
     extra["odds_source"] = "model_implied"
     extra["odds_note"] = "Fair-value odds derived from model probabilities. Not bookmaker prices."
@@ -188,8 +177,8 @@ def generate_today_predictions(db: Session) -> int:
         learning_context = {"guard": "normal"}
 
     today_ref = date.today()
-    PRIORITY_LEAGUES = {"FIFA World Cup", "UEFA Champions League", "UEFA Europa League", "UEFA European Championship", "Copa America", "Africa Cup of Nations", "NBA", "NFL", "IPL"}
-    priority_fixtures = db.query(Fixture).filter(func.date(Fixture.match_date) == today_ref, Fixture.league.in_(PRIORITY_LEAGUES)).all()
+    priority_leagues = {"FIFA World Cup", "UEFA Champions League", "UEFA Europa League", "UEFA European Championship", "Copa America", "Africa Cup of Nations", "NBA", "NFL", "IPL"}
+    priority_fixtures = db.query(Fixture).filter(func.date(Fixture.match_date) == today_ref, Fixture.league.in_(priority_leagues)).all()
     raw_fixtures = db.query(Fixture).filter(func.date(Fixture.match_date) >= today_ref).order_by(Fixture.match_date.asc(), Fixture.league.asc()).limit(120).all()
 
     def _is_live(fx: Fixture) -> bool:
@@ -226,25 +215,32 @@ def generate_today_predictions(db: Session) -> int:
             published_indexes = select_public_picks(items, fixture=fx, learning_context=learning_context)
             for idx, item in enumerate(items):
                 item = annotate_quality(explain_prediction_item(item, fx))
-                is_published = idx in published_indexes
+                desired_published = idx in published_indexes
                 signature = _prediction_signature(item)
                 meta = dict(item.get("engine_meta") or {})
                 meta["prediction_signature"] = signature
                 meta["learning_context"] = {"guard": learning_context.get("guard", "normal"), "daily_losses": learning_context.get("daily_losses", 0), "recent_accuracy": learning_context.get("recent_accuracy"), "open_public_picks": learning_context.get("open_public_picks", 0)}
                 existing = db.query(Prediction).filter(Prediction.fixture_id == fx.id, Prediction.market == str(item.get("market", "")), Prediction.status == "active").order_by(Prediction.version.desc()).first()
                 if existing and not _existing_prediction_changed(existing, item):
-                    if existing.is_published != is_published:
-                        existing.is_published = is_published
-                        existing.published_at = datetime.utcnow() if is_published else None
+                    # Never retract an already-published pick merely because a
+                    # later refresh is in a cautious/capacity state.
+                    if desired_published and not existing.is_published:
+                        existing.is_published = True
+                        existing.published_at = datetime.utcnow()
+                    continue
+                if existing and existing.is_published and not desired_published:
+                    # Preserve the last public read until a replacement clears
+                    # the gate. This prevents a safety guard from disappearing
+                    # a customer's active explanation mid-match.
                     continue
                 if existing:
                     existing.status = "superseded"
                     existing.superseded_at = datetime.utcnow()
                 version = _next_prediction_version(db, fx.id, str(item.get("market", "")))
-                pred = Prediction(fixture_id=fx.id, model_version_id=None, version=version, status="active", market=str(item.get("market", "")), pick=str(item.get("pick", "")), confidence=float(item.get("confidence", 0)), edge_score=float(item.get("edge_score", 0)), risk_level=str(item.get("risk_level", "Medium")), reasoning=str(item.get("reasoning", "")), engine_meta=meta, is_premium=is_published and float(item.get("confidence", 0)) >= 70, is_published=is_published, published_at=datetime.utcnow() if is_published else None)
+                pred = Prediction(fixture_id=fx.id, model_version_id=None, version=version, status="active", market=str(item.get("market", "")), pick=str(item.get("pick", "")), confidence=float(item.get("confidence", 0)), edge_score=float(item.get("edge_score", 0)), risk_level=str(item.get("risk_level", "Medium")), reasoning=str(item.get("reasoning", "")), engine_meta=meta, is_premium=desired_published and float(item.get("confidence", 0)) >= 70, is_published=desired_published, published_at=datetime.utcnow() if desired_published else None)
                 db.add(pred)
                 db.flush()
-                _capture_odds_snapshot(db, fx, pred, "published" if is_published else "initial")
+                _capture_odds_snapshot(db, fx, pred, "published" if desired_published else "initial")
                 count += 1
             db.flush()
         except Exception:
