@@ -16,6 +16,7 @@ import requests
 REPO_URL = "https://github.com/zagzy8776/REEDS.git"
 WORKDIR = Path("/kaggle/working/REEDS")
 MODEL_DIR = Path("/kaggle/working/reeds_models")
+EXPECTED_SKLEARN = "1.6.0"
 
 
 def secret(name: str) -> str:
@@ -108,6 +109,14 @@ run([sys.executable, "-m", "pip", "install", "-q", "-r", "backend/requirements.t
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(WORKDIR / "backend"))
+
+import sklearn
+
+if sklearn.__version__ != EXPECTED_SKLEARN:
+    raise RuntimeError(
+        f"Kaggle scikit-learn mismatch: expected {EXPECTED_SKLEARN}, got {sklearn.__version__}"
+    )
+print(f"ML runtime locked: scikit-learn={sklearn.__version__}")
 
 from app.db.session import SessionLocal, init_db
 from app.db.models import Fixture
@@ -235,4 +244,4 @@ for endpoint in ("/api/admin/predict", "/api/admin/backfill-odds", "/api/admin/c
 print("\n=== KAGGLE TRAINING COMPLETE ===")
 print(f"Models produced: {len(results)}")
 for result in results:
-    print(f"- {result.get('sport', 'soccer')}: {result['accuracy']:.2%} on {result['sample_size']:,} rows; method={result.get('training_method', 'oof')}")
+    print(f"- {result.get('sport', 'soccer')}: {result['accuracy']:.2%} on {result['sample_size']:,} rows; method={result.get('training_method', 'oof')}; sklearn={result.get('runtime_versions', {}).get('scikit_learn', EXPECTED_SKLEARN)}")
