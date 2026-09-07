@@ -31,8 +31,6 @@ def install_quality_training() -> None:
         original_fast = train_module._train_fast_large_dataset_model
 
         def quality_large_dataset_model(X_train, y_train, X_test, y_test, labels, sport):
-            # Keep the large-data path memory-conscious: RF + XGBoost only, while
-            # retaining the same leakage-safe validation/weighting logic.
             factories = train_module._build_model_factories(
                 binary=(len(labels) == 2),
                 slim=True,
@@ -56,9 +54,6 @@ def install_quality_training() -> None:
     except Exception:
         pass
 
-    # The model can be statistically strong while an individual generated pick is
-    # still too weak to expose publicly. Install this gate at the real publication
-    # path so every scheduler/cron/manual generation route gets the same policy.
     try:
         import app.services.predictions as predictions_module
         from app.services.prediction_quality import evaluate_publication
@@ -68,28 +63,31 @@ def install_quality_training() -> None:
             original_fallback = predictions_module.choose_provisional_public_pick
 
             def quality_select_public_picks(items: list[dict], max_picks: int = 4) -> set[int]:
-                annotated = []
+                accepted_items: list[dict] = []
+                accepted_original_indices: list[int] = []
                 for idx, item in enumerate(items):
                     accepted, reasons = evaluate_publication(item)
                     meta = item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else {}
                     item["engine_meta"] = {
                         **meta,
-                        "publication_quality": {
-                            "accepted": accepted,
-                            "reasons": reasons,
-                        },
+                        "publication_quality": {"accepted": accepted, "reasons": reasons},
                     }
-                    annotated.append((idx, item, accepted))
+                    if accepted:
+                        accepted_items.append(item)
+                        accepted_original_indices.append(idx)
 
-                # Preserve the existing market diversity/threshold logic, but never
-                # allow it to promote an item rejected by the quality gate.
-                eligible = [item for item in annotated if item[2]]
-                if not eligible:
+                if not accepted_items:
                     return set()
-                return original_select([item for _, item, _ in eligible], max_picks=max_picks) and {
-                    eligible[position][0]
-                    for position, (idx, _, _) in enumerate(eligible)
-                    if position in original_select([item for _, item, _ in eligible], max_picks=max_picks)
+
+                selected = original_select(accepted_items, max_picks=max_picks)
+                if not selected:
+                    return set()
+
+                # original_select returns indices relative to the filtered list.
+                return {
+                    accepted_original_indices[position]
+                    for position in selected
+                    if isinstance(position, int) and 0 <= position < len(accepted_original_indices)
                 }
 
             def quality_fallback(items: list[dict]) -> dict | None:
@@ -101,8 +99,8 @@ def install_quality_training() -> None:
             predictions_module.select_public_picks = quality_select_public_picks
             predictions_module.choose_provisional_public_pick = quality_fallback
             predictions_module._quality_gate_installed = True
+            _ = original_fallback
     except Exception:
-        # Do not block startup if the optional quality module cannot import.
         pass
 
 
@@ -154,10 +152,44 @@ def _validate(path: Path, asset_name: str) -> dict:
     }
 
 
+def _local_model_inventory(model_dir: Path) -> list[dict]:
+    inventory = []
+    for path in sorted(model_dir.glob("*.joblib")):
+        if not path.is_file() or path.stat().st_size <= 0:
+            continue
+        try:
+            metadata = _validate(path, path.name)
+            inventory.append({"sport": metadata["sport"], "file": path.name, "local": True})
+        except Exception:
+            continue
+    return inventory
+
+
 def restore_missing_models(db: Session) -> dict:
     settings = get_settings()
     model_dir = Path(settings.model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Render should remain operational when GitHub release access is absent or
+    # temporarily denied. Existing local model artifacts are still perfectly
+    # usable and are the first source of truth for the running process.
+    local_models = _local_model_inventory(model_dir)
+    if local_models:
+        for item in local_models:
+            try:
+                path = model_dir / item["file"]
+                metadata = _validate(path, item["file"])
+                register_model(
+                    db,
+                    metadata["sport"],
+                    metadata["model_type"],
+                    str(path),
+                    metadata["accuracy"],
+                    metadata["sample_size"],
+                )
+            except Exception:
+                continue
+
     token = os.environ.get("GITHUB_TOKEN", "")
     headers = {"Accept": "application/vnd.github+json"}
     if token:
@@ -172,7 +204,12 @@ def restore_missing_models(db: Session) -> dict:
         response.raise_for_status()
         releases = response.json()
     except Exception as exc:
-        return {"restored": 0, "status": "github_unavailable", "error": str(exc)[:200]}
+        return {
+            "restored": 0,
+            "status": "local_only" if local_models else "github_unavailable",
+            "local_models": local_models,
+            "error": str(exc)[:200],
+        }
 
     releases = [r for r in releases if str(r.get("tag_name", "")).startswith("models-v")]
     releases.sort(key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
@@ -220,4 +257,4 @@ def restore_missing_models(db: Session) -> dict:
             temp_path.unlink(missing_ok=True)
             errors.append({"sport": sport, "error": str(exc)[:200]})
 
-    return {"restored": len(restored), "models": restored, "errors": errors}
+    return {"restored": len(restored), "models": restored, "errors": errors, "local_models": local_models}
