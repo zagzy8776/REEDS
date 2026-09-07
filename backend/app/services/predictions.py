@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Fixture, OddsSnapshot, Prediction
 from app.services.prediction_learning import (
     apply_learning_feedback,
+    apply_live_match_context,
     build_learning_context,
     publication_allowed,
     settle_prediction_outcomes,
@@ -16,22 +17,10 @@ from app.services.prediction_quality import annotate_quality, evaluate_publicati
 
 
 PUBLISH_THRESHOLDS = {
-    "1X2": 55,
-    "Moneyline": 55,
-    "Goals": 55,
-    "BTTS": 55,
-    "Both Teams to Score": 55,
-    "Double Chance": 58,
-    "Over/Under 1.5": 58,
-    "Over/Under 2.5": 55,
-    "Over/Under 3.5": 58,
-    "Spread": 60,
-    "Point Spread": 60,
-    "Run Line": 58,
-    "Total Points": 55,
-    "Total Runs": 55,
-    "Total Games": 55,
-    "Correct Score": 101,
+    "1X2": 55, "Moneyline": 55, "Goals": 55, "BTTS": 55, "Both Teams to Score": 55,
+    "Double Chance": 58, "Over/Under 1.5": 58, "Over/Under 2.5": 55, "Over/Under 3.5": 58,
+    "Spread": 60, "Point Spread": 60, "Run Line": 58, "Total Points": 55, "Total Runs": 55,
+    "Total Games": 55, "Correct Score": 101,
 }
 
 
@@ -47,14 +36,8 @@ def choose_provisional_public_pick(items: list[dict]) -> dict | None:
     return max(candidates, key=lambda item: float(item.get("confidence", 0)))
 
 
-def select_public_picks(
-    items: list[dict],
-    max_picks: int = 4,
-    *,
-    fixture: Fixture | None = None,
-    learning_context: dict | None = None,
-) -> set[int]:
-    """Select only quality-approved public picks plus the closed-loop guard."""
+def select_public_picks(items: list[dict], max_picks: int = 2, *, fixture: Fixture | None = None, learning_context: dict | None = None) -> set[int]:
+    """Select quality-approved public picks plus the closed-loop guard."""
     published: set[int] = set()
     for idx, raw_item in enumerate(items):
         item = annotate_quality(raw_item)
@@ -62,24 +45,15 @@ def select_public_picks(
             allowed, reason = publication_allowed(item, fixture, learning_context)
             if not allowed:
                 meta = dict(item.get("engine_meta") or {})
-                meta["publication_quality"] = {
-                    **dict(meta.get("publication_quality") or {}),
-                    "accepted": False,
-                    "reasons": [*(meta.get("publication_quality") or {}).get("reasons", []), reason],
-                }
-                item["engine_meta"] = meta
+                quality = dict(meta.get("publication_quality") or {})
+                quality["accepted"] = False
+                quality["reasons"] = [*quality.get("reasons", []), reason]
+                item["engine_meta"] = {**meta, "publication_quality": quality}
                 continue
         if should_publish_pick(item) and evaluate_publication(item)[0]:
             published.add(idx)
-
-    # Do not fill remaining slots with weak predictions. Internal predictions remain
-    # stored for diagnostics, but customers only see picks that clear the gate.
     if len(published) > max_picks:
-        ranked = sorted(
-            published,
-            key=lambda idx: float(items[idx].get("confidence", 0)),
-            reverse=True,
-        )
+        ranked = sorted(published, key=lambda idx: float(items[idx].get("confidence", 0)), reverse=True)
         published = set(ranked[:max_picks])
     return published
 
@@ -90,11 +64,7 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
     summary = str(meta.get("summary") or "").strip()
     market_logic = str(meta.get("market_logic") or "").strip()
     factors = meta.get("factors") if isinstance(meta.get("factors"), list) else []
-    factor_text = "; ".join(
-        f"{factor.get('label')}: {factor.get('value')}"
-        for factor in factors[:3]
-        if isinstance(factor, dict) and factor.get("label") is not None
-    )
+    factor_text = "; ".join(f"{factor.get('label')}: {factor.get('value')}" for factor in factors[:3] if isinstance(factor, dict) and factor.get("label") is not None)
     if not reasoning:
         pieces = [
             f"The model chose {item.get('pick')} in the {item.get('market')} market at {item.get('confidence')}% confidence.",
@@ -106,24 +76,17 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
         reasoning = " ".join(pieces)
     elif "risk" not in reasoning.lower():
         reasoning = f"{reasoning} Risk is marked {item.get('risk_level', 'Medium')} based on confidence and available data depth."
-
     feedback = meta.get("learning_feedback") if isinstance(meta.get("learning_feedback"), dict) else {}
     adjustment = float(feedback.get("adjustment") or 0.0)
+    live_context = meta.get("live_context") if isinstance(meta.get("live_context"), dict) else {}
     if adjustment < 0:
-        reasoning = (
-            f"{reasoning} Recent settled results showed this sport/market regime was running below its "
-            f"historical confidence level, so REEDS reduced this read by {abs(adjustment):.1f} points "
-            "instead of staying adamant."
-        )
+        reasoning = f"{reasoning} Recent settled results showed this sport/market regime was running below its historical confidence level, so REEDS reduced this read by {abs(adjustment):.1f} points instead of staying adamant."
     elif feedback:
         reasoning = f"{reasoning} Recent settled results are being used as a calibration check for this read."
-
+    if live_context:
+        reasoning = f"{reasoning} Live update: the current score/events moved the in-play read by {float(live_context.get('adjustment') or 0):+.1f} points."
     item["reasoning"] = reasoning
-    item["engine_meta"] = {
-        "summary": summary or f"LOYAL EDGE reviewed {fixture.sport.replace('_', ' ')} fixture context before selecting this market.",
-        **meta,
-        "customer_explanation": reasoning,
-    }
+    item["engine_meta"] = {"summary": summary or f"LOYAL EDGE reviewed {fixture.sport.replace('_', ' ')} fixture context before selecting this market.", **meta, "customer_explanation": reasoning}
     return item
 
 
@@ -142,46 +105,23 @@ def dataframe_from_db(db: Session, max_age_days: int | None = 180) -> pd.DataFra
 
 
 def _next_prediction_version(db: Session, fixture_id: int, market: str) -> int:
-    latest = (
-        db.query(Prediction)
-        .filter(Prediction.fixture_id == fixture_id, Prediction.market == market)
-        .order_by(Prediction.version.desc())
-        .first()
-    )
+    latest = db.query(Prediction).filter(Prediction.fixture_id == fixture_id, Prediction.market == market).order_by(Prediction.version.desc()).first()
     return (latest.version + 1) if latest else 1
 
 
 def _supersede_active_prediction(db: Session, fixture_id: int, market: str) -> None:
-    db.query(Prediction).filter(
-        Prediction.fixture_id == fixture_id,
-        Prediction.market == market,
-        Prediction.status == "active",
-    ).update({"status": "superseded", "superseded_at": datetime.utcnow()})
-    legacy_markets = {
-        "Total Games": ["Total Points"],
-        "Point Spread": ["Spread"],
-        "Run Line": ["Spread"],
-        "Both Teams to Score": ["BTTS"],
-        "Over/Under 2.5": ["Goals"],
-    }
+    db.query(Prediction).filter(Prediction.fixture_id == fixture_id, Prediction.market == market, Prediction.status == "active").update({"status": "superseded", "superseded_at": datetime.utcnow()})
+    legacy_markets = {"Total Games": ["Total Points"], "Point Spread": ["Spread"], "Run Line": ["Spread"], "Both Teams to Score": ["BTTS"], "Over/Under 2.5": ["Goals"]}
     new_to_old = {v: k for k, vals in legacy_markets.items() for v in vals}
     old_market = new_to_old.get(market)
     if old_market:
-        db.query(Prediction).filter(
-            Prediction.fixture_id == fixture_id,
-            Prediction.market == old_market,
-            Prediction.status == "active",
-        ).update({"status": "superseded", "superseded_at": datetime.utcnow()})
+        db.query(Prediction).filter(Prediction.fixture_id == fixture_id, Prediction.market == old_market, Prediction.status == "active").update({"status": "superseded", "superseded_at": datetime.utcnow()})
 
 
 def _capture_odds_snapshot(db: Session, fx: Fixture, pred: Prediction, phase: str) -> None:
     if fx.home_odds is None and fx.draw_odds is None and fx.away_odds is None:
         return
-    db.add(OddsSnapshot(
-        fixture_id=fx.id, prediction_id=pred.id, phase=phase, market=pred.market,
-        home_odds=fx.home_odds, draw_odds=fx.draw_odds, away_odds=fx.away_odds,
-        source=fx.source or "fixture",
-    ))
+    db.add(OddsSnapshot(fixture_id=fx.id, prediction_id=pred.id, phase=phase, market=pred.market, home_odds=fx.home_odds, draw_odds=fx.draw_odds, away_odds=fx.away_odds, source=fx.source or "fixture"))
 
 
 log = logging.getLogger(__name__)
@@ -202,16 +142,12 @@ def _backfill_fixture_odds(db: Session, fx: Fixture, items: list[dict]) -> bool:
         return False
     probs: dict | None = None
     for item in items:
-        market = str(item.get("market", "")).lower()
-        if market in {"1x2", "moneyline"}:
-            meta = item.get("engine_meta") or {}
-            probs = meta.get("probabilities") or {}
+        if str(item.get("market", "")).lower() in {"1x2", "moneyline"}:
+            probs = (item.get("engine_meta") or {}).get("probabilities") or {}
             break
     if not probs:
         return False
-    home_p = probs.get("home_win")
-    draw_p = probs.get("draw")
-    away_p = probs.get("away_win")
+    home_p, draw_p, away_p = probs.get("home_win"), probs.get("draw"), probs.get("away_win")
     if not home_p and not away_p:
         return False
     fx.home_odds = _prob_to_decimal_odds(home_p)
@@ -225,30 +161,17 @@ def _backfill_fixture_odds(db: Session, fx: Fixture, items: list[dict]) -> bool:
 
 
 def _prediction_signature(item: dict) -> tuple:
-    """Stable signature used to avoid needless prediction churn."""
     meta = item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else {}
     probs = meta.get("probabilities") if isinstance(meta.get("probabilities"), dict) else {}
-    normalized_probs = tuple(sorted(
-        (str(k), round(float(v), 4))
-        for k, v in probs.items()
-        if isinstance(v, (int, float))
-    ))
+    normalized_probs = tuple(sorted((str(k), round(float(v), 4)) for k, v in probs.items() if isinstance(v, (int, float))))
     feedback = meta.get("learning_feedback") if isinstance(meta.get("learning_feedback"), dict) else {}
-    return (
-        str(item.get("market", "")),
-        str(item.get("pick", "")),
-        round(float(item.get("confidence", 0)), 3),
-        round(float(item.get("edge_score", 0)), 5),
-        normalized_probs,
-        round(float(feedback.get("adjustment", 0)), 3),
-    )
+    live_context = meta.get("live_context") if isinstance(meta.get("live_context"), dict) else {}
+    return (str(item.get("market", "")), str(item.get("pick", "")), round(float(item.get("confidence", 0)), 3), round(float(item.get("edge_score", 0)), 5), normalized_probs, round(float(feedback.get("adjustment", 0)), 3), round(float(live_context.get("adjustment", 0)), 3), str(live_context.get("score", "")))
 
 
 def _existing_prediction_changed(pred: Prediction, item: dict) -> bool:
-    """Only version a prediction when the model's actual read changed materially."""
     meta = pred.engine_meta if isinstance(pred.engine_meta, dict) else {}
-    old_sig = meta.get("prediction_signature")
-    return old_sig != _prediction_signature(item)
+    return meta.get("prediction_signature") != _prediction_signature(item)
 
 
 def generate_today_predictions(db: Session) -> int:
@@ -256,8 +179,6 @@ def generate_today_predictions(db: Session) -> int:
     from app.ml.ensemble import LoyalEdgeEngine
     from app.services.model_registry import active_model_path
 
-    # First settle any completed public picks, then let the new generation pass
-    # learn from the settled record without changing the actual training labels.
     try:
         settle_prediction_outcomes(db, lookback_days=90)
         learning_context = build_learning_context(db)
@@ -267,29 +188,15 @@ def generate_today_predictions(db: Session) -> int:
         learning_context = {"guard": "normal"}
 
     today_ref = date.today()
-    PRIORITY_LEAGUES = {
-        "FIFA World Cup", "UEFA Champions League", "UEFA Europa League",
-        "UEFA European Championship", "Copa America", "Africa Cup of Nations",
-        "NBA", "NFL", "IPL",
-    }
-    priority_fixtures = db.query(Fixture).filter(
-        func.date(Fixture.match_date) == today_ref,
-        Fixture.league.in_(PRIORITY_LEAGUES),
-    ).all()
-    raw_fixtures = db.query(Fixture).filter(
-        func.date(Fixture.match_date) >= today_ref,
-    ).order_by(Fixture.match_date.asc(), Fixture.league.asc()).limit(120).all()
+    PRIORITY_LEAGUES = {"FIFA World Cup", "UEFA Champions League", "UEFA Europa League", "UEFA European Championship", "Copa America", "Africa Cup of Nations", "NBA", "NFL", "IPL"}
+    priority_fixtures = db.query(Fixture).filter(func.date(Fixture.match_date) == today_ref, Fixture.league.in_(PRIORITY_LEAGUES)).all()
+    raw_fixtures = db.query(Fixture).filter(func.date(Fixture.match_date) >= today_ref).order_by(Fixture.match_date.asc(), Fixture.league.asc()).limit(120).all()
 
     def _is_live(fx: Fixture) -> bool:
         extra = fx.extra if isinstance(fx.extra, dict) else {}
-        return bool(extra.get("live")) or str(extra.get("status", "")).upper() in {
-            "1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT", "IN PROGRESS", "HALF TIME",
-        }
+        return bool(extra.get("live")) or str(extra.get("status", "")).upper() in {"1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT", "IN PROGRESS", "HALF TIME"}
 
-    raw_fixtures = [
-        fx for fx in raw_fixtures
-        if (fx.home_score is None and fx.away_score is None) or _is_live(fx)
-    ]
+    raw_fixtures = [fx for fx in raw_fixtures if (fx.home_score is None and fx.away_score is None) or _is_live(fx)]
     if not raw_fixtures and not priority_fixtures:
         return 0
     by_sport: dict[str, list[Fixture]] = {}
@@ -297,80 +204,44 @@ def generate_today_predictions(db: Session) -> int:
         by_sport.setdefault(fx.sport, []).append(fx)
     fixtures = []
     for sport in sorted(by_sport.keys()):
-        fixtures.extend(by_sport[sport][:10])
+        fixtures.extend(by_sport[sport][:12])
     seen_ids = {fx.id for fx in fixtures}
     fixtures = [fx for fx in priority_fixtures if fx.id not in seen_ids] + fixtures
-    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:50]
+    fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:60]
 
     history = dataframe_from_db(db, max_age_days=90)
-    soccer_model_path = active_model_path(db, "soccer")
-    soccer_engine = LoyalEdgeEngine(soccer_model_path)
+    soccer_engine = LoyalEdgeEngine(active_model_path(db, "soccer"))
     generic_engine = GenericSportEngine()
-
     count = 0
     for fx in fixtures:
         try:
             if fx.sport == "soccer":
-                items = soccer_engine.predict_soccer(history, {
-                    "id": fx.id, "_db": db, "sport": fx.sport,
-                    "home_team": fx.home_team, "away_team": fx.away_team,
-                    "match_date": fx.match_date, "league": fx.league,
-                    "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds,
-                })
+                items = soccer_engine.predict_soccer(history, {"id": fx.id, "_db": db, "sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
             else:
-                items = generic_engine.predict(history, {
-                    "sport": fx.sport, "home_team": fx.home_team,
-                    "away_team": fx.away_team, "match_date": fx.match_date,
-                })
-
+                items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "_db": db})
             _backfill_fixture_odds(db, fx, items)
             for item in items:
                 apply_learning_feedback(item, fx, learning_context)
-            published_indexes = select_public_picks(
-                items,
-                fixture=fx,
-                learning_context=learning_context,
-            )
+                apply_live_match_context(db, item, fx)
+            published_indexes = select_public_picks(items, fixture=fx, learning_context=learning_context)
             for idx, item in enumerate(items):
                 item = annotate_quality(explain_prediction_item(item, fx))
                 is_published = idx in published_indexes
                 signature = _prediction_signature(item)
                 meta = dict(item.get("engine_meta") or {})
                 meta["prediction_signature"] = signature
-                meta["learning_context"] = {
-                    "guard": learning_context.get("guard", "normal"),
-                    "daily_losses": learning_context.get("daily_losses", 0),
-                    "recent_accuracy": learning_context.get("recent_accuracy"),
-                }
-
-                existing = (
-                    db.query(Prediction)
-                    .filter(
-                        Prediction.fixture_id == fx.id,
-                        Prediction.market == str(item.get("market", "")),
-                        Prediction.status == "active",
-                    )
-                    .order_by(Prediction.version.desc())
-                    .first()
-                )
+                meta["learning_context"] = {"guard": learning_context.get("guard", "normal"), "daily_losses": learning_context.get("daily_losses", 0), "recent_accuracy": learning_context.get("recent_accuracy"), "open_public_picks": learning_context.get("open_public_picks", 0)}
+                existing = db.query(Prediction).filter(Prediction.fixture_id == fx.id, Prediction.market == str(item.get("market", "")), Prediction.status == "active").order_by(Prediction.version.desc()).first()
                 if existing and not _existing_prediction_changed(existing, item):
                     if existing.is_published != is_published:
                         existing.is_published = is_published
                         existing.published_at = datetime.utcnow() if is_published else None
                     continue
-
                 if existing:
                     existing.status = "superseded"
                     existing.superseded_at = datetime.utcnow()
                 version = _next_prediction_version(db, fx.id, str(item.get("market", "")))
-                pred = Prediction(
-                    fixture_id=fx.id, model_version_id=None, version=version, status="active",
-                    market=str(item.get("market", "")), pick=str(item.get("pick", "")),
-                    confidence=float(item.get("confidence", 0)), edge_score=float(item.get("edge_score", 0)),
-                    risk_level=str(item.get("risk_level", "Medium")), reasoning=str(item.get("reasoning", "")),
-                    engine_meta=meta, is_premium=is_published and float(item.get("confidence", 0)) >= 70,
-                    is_published=is_published, published_at=datetime.utcnow() if is_published else None,
-                )
+                pred = Prediction(fixture_id=fx.id, model_version_id=None, version=version, status="active", market=str(item.get("market", "")), pick=str(item.get("pick", "")), confidence=float(item.get("confidence", 0)), edge_score=float(item.get("edge_score", 0)), risk_level=str(item.get("risk_level", "Medium")), reasoning=str(item.get("reasoning", "")), engine_meta=meta, is_premium=is_published and float(item.get("confidence", 0)) >= 70, is_published=is_published, published_at=datetime.utcnow() if is_published else None)
                 db.add(pred)
                 db.flush()
                 _capture_odds_snapshot(db, fx, pred, "published" if is_published else "initial")
@@ -386,10 +257,7 @@ def generate_today_predictions(db: Session) -> int:
 
 def build_combo(db: Session, legs: int = 3, min_confidence: float = 60):
     today_ref = date.today()
-    picks = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(
-        Prediction.confidence >= min_confidence, Prediction.is_published == True,
-        Prediction.status == "active", func.date(Fixture.match_date) >= today_ref,
-    ).order_by(Prediction.confidence.desc()).all()
+    picks = db.query(Prediction, Fixture).join(Fixture, Prediction.fixture_id == Fixture.id).filter(Prediction.confidence >= min_confidence, Prediction.is_published == True, Prediction.status == "active", func.date(Fixture.match_date) >= today_ref).order_by(Prediction.confidence.desc()).all()
     selected, teams = [], set()
     for pred, fx in picks:
         if fx.home_team in teams or fx.away_team in teams:
