@@ -37,7 +37,6 @@ RENDER_URL = secret("RENDER_URL").rstrip("/")
 if not DATABASE_URL or not ADMIN_API_KEY or not RENDER_URL:
     raise RuntimeError("Missing DATABASE_URL, ADMIN_API_KEY, or RENDER_URL Kaggle secret")
 
-# Kaggle is an external trainer, not the production API.
 os.environ["DATABASE_URL"] = DATABASE_URL
 os.environ["APP_ENV"] = "production"
 os.environ["MODEL_DIR"] = str(MODEL_DIR)
@@ -50,12 +49,33 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
 
 
 def post(path: str, *, timeout: int = 180, **kwargs):
+    """POST to Render with retry for transient gateway/restart failures."""
     headers = {"X-Admin-Key": ADMIN_API_KEY}
     headers.update(kwargs.pop("headers", {}))
-    response = requests.post(f"{RENDER_URL}{path}", headers=headers, timeout=timeout, **kwargs)
-    if not response.ok:
-        raise RuntimeError(f"{path} returned HTTP {response.status_code}: {response.text[:500]}")
-    return response
+    last_response = None
+    for attempt in range(1, 5):
+        try:
+            response = requests.post(
+                f"{RENDER_URL}{path}",
+                headers=headers,
+                timeout=timeout,
+                **kwargs,
+            )
+            last_response = response
+            if response.ok:
+                return response
+            if response.status_code not in {502, 503, 504}:
+                raise RuntimeError(f"{path} returned HTTP {response.status_code}: {response.text[:500]}")
+            print(f"{path}: transient HTTP {response.status_code}; retry {attempt}/4")
+        except (requests.RequestException, RuntimeError) as exc:
+            if isinstance(exc, RuntimeError):
+                raise
+            print(f"{path}: transient request error; retry {attempt}/4: {exc}")
+        if attempt < 4:
+            time.sleep(5 * attempt)
+    detail = last_response.text[:500] if last_response is not None else "no response"
+    status = last_response.status_code if last_response is not None else "request-error"
+    raise RuntimeError(f"{path} failed after retries: HTTP {status}: {detail}")
 
 
 # 1. Fresh REEDS source.
@@ -84,6 +104,7 @@ print("Kaggle runtime optimization: large-history fast path + 3 Optuna trials")
 sys.path.insert(0, str(WORKDIR / "backend"))
 
 from app.db.session import SessionLocal, init_db
+from app.db.models import Fixture
 from app.services.predictions import dataframe_from_db
 from app.ml.train import (
     train_soccer_model,
@@ -99,15 +120,33 @@ try:
     sync = post("/api/admin/ml/sync-provider-history", params={"days_back": 7}, timeout=300)
     print(sync.json())
 except Exception as exc:
-    # Existing Neon history can still be used; don't destroy a usable training run.
     print(f"History sync warning: {exc}")
 
 # 4. Snapshot all completed Neon fixtures.
 db = SessionLocal()
 try:
     data = dataframe_from_db(db, max_age_days=None)
+    source_rows = (
+        db.query(Fixture.source, __import__("sqlalchemy").func.count(Fixture.id))
+        .filter(Fixture.home_score.isnot(None), Fixture.away_score.isnot(None))
+        .group_by(Fixture.source)
+        .order_by(__import__("sqlalchemy").func.count(Fixture.id).desc())
+        .all()
+    )
 finally:
     db.close()
+
+print("\n=== TRAINING DATA PROVENANCE ===")
+for source, count in source_rows:
+    print(f"{source or 'unknown'}: {int(count):,} completed rows")
+
+api_sources = {
+    "api_football", "sportmonks", "football_data_org", "apifootball_com",
+    "api_basketball", "allsportsapi", "thesportsdb", "bzzoiro", "openfoot",
+}
+api_rows = sum(int(count) for source, count in source_rows if str(source or "").lower() in api_sources)
+print(f"API-sourced completed rows: {api_rows:,}")
+print("Training policy: hybrid historical DB + freshly synced API history; source provenance is reported before every run.")
 
 if data.empty:
     raise RuntimeError("Neon returned no training data")
