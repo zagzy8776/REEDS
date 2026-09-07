@@ -35,6 +35,12 @@ def _safe_filename(name: str) -> str:
 
 
 def _validate_bundle(path: Path) -> dict:
+    """Validate a locally managed release artifact when it is safe to deserialize.
+
+    This function is intentionally not used by the hot upload endpoint on the
+    512 MiB Render instance. Training workers validate their own artifacts before
+    upload; Render only needs to persist the already-produced artifact.
+    """
     bundle = joblib.load(path)
     try:
         if not isinstance(bundle, dict):
@@ -49,14 +55,12 @@ def _validate_bundle(path: Path) -> dict:
         if not sport:
             lowered = path.name.lower()
             sport = "basketball" if "basketball" in lowered else "soccer"
-
         runtime_versions = bundle.get("runtime_versions") or {}
         artifact_sklearn = str(runtime_versions.get("scikit_learn") or "").strip()
         if artifact_sklearn and artifact_sklearn != SKLEARN_VERSION:
             raise ValueError(
                 f"incompatible scikit-learn artifact version {artifact_sklearn}; production uses {SKLEARN_VERSION}"
             )
-
         if not 0.0 <= accuracy <= 1.0:
             raise ValueError(f"invalid accuracy: {accuracy}")
         if sample_size <= 0:
@@ -69,8 +73,6 @@ def _validate_bundle(path: Path) -> dict:
             "runtime_versions": runtime_versions,
         }
     finally:
-        # The bundle can contain several fitted estimators. Release them before
-        # reading the artifact bytes into memory for the durable DB write.
         del bundle
         gc.collect()
 
@@ -84,14 +86,12 @@ async def upload_model(
     sample_size: int = Form(0),
     db: Session = Depends(get_db),
 ):
-    """Accept a validated worker model and persist its bytes in Neon.
+    """Persist a worker-produced model without deserializing it on Render.
 
-    Render's filesystem is ephemeral, so the database copy is the durable source
-    of truth. The local file is still written for immediate inference.
-
-    The upload is streamed to disk before validation. This deliberately avoids
-    holding the raw upload bytes and all deserialized estimators in RAM at the
-    same time, which is important on Render's 512 MiB free instance.
+    Kaggle is the trusted training/validation worker. Render's free instance has
+    only 512 MiB RAM, so loading a multi-estimator joblib merely to validate its
+    structure can OOM the production process. The artifact is streamed to disk,
+    then copied to Neon as bytes; inference deserializes it only when required.
     """
     settings = get_settings()
     model_dir = Path(settings.model_dir)
@@ -106,8 +106,6 @@ async def upload_model(
     temp_path = Path(temp_name)
     payload = None
     try:
-        # Stream instead of UploadFile.read(): never keep the entire incoming
-        # multipart body in memory while the artifact is being received.
         total = 0
         max_bytes = 100 * 1024 * 1024
         with temp_path.open("wb") as handle:
@@ -120,20 +118,23 @@ async def upload_model(
                     raise HTTPException(status_code=400, detail="Invalid or oversized model artifact")
                 handle.write(chunk)
         await model.close()
-
         if total <= 0:
             raise HTTPException(status_code=400, detail="Invalid or empty model artifact")
 
-        # Validate while the only large representation is the on-disk file.
-        metadata = _validate_bundle(temp_path)
+        # IMPORTANT: do not call joblib.load() here. That would deserialize all
+        # fitted estimators and recreate the exact Render OOM we are preventing.
+        final_sport = str(sport).strip().lower()
+        if not final_sport:
+            lowered = filename.lower()
+            final_sport = "basketball" if "basketball" in lowered else "soccer"
+        final_type = str(model_type or "uploaded")[:120]
+        final_accuracy = float(accuracy)
+        final_sample_size = int(sample_size)
+        if not 0.0 <= final_accuracy <= 1.0:
+            raise HTTPException(status_code=400, detail="Invalid model accuracy")
+        if final_sample_size <= 0:
+            raise HTTPException(status_code=400, detail="Invalid model sample size")
 
-        final_sport = str(sport or metadata["sport"]).strip().lower()
-        final_type = str(model_type or metadata["model_type"])[:120]
-        final_accuracy = float(accuracy or metadata["accuracy"])
-        final_sample_size = int(sample_size or metadata["sample_size"])
-
-        # Only now materialize the bytes required by Neon. The deserialized
-        # bundle has already been released by _validate_bundle().
         payload = temp_path.read_bytes()
         destination = model_dir / filename
         os.replace(temp_path, destination)
@@ -172,7 +173,7 @@ async def upload_model(
             "sample_size": final_sample_size,
             "model_version_id": mv.id,
             "active": bool(mv.is_active),
-            "runtime_versions": metadata.get("runtime_versions") or {},
+            "validation": "worker_validated_streamed_upload",
         }
     except HTTPException:
         db.rollback()
@@ -195,7 +196,6 @@ def sync_models_safe(db: Session = Depends(get_db)):
     headers = {"Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-
     try:
         response = requests.get(
             f"https://api.github.com/repos/{github_repo}/releases",
@@ -206,20 +206,16 @@ def sync_models_safe(db: Session = Depends(get_db)):
         releases = response.json()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Unable to inspect model releases: {exc}") from exc
-
     releases = [r for r in releases if str(r.get("tag_name", "")).startswith("models-v")]
     if not releases:
         return {"status": "no_models_release", "installed": 0}
-
     assets = [a for a in releases[0].get("assets", []) if str(a.get("name", "")).endswith(".joblib")]
     if not assets:
         return {"status": "no_model_assets", "release": releases[0].get("tag_name"), "installed": 0}
-
     model_dir = Path(settings.model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix="reeds-model-stage-", dir=str(model_dir.parent)))
     staged: list[tuple[Path, Path, dict]] = []
-
     try:
         for asset in assets:
             name = _safe_filename(asset.get("name", ""))
@@ -232,10 +228,8 @@ def sync_models_safe(db: Session = Depends(get_db)):
                             handle.write(chunk)
             metadata = _validate_bundle(destination)
             staged.append((destination, model_dir / name, metadata))
-
         if not staged:
             return {"status": "nothing_staged", "installed": 0}
-
         backups: list[tuple[Path, Path]] = []
         installed: list[dict] = []
         try:
@@ -252,7 +246,6 @@ def sync_models_safe(db: Session = Depends(get_db)):
                     model_type=metadata["model_type"], accuracy=metadata["accuracy"],
                     sample_size=metadata["sample_size"], data=destination.read_bytes(),
                 ))
-
             for item in installed:
                 path = str(model_dir / item["file"])
                 mv = register_model(db, item["sport"], item["model_type"], path, item["accuracy"], item["sample_size"])
@@ -267,7 +260,6 @@ def sync_models_safe(db: Session = Depends(get_db)):
                     os.replace(backup, destination)
             db.rollback()
             raise
-
         return {"status": "success", "release": releases[0].get("tag_name"), "installed": len(installed), "models": installed}
     finally:
         shutil.rmtree(stage, ignore_errors=True)
