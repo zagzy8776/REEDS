@@ -1,4 +1,4 @@
-"""Private ML pipeline endpoints used by the Hugging Face worker."""
+"""Private ML pipeline endpoints used by the external ML trainer."""
 from __future__ import annotations
 
 import logging
@@ -23,10 +23,11 @@ def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
 
 
 def _history_dates(days_back: int) -> list[str]:
-    days_back = max(1, min(int(days_back), 14))
-    # Include yesterday through the requested historical window. Today is
-    # deliberately excluded so this endpoint enriches completed API history,
-    # not the live fixture board.
+    # 30 days is deliberately bounded: API-Football-style providers are queried
+    # per day, while ranged providers use the first/last date. This gives the
+    # trainer materially more API-backed history without turning one training run
+    # into an uncontrolled provider-quota sweep.
+    days_back = max(1, min(int(days_back), 30))
     return [
         (date.today() - timedelta(days=offset)).isoformat()
         for offset in range(1, days_back + 1)
@@ -41,17 +42,13 @@ def sync_provider_history(
 ):
     """Pull recent completed provider data into Neon for ML training.
 
-    Render owns provider credentials and network access. HF asks Render to run
-    this sync, then trains from the resulting Neon dataset. Providers are
+    Render owns provider credentials and network access. The trainer asks Render
+    to run this sync, then trains from the resulting Neon dataset. Providers are
     isolated so one failed quota/key does not prevent the others from loading.
     """
     settings = get_settings()
     dates = _history_dates(days_back)
-    report: dict[str, object] = {
-        "dates": dates,
-        "providers": {},
-        "errors": [],
-    }
+    report: dict[str, object] = {"dates": dates, "providers": {}, "errors": []}
 
     from app.scraper.loaders import (
         ingest_allsportsapi_events,
@@ -101,8 +98,7 @@ def sync_provider_history(
             report["errors"].append({"provider": name, "error": str(exc)[:300]})
             log.exception("Historical ML provider sync failed: %s", name)
 
-    # Return auditable source/sport counts after all isolated providers run.
-    cutoff = date.today() - timedelta(days=max(1, min(int(days_back), 14)))
+    cutoff = date.today() - timedelta(days=max(1, min(int(days_back), 30)))
     completed_base = db.query(Fixture).filter(
         Fixture.match_date >= cutoff,
         Fixture.match_date < date.today(),
