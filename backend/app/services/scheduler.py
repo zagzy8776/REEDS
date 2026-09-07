@@ -120,8 +120,6 @@ def run_lightweight_refresh() -> dict:
                 {},
             ))
 
-        # Public score-site aggregation is always a contributor. It does not
-        # wait for the coverage floor and it does not replace API providers.
         providers.append((
             "web_score_sources", ingest_web_score_sources,
             (db, dates, 9),
@@ -139,8 +137,6 @@ def run_lightweight_refresh() -> dict:
         for name, fn, args, kwargs in providers:
             try:
                 result = fn(*args, **kwargs)
-                # Web ingestion returns a report dict; preserve its useful
-                # per-source telemetry rather than reducing it to an integer.
                 if isinstance(result, dict):
                     rows = result.get("rows", result.get("total", 0))
                     report["ingested"][name] = {
@@ -150,22 +146,29 @@ def run_lightweight_refresh() -> dict:
                 else:
                     report["ingested"][name] = int(result or 0)
             except Exception as exc:
+                try:
+                    db.rollback()
+                except Exception:
+                    log.exception("Provider rollback failed: %s", name)
                 report["skipped"].append({"provider": name, "reason": str(exc)[:300]})
                 log.exception("Fixture provider failed: %s", name)
 
         try:
             report["purged_showcase"] = purge_showcase_rows(db)
         except Exception as exc:
+            db.rollback()
             report["skipped"].append({"stage": "purge_showcase", "reason": str(exc)[:300]})
 
         try:
             report["normalization"] = normalize_fixture_sports(db)
         except Exception as exc:
+            db.rollback()
             report["skipped"].append({"stage": "fixture_normalization", "reason": str(exc)[:300]})
 
         try:
             report["coverage_recovery"] = run_deep_coverage(db, min_coverage=300)
         except Exception as exc:
+            db.rollback()
             report["skipped"].append({"stage": "deep_coverage", "reason": str(exc)[:300]})
             log.exception("Deep coverage failed")
 
@@ -176,29 +179,34 @@ def run_lightweight_refresh() -> dict:
             else:
                 report["normalization"] = post
         except Exception as exc:
+            db.rollback()
             report["skipped"].append({"stage": "post_coverage_normalization", "reason": str(exc)[:300]})
 
         try:
             from app.services.community import settle_user_predictions
             settle_user_predictions(db)
         except Exception:
+            db.rollback()
             log.exception("Community settlement failed")
 
         try:
             report["predictions_generated"] = generate_today_predictions(db)
         except Exception as exc:
+            db.rollback()
             report["skipped"].append({"stage": "predict", "reason": str(exc)[:300]})
 
         try:
             from app.services.insider_signals import refresh_insider_signals
             refresh_insider_signals(db, odds_api_key=settings.the_odds_api_key)
         except Exception:
+            db.rollback()
             log.exception("Insider signal refresh failed")
 
         try:
             from app.services.market_intelligence import refresh_line_efficiency
             refresh_line_efficiency(db, days_ahead=3)
         except Exception:
+            db.rollback()
             log.exception("Line efficiency refresh failed")
 
         return report
@@ -249,6 +257,7 @@ def start_scheduler() -> BackgroundScheduler:
                 fixture_download, sporting_events,
             )
         except Exception:
+            db.rollback()
             log.exception("Public football coverage failed")
         finally:
             db.close()
@@ -275,6 +284,7 @@ def start_scheduler() -> BackgroundScheduler:
                 result["odds_refreshed"] = odds.get("updated", 0)
             log.info("Score sync: %s", result)
         except Exception:
+            db.rollback()
             log.exception("Score sync failed")
         finally:
             db.close()
@@ -294,6 +304,7 @@ def start_scheduler() -> BackgroundScheduler:
             if result.get("new_events"):
                 log.info("Live events: %s", result)
         except Exception:
+            db.rollback()
             log.exception("Live event sync failed")
         finally:
             db.close()
@@ -317,6 +328,7 @@ def start_scheduler() -> BackgroundScheduler:
                     result.get("scanned", 0),
                 )
         except Exception:
+            db.rollback()
             log.exception("Value scan failed")
         finally:
             db.close()
