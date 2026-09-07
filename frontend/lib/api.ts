@@ -26,10 +26,6 @@ async function safeFetchJson(url: string, fallback: any, timeoutMs = DEFAULT_API
 async function getFixturesWithRetry(url: string, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
   const first = await safeFetchJson(url, null, timeoutMs);
   if (Array.isArray(first) && first.length > 0) return first;
-
-  // Render can be waking from sleep or briefly recycling while the status
-  // endpoint is already available. Retry once before the page falls back to
-  // prediction-backed rows.
   await new Promise((resolve) => setTimeout(resolve, 800));
   const second = await safeFetchJson(url, null, timeoutMs);
   return Array.isArray(second) ? second : [];
@@ -58,11 +54,11 @@ export async function getStats() {
 }
 
 export async function getUpcomingFixtures() {
-  return getFixtures({ scope: "all", limit: "300" });
+  return getFixtures({ scope: "all", limit: "500" });
 }
 
 export async function getFixtures(params: Record<string, string> = {}) {
-  const withDefaults = { scope: "all", limit: "300", ...params };
+  const withDefaults = { scope: "all", limit: "500", ...params };
   const qs = new URLSearchParams(Object.entries(withDefaults).filter(([, v]) => v)).toString();
   return getFixturesWithRetry(`${API_URL}/api/fixtures/upcoming?${qs}`);
 }
@@ -73,6 +69,10 @@ export async function getFixtureStatus() {
 
 export async function getFixture(id: string) {
   return safeFetchJson(`${API_URL}/api/fixtures/${id}`, null);
+}
+
+export async function getAIReads(fixtureId: string | number) {
+  return safeFetchJson(`${API_URL}/api/ai-reads/${encodeURIComponent(String(fixtureId))}`, null, 45000);
 }
 
 export async function getCommunityLeaderboard() {
