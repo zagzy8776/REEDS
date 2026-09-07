@@ -4,370 +4,82 @@ on:
   push:
     branches: [main]
     paths:
-      - 'huggingface_space/**'
-      - '.github/workflows/deploy-hf-space.yml'
+      - "huggingface_space/**"
+      - ".github/workflows/deploy-hf-space.yml"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reeds-hf-space
+  cancel-in-progress: true
 
 jobs:
   deploy:
-    name: Sync huggingface_space → HF Space
+    name: Sync REEDS worker to Hugging Face
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout repo
+      - name: Checkout REEDS
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Apply provider reliability fixes
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          # 1) Make fixture upserts concurrency-safe. Scheduler jobs and web
-          #    sources can observe the same natural key at the same time.
-          path = Path("backend/app/scraper/loaders.py")
-          text = path.read_text(encoding="utf-8")
-          if "from sqlalchemy.exc import IntegrityError" not in text:
-              text = text.replace(
-                  "from sqlalchemy.orm import Session\n",
-                  "from sqlalchemy.orm import Session\nfrom sqlalchemy.exc import IntegrityError\n",
-                  1,
-              )
-
-          upsert_pattern = re.compile(r"def upsert_fixture\(db: Session, fixture: Fixture\) -> None:\n.*?(?=\n\ndef _to_int_or_none)", re.S)
-          upsert_replacement = '''def upsert_fixture(db: Session, fixture: Fixture) -> None:
-              """Insert or update a fixture using the natural uniqueness key.
-
-              Uses a SAVEPOINT + immediate flush for the insert path so a
-              concurrent provider cannot abort the caller's whole transaction
-              when the same normalized fixture arrives twice.
-              """
-              if fixture.extra is None:
-                  fixture.extra = {}
-              fixture.league = _country_qualified_league(fixture.league, fixture.extra)
-
-              def _find_existing():
-                  return (
-                      db.query(Fixture)
-                      .filter(
-                          Fixture.sport == fixture.sport,
-                          Fixture.league == fixture.league,
-                          Fixture.match_date == fixture.match_date,
-                          Fixture.home_team == fixture.home_team,
-                          Fixture.away_team == fixture.away_team,
-                      )
-                      .first()
-                  )
-
-              def _merge(existing):
-                  existing.season = fixture.season or existing.season
-                  if fixture.home_score is not None:
-                      existing.home_score = fixture.home_score
-                  if fixture.away_score is not None:
-                      existing.away_score = fixture.away_score
-                  if fixture.home_odds is not None:
-                      existing.home_odds = fixture.home_odds
-                  if fixture.draw_odds is not None:
-                      existing.draw_odds = fixture.draw_odds
-                  if fixture.away_odds is not None:
-                      existing.away_odds = fixture.away_odds
-                  if fixture.source:
-                      existing.source = fixture.source
-                  existing.extra = _merge_extra(existing, fixture.extra)
-
-              existing = _find_existing()
-              if existing:
-                  _merge(existing)
-                  return
-
-              fixture.extra = _merge_extra(fixture, fixture.extra)
-              try:
-                  with db.begin_nested():
-                      db.add(fixture)
-                      db.flush()
-              except IntegrityError:
-                  # Another worker won the race for this unique key. The
-                  # savepoint is rolled back, while the outer transaction stays
-                  # usable; merge into the winner and continue.
-                  existing = _find_existing()
-                  if existing is None:
-                      raise
-                  _merge(existing)
-'''
-          text, count = upsert_pattern.subn(upsert_replacement, text, count=1)
-          if count != 1:
-              raise SystemExit("Could not patch upsert_fixture")
-
-          # 2) football-data.org has a bounded date-range contract in common
-          #    v4 usage. Split larger windows instead of sacrificing the whole
-          #    provider when the scheduler asks for two weeks.
-          fdo_pattern = re.compile(r"def ingest_football_data_org_matches\(db: Session, api_key: str, target_dates: list\[str\]\) -> int:\n.*?(?=\n\ndef ingest_apifootball_com_events)", re.S)
-          fdo_replacement = '''def ingest_football_data_org_matches(db: Session, api_key: str, target_dates: list[str]) -> int:
-              client = FootballDataOrgClient(api_key)
-              if not target_dates:
-                  return 0
-
-              count = 0
-              # Keep each provider request to at most 10 calendar days.
-              # target_dates are normally a contiguous scheduler window.
-              for start in range(0, len(target_dates), 10):
-                  chunk = target_dates[start:start + 10]
-                  payload = client.matches_by_range(chunk[0], chunk[-1])
-                  for item in payload.get("matches", []) or []:
-                      match_date = pd.to_datetime(item.get("utcDate"), errors="coerce")
-                      home = item.get("homeTeam") or {}
-                      away = item.get("awayTeam") or {}
-                      score = item.get("score") or {}
-                      full_time = score.get("fullTime") or {}
-                      if pd.isna(match_date) or not home.get("name") or not away.get("name"):
-                          continue
-                      comp = item.get("competition") or {}
-                      area = item.get("area") or {}
-                      extra = {
-                          "football_data_match_id": item.get("id"),
-                          "status": item.get("status"),
-                          "country": area.get("name"),
-                          "competition_code": comp.get("code"),
-                      }
-                      fx = Fixture(
-                          sport="soccer",
-                          league=comp.get("name") or "Football",
-                          season=str((item.get("season") or {}).get("startDate") or match_date.year)[:4],
-                          match_date=match_date.date(),
-                          home_team=resolve_team_name(db, str(home.get("name")), "soccer", "football_data_org"),
-                          away_team=resolve_team_name(db, str(away.get("name")), "soccer", "football_data_org"),
-                          home_score=_to_int_or_none(full_time.get("home")),
-                          away_score=_to_int_or_none(full_time.get("away")),
-                          source="football_data_org",
-                          extra=extra,
-                      )
-                      upsert_fixture(db, fx)
-                      count += 1
-                  db.commit()
-              return count
-'''
-          text, count = fdo_pattern.subn(fdo_replacement, text, count=1)
-          if count != 1:
-              raise SystemExit("Could not patch football-data.org ingestion")
-          path.write_text(text, encoding="utf-8")
-
-          # 3) OpenFoot requires authentication for its real API. Do not claim
-          #    public/no-key access; report invalid credentials without turning
-          #    it into an unbounded retry loop.
-          path = Path("backend/app/scraper/coverage_sources.py")
-          text = path.read_text(encoding="utf-8")
-          old = '''        response = session.get(
-            f"{OPENFOOT_BASE}/matches",
-            params={"date": target_date},
-            headers=headers,
-            timeout=20,
-        )
-        response.raise_for_status()
-'''
-          new = '''        try:
-            response = session.get(
-                f"{OPENFOOT_BASE}/matches",
-                params={"date": target_date},
-                headers=headers,
-                timeout=20,
-            )
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            status = getattr(exc.response, "status_code", None)
-            if status in {401, 403}:
-                # Do not silently substitute another API key or the provider's
-                # demo credential. Keep this provider isolated and auditable.
-                return count
-            raise
-'''
-          if old not in text:
-              raise SystemExit("OpenFoot request block not found")
-          text = text.replace(old, new, 1)
-          text = text.replace(
-              'These providers are optional. OpenFoot also supports public/no-key requests for\n',
-              'These providers are optional. OpenFoot requires an API key for production requests;\n',
-              1,
-          )
-          path.write_text(text, encoding="utf-8")
-
-          # 4) Prevent web-page parser garbage from being stored as team names.
-          path = Path("backend/app/scraper/web_score_sources.py")
-          text = path.read_text(encoding="utf-8")
-          marker = '''def _persist_pairs(db: Session, pairs: list[tuple[date, str, str]], source: str, sport: str) -> int:
-'''
-          helper = '''def _valid_team_name(value: str) -> bool:
-    normalized = _normalise_space(value)
-    low = normalized.lower()
-    if len(normalized) < 2 or len(normalized) > 80:
-        return False
-    if any(token in low for token in ("http://", "https://", ".com/", "copyright", "google play", "app store")):
-        return False
-    if low.startswith(("score.com/", "www.", "android application")):
-        return False
-    return True
-
-
-def _persist_pairs(db: Session, pairs: list[tuple[date, str, str]], source: str, sport: str) -> int:
-'''
-          if marker not in text:
-              raise SystemExit("Web persistence function not found")
-          text = text.replace(marker, helper, 1)
-          text = text.replace(
-              '        try:\n            fx = Fixture(\n                sport=sport,\n                league=f"{source.title()} {sport.replace(\'_\', \' \').title()}",\n',
-              '        try:\n            if not _valid_team_name(home) or not _valid_team_name(away):\n                continue\n            fx = Fixture(\n                sport=sport,\n                # Web score pages do not reliably expose competition metadata\n                # in the extracted participant block. Do not invent a league.\n                league="Web fixtures",\n',
-              1,
-          )
-          # Flush each web upsert inside a SAVEPOINT so a duplicate from a
-          # parser race cannot poison the whole source batch.
-          text = text.replace(
-              '            upsert_fixture(db, fx); persisted += 1\n        except Exception:\n',
-              '            with db.begin_nested():\n                upsert_fixture(db, fx)\n                db.flush()\n            persisted += 1\n        except Exception:\n',
-              1,
-          )
-          path.write_text(text, encoding="utf-8")
-
-          print("✅ Provider reliability fixes applied")
-          PY
-
-      - name: Prepare HF worker runtime hardening
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("huggingface_space/app.py")
-          text = path.read_text(encoding="utf-8")
-
-          marker = "_ensure_repo()\n\n\ndef _get_db():"
-          replacement = "_ensure_repo()\n\n# The worker trains from the same leakage-safe chronological ensemble used\n# by production. Keep this immediately after the repo is available.\ntry:\n    from app.services.model_bootstrap import install_quality_training\n    install_quality_training()\nexcept Exception as exc:\n    print(f\"⚠️ Quality training hook unavailable: {exc}\", flush=True)\n\n\ndef _get_db():"
-          if marker in text and "install_quality_training()" not in text:
-              text = text.replace(marker, replacement, 1)
-
-          if 'CRON_SECRET = os.environ.get("CRON_SECRET", "")' not in text:
-              text = text.replace(
-                  'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")',
-                  'GITHUB_REPO = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS")\nCRON_SECRET = os.environ.get("CRON_SECRET", "")',
-                  1,
-              )
-
-          wake_pattern = re.compile(
-              r'def action_wake_render\(\):\n.*?\n\ndef _poll_loop\(',
-              re.S,
-          )
-          wake_replacement = '''def action_wake_render():
-    """Verify and wake Render without making HF depend on the cron secret."""
-    try:
-        health = requests.get(f"{RENDER_URL}/api/health", timeout=20)
-        _log(f"Render health: HTTP {health.status_code}")
-
-        cron_headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}
-        response = requests.get(f"{RENDER_URL}/api/wake", headers=cron_headers, timeout=60)
-        if response.ok:
-            data = response.json() if response.headers.get("content-type", "").lower().startswith("application/json") else {}
-            message = (
-                "✅ HF → Render connection authenticated via cron channel\\n"
-                f"health: HTTP {health.status_code}\\n"
-                f"wake: HTTP {response.status_code}\\n"
-                f"coverage refresh queued: {data.get('coverage_refresh_queued', False)}\\n"
-                f"existing future fixtures: {data.get('existing_fixtures', 0)}"
-            )
-        else:
-            _log(f"⚠️ Cron wake HTTP {response.status_code}; trying admin channel")
-            admin = requests.get(
-                f"{RENDER_URL}/api/admin/job-status",
-                headers=_render_headers(),
-                timeout=30,
-            )
-            if not admin.ok:
-                message = (
-                    f"❌ Render rejected both wake channels: cron HTTP {response.status_code}, "
-                    f"admin HTTP {admin.status_code}"
-                )
-            else:
-                status = admin.json() if admin.headers.get("content-type", "").lower().startswith("application/json") else {}
-                message = (
-                    "✅ HF → Render connection authenticated via admin channel\\n"
-                    f"health: HTTP {health.status_code}\\n"
-                    f"cron wake: HTTP {response.status_code} (credential mismatch only)\\n"
-                    f"admin connection: HTTP {admin.status_code}\\n"
-                    f"current model rows: {int(status.get('current_model_rows', 0) or 0):,}\\n"
-                    "Scheduled cron-job.org remains the production coverage heartbeat."
-                )
-    except Exception as exc:
-        message = f"❌ HF → Render connection failed: {exc}"
-    _log(message)
-    return message, _get_log()
-
-
-def _poll_loop('''
-          text, count = wake_pattern.subn(wake_replacement, text, count=1)
-          if count != 1:
-              raise SystemExit("Could not patch action_wake_render safely")
-
-          text = text.replace(
-              'f"{RENDER_URL}/api/admin/download-models"',
-              'f"{RENDER_URL}/api/admin/sync-models-safe"',
-          )
-
-          path.write_text(text, encoding="utf-8")
-          PY
-
-          python - <<'PY'
-          from pathlib import Path
-          text = Path("huggingface_space/app.py").read_text(encoding="utf-8")
-          required = (
-              'CRON_SECRET = os.environ.get("CRON_SECRET", "")',
-              'cron_headers = {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}',
-              '/api/wake',
-              '/api/admin/job-status',
-              '/api/admin/sync-models-safe',
-          )
-          missing = [item for item in required if item not in text]
-          if missing:
-              raise SystemExit("HF Render integration verification failed: " + ", ".join(missing))
-          print("✅ HF Render integration verified in packaged worker")
-          PY
-
-      - name: Commit provider hotfixes
+      - name: Validate worker source
         run: |
           set -euo pipefail
-          git config user.email "ci@reeds.ai"
-          git config user.name "REEDS CI"
-          git add backend/app/scraper/loaders.py backend/app/scraper/coverage_sources.py backend/app/scraper/web_score_sources.py
-          if git diff --cached --quiet; then
-            echo "No provider hotfix changes"
-          else
-            git commit -m "Fix provider range auth and fixture upsert reliability"
-            git push origin HEAD:main
-          fi
+          python -m py_compile huggingface_space/app.py
+          test -s huggingface_space/app.py
+          test -s huggingface_space/requirements.txt
+          echo "Worker source validated"
 
-      - name: Push to HF Space
+      - name: Require HF write credential
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           test -n "$HF_TOKEN"
+          echo "HF_TOKEN is configured"
+
+      - name: Sync files to Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: Zagzy/reeds-ml-worker
+        run: |
+          set -euo pipefail
+
           git config --global user.email "ci@reeds.ai"
           git config --global user.name "REEDS CI"
 
-          git clone https://Zagzy:${HF_TOKEN}@huggingface.co/spaces/Zagzy/reeds-ml-worker hf_space_repo
+          rm -rf hf_space_repo
+          git clone "https://Zagzy:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}" hf_space_repo
 
-          cp huggingface_space/app.py          hf_space_repo/app.py
+          cp huggingface_space/app.py hf_space_repo/app.py
           cp huggingface_space/requirements.txt hf_space_repo/requirements.txt
-          cp huggingface_space/README.md        hf_space_repo/README.md
+          cp huggingface_space/runtime.txt hf_space_repo/runtime.txt
+          cp huggingface_space/README.md hf_space_repo/README.md
 
           cd hf_space_repo
-          git add app.py requirements.txt README.md
+          git add app.py requirements.txt runtime.txt README.md
+
           if git diff --cached --quiet; then
-            echo "No HF Space file changes"
-          else
-            git commit -m "sync from GitHub ${{ github.sha }}"
-            git push origin HEAD:main
+            echo "HF Space is already synchronized"
+            exit 0
           fi
 
-          remote_sha="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-          local_sha="$(git rev-parse HEAD)"
-          echo "HF Space remote SHA: $remote_sha"
-          echo "HF Space local SHA:  $local_sha"
-          test -n "$remote_sha"
-          test "$remote_sha" = "$local_sha"
-          echo "✅ HF Space repository is synchronized"
+          git commit -m "Sync REEDS ML worker $(git -C .. rev-parse --short HEAD)"
+          git push origin HEAD:main
+
+      - name: Verify Space revision
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: Zagzy/reeds-ml-worker
+        run: |
+          set -euo pipefail
+          rm -rf hf_verify
+          git clone --depth=1 "https://Zagzy:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}" hf_verify
+          cmp huggingface_space/app.py hf_verify/app.py
+          cmp huggingface_space/requirements.txt hf_verify/requirements.txt
+          cmp huggingface_space/runtime.txt hf_verify/runtime.txt
+          echo "HF Space verification passed"
