@@ -192,16 +192,34 @@ def api_stats_backtest():
 
 @app.get("/api/wake")
 def wake(request: Request):
-    """Authenticated heartbeat used by the HF worker/cron to trigger coverage work."""
+    """Authenticated heartbeat used by the HF worker/cron to trigger coverage work.
+
+    CRON_SECRET remains the preferred dedicated credential. ADMIN_API_KEY is an
+    explicit fallback for the trusted HF worker because the worker already needs
+    admin authentication for its other Render operations. This avoids a dead wake
+    path when the two independently managed secrets drift out of sync.
+    """
     expected = (settings.cron_secret or "").strip()
+    supplied_cron = request.headers.get("x-cron-secret", "").strip()
+    admin_supplied = request.headers.get("x-admin-key", "").strip()
+    auth = request.headers.get("authorization", "")
+    if not supplied_cron and auth.lower().startswith("bearer "):
+        supplied_cron = auth[7:].strip()
+
+    auth_method = "none"
     if expected:
-        supplied = request.headers.get("x-cron-secret", "").strip()
-        if not supplied:
-            auth = request.headers.get("authorization", "")
-            if auth.lower().startswith("bearer "):
-                supplied = auth[7:].strip()
-        if not supplied or not secrets.compare_digest(supplied, expected):
-            raise HTTPException(status_code=401, detail="Invalid cron credential")
+        if supplied_cron and secrets.compare_digest(supplied_cron, expected):
+            auth_method = "cron_secret"
+        else:
+            admin_expected = (settings.admin_api_key or "").strip()
+            if not admin_expected or not admin_supplied or not secrets.compare_digest(admin_supplied, admin_expected):
+                raise HTTPException(status_code=401, detail="Invalid wake credential")
+            auth_method = "admin_api_key_fallback"
+    elif settings.app_env == "production":
+        admin_expected = (settings.admin_api_key or "").strip()
+        if not admin_expected or not admin_supplied or not secrets.compare_digest(admin_supplied, admin_expected):
+            raise HTTPException(status_code=401, detail="Wake authentication is not safely configured")
+        auth_method = "admin_api_key"
 
     from datetime import date
     from app.db.models import Fixture
@@ -223,6 +241,7 @@ def wake(request: Request):
         return {
             "ok": True,
             "heartbeat": True,
+            "auth_method": auth_method,
             "coverage_refresh_queued": queued,
             "existing_fixtures": future_count,
         }
