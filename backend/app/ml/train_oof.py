@@ -88,7 +88,6 @@ def _fit_oof_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_spl
         meta.fit(stacked_oof, y_oof)
         stacked_holdout = np.column_stack([holdout_by_model[name] for name in models])
         meta_holdout = meta.predict_proba(stacked_holdout)
-        # Align meta classes in case a rare chronological training window omitted one.
         aligned_meta = np.zeros((len(X_test), len(labels)), dtype=float)
         for i, cls in enumerate(meta.classes_):
             if cls in labels:
@@ -113,8 +112,7 @@ def _fit_oof_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_spl
 
 
 def _factories(binary: bool):
-    # Keep the four strong tree learners in production; exclude the optional MLP
-    # and slower GradientBoosting from the production bundle.
+    """Return the production tree ensemble; avoid the optional MLP/GB models."""
     wanted = {"random_forest", "xgboost", "lightgbm", "catboost"}
     return [(name, factory) for name, factory in _build_model_factories(binary=binary, slim=False) if name in wanted]
 
@@ -123,10 +121,12 @@ def _save_bundle(result, features, labels, sport, sample_size, calibrator_path=N
     settings = get_settings()
     model_dir = Path(settings.model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
+    sport = str(sport).strip().lower()
     model_type = "+".join(result["model_types"])
     stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     path = model_dir / f"{sport}_oof_ensemble_{stamp}.joblib"
     bundle = {
+        "sport": sport,
         "models": result["models"],
         "meta_learner": result["meta_learner"],
         "features": features,
@@ -143,6 +143,7 @@ def _save_bundle(result, features, labels, sport, sample_size, calibrator_path=N
     return {
         "path": str(path),
         "full_path": str(path),
+        "sport": sport,
         "accuracy": result["accuracy"],
         "sample_size": sample_size,
         "model_type": model_type,
@@ -188,6 +189,7 @@ def train_basketball_model_oof(fixtures):
 
 
 def train_generic_sport_model_oof(fixtures, sport: str):
+    sport = str(sport).strip().lower()
     X, y = _build_generic_features(fixtures, sport)
     X = X.reindex(columns=GENERIC_SPORT_FEATURES, fill_value=0)
     return _split_and_train(X, y, [0, 1], _factories(True), sport, GENERIC_SPORT_FEATURES)
