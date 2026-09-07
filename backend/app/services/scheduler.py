@@ -25,6 +25,7 @@ from app.scraper.loaders import (
 from app.scraper.web_score_sources import ingest_web_score_sources
 from app.services.deep_coverage import purge_showcase_rows, run_deep_coverage
 from app.services.fixture_normalizer import normalize_fixture_sports
+from app.services.prediction_learning import build_learning_context, settle_prediction_outcomes
 from app.services.predictions import generate_today_predictions
 from app.services.public_football_sources import (
     ingest_fixture_download_football,
@@ -51,6 +52,7 @@ def run_lightweight_refresh() -> dict:
         "coverage_recovery": None,
         "normalization": None,
         "purged_showcase": 0,
+        "learning": None,
         "skipped": [],
     }
 
@@ -190,6 +192,12 @@ def run_lightweight_refresh() -> dict:
             log.exception("Community settlement failed")
 
         try:
+            report["learning"] = settle_prediction_outcomes(db, lookback_days=90)
+        except Exception:
+            db.rollback()
+            log.exception("Prediction outcome settlement failed")
+
+        try:
             report["predictions_generated"] = generate_today_predictions(db)
         except Exception as exc:
             db.rollback()
@@ -227,7 +235,7 @@ def start_scheduler() -> BackgroundScheduler:
         report = run_lightweight_refresh()
         coverage = report.get("coverage_recovery") or {}
         log.info(
-            "Refresh: providers=%s coverage=%s predictions=%d purged_showcase=%d skipped=%d",
+            "Refresh: providers=%s coverage=%s predictions=%d learning=%s purged_showcase=%d skipped=%d",
             report.get("ingested", {}),
             {
                 "before": coverage.get("before"),
@@ -235,6 +243,7 @@ def start_scheduler() -> BackgroundScheduler:
                 "target": coverage.get("target"),
             },
             report.get("predictions_generated", 0),
+            report.get("learning"),
             report.get("purged_showcase", 0),
             len(report.get("skipped", [])),
         )
@@ -316,6 +325,63 @@ def start_scheduler() -> BackgroundScheduler:
         max_instances=1, coalesce=True,
     )
 
+    def live_prediction_refresh_job():
+        """Re-read the board during active play without waiting for the 2h ingestion cycle."""
+        db = SessionLocal()
+        try:
+            active_or_upcoming = db.query(__import__("app.db.models", fromlist=["Fixture"]).Fixture.id).filter(
+                __import__("sqlalchemy", fromlist=["func"]).func.date(__import__("app.db.models", fromlist=["Fixture"]).Fixture.match_date) >= date.today()
+            ).first()
+            if not active_or_upcoming:
+                return
+            generated = generate_today_predictions(db)
+            context = build_learning_context(db)
+            log.info(
+                "Prediction heartbeat: generated=%d guard=%s daily_losses=%s recent_accuracy=%s streak=%s",
+                generated,
+                context.get("guard"),
+                context.get("daily_losses"),
+                context.get("recent_accuracy"),
+                context.get("current_loss_streak"),
+            )
+        except Exception:
+            db.rollback()
+            log.exception("Live prediction refresh failed")
+        finally:
+            db.close()
+            gc.collect()
+
+    scheduler.add_job(
+        live_prediction_refresh_job, "interval", minutes=10,
+        id="live_prediction_refresh", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
+
+    def learning_watch_job():
+        db = SessionLocal()
+        try:
+            result = settle_prediction_outcomes(db, lookback_days=90)
+            context = build_learning_context(db)
+            db.commit()
+            log.info(
+                "Learning watch: settled=%d won=%d lost=%d guard=%s daily_losses=%s accuracy=%s streak=%s",
+                result.get("settled", 0), result.get("won", 0), result.get("lost", 0),
+                context.get("guard"), context.get("daily_losses"), context.get("recent_accuracy"),
+                context.get("current_loss_streak"),
+            )
+        except Exception:
+            db.rollback()
+            log.exception("Learning watch failed")
+        finally:
+            db.close()
+            gc.collect()
+
+    scheduler.add_job(
+        learning_watch_job, "interval", minutes=5,
+        id="learning_watch", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
+
     def value_scan_job():
         from app.services.value_bets import run_value_scan
         db = SessionLocal()
@@ -348,5 +414,5 @@ def start_scheduler() -> BackgroundScheduler:
     )
 
     scheduler.start()
-    log.info("Scheduler started — real multi-source fixture coverage enabled")
+    log.info("Scheduler started — real multi-source fixture coverage, live prediction refresh, and closed-loop learning enabled")
     return scheduler
