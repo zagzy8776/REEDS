@@ -83,11 +83,7 @@ def cron_diagnostics():
     """Non-secret diagnostic for comparing the running cron credential."""
     value = (settings.cron_secret or "").strip()
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else ""
-    return {
-        "configured": bool(value),
-        "length": len(value),
-        "sha256_prefix": digest,
-    }
+    return {"configured": bool(value), "length": len(value), "sha256_prefix": digest}
 
 
 @app.get("/ready")
@@ -99,10 +95,7 @@ def readiness():
         return {"ok": True, "ready": True, "database": "ok"}
     except Exception as exc:
         log.exception("Readiness database check failed")
-        return JSONResponse(
-            status_code=503,
-            content={"ok": False, "ready": False, "database": "error", "detail": str(exc)[:200]},
-        )
+        return JSONResponse(status_code=503, content={"ok": False, "ready": False, "database": "error", "detail": str(exc)[:200]})
 
 
 @app.get("/api/readiness")
@@ -129,57 +122,25 @@ def api_stats_backtest():
     db = SessionLocal()
     try:
         latest_times = (
-            db.query(
-                ModelVersion.sport.label("sport"),
-                func.max(ModelVersion.trained_at).label("trained_at"),
-            )
+            db.query(ModelVersion.sport.label("sport"), func.max(ModelVersion.trained_at).label("trained_at"))
             .group_by(ModelVersion.sport)
             .subquery()
         )
         model_rows = (
             db.query(ModelVersion)
-            .join(
-                latest_times,
-                and_(
-                    ModelVersion.sport == latest_times.c.sport,
-                    ModelVersion.trained_at == latest_times.c.trained_at,
-                ),
-            )
+            .join(latest_times, and_(ModelVersion.sport == latest_times.c.sport, ModelVersion.trained_at == latest_times.c.trained_at))
             .order_by(ModelVersion.sport.asc())
             .limit(24)
             .all()
         )
-
-        backtests = (
-            db.query(BacktestRun)
-            .order_by(BacktestRun.created_at.desc())
-            .limit(20)
-            .all()
-        )
+        backtests = db.query(BacktestRun).order_by(BacktestRun.created_at.desc()).limit(20).all()
         return {
             "models": [
-                {
-                    "id": model.id,
-                    "sport": model.sport,
-                    "type": model.model_type,
-                    "sample_size": model.sample_size,
-                    "accuracy": model.accuracy,
-                    "active": model.is_active,
-                    "trained_at": model.trained_at,
-                }
+                {"id": model.id, "sport": model.sport, "type": model.model_type, "sample_size": model.sample_size, "accuracy": model.accuracy, "active": model.is_active, "trained_at": model.trained_at}
                 for model in model_rows
             ],
             "backtests": [
-                {
-                    "id": run.id,
-                    "sport": run.sport,
-                    "model_type": run.model_type,
-                    "sample_size": run.sample_size,
-                    "accuracy": run.accuracy,
-                    "brier_score": run.brier_score,
-                    "log_loss": run.log_loss,
-                    "created_at": run.created_at,
-                }
+                {"id": run.id, "sport": run.sport, "model_type": run.model_type, "sample_size": run.sample_size, "accuracy": run.accuracy, "brier_score": run.brier_score, "log_loss": run.log_loss, "created_at": run.created_at}
                 for run in backtests
             ],
         }
@@ -190,15 +151,28 @@ def api_stats_backtest():
         db.close()
 
 
+@app.get("/api/stats/ai-learning")
+def api_stats_ai_learning():
+    """Closed-loop diagnostics for settled public AI picks and calibration behavior."""
+    from app.db.session import SessionLocal
+    from app.services.prediction_learning import learning_summary, settle_prediction_outcomes
+
+    db = SessionLocal()
+    try:
+        settlement = settle_prediction_outcomes(db, lookback_days=90)
+        db.commit()
+        return {"ok": True, "settlement": settlement, **learning_summary(db)}
+    except Exception as exc:
+        db.rollback()
+        log.exception("AI learning diagnostics failed")
+        raise HTTPException(status_code=503, detail="AI learning diagnostics unavailable") from exc
+    finally:
+        db.close()
+
+
 @app.get("/api/wake")
 def wake(request: Request):
-    """Authenticated heartbeat used by the HF worker/cron to trigger coverage work.
-
-    CRON_SECRET remains the preferred dedicated credential. ADMIN_API_KEY is an
-    explicit fallback for the trusted HF worker because the worker already needs
-    admin authentication for its other Render operations. This avoids a dead wake
-    path when the two independently managed secrets drift out of sync.
-    """
+    """Authenticated heartbeat used by the HF worker/cron to trigger coverage work."""
     expected = (settings.cron_secret or "").strip()
     supplied_cron = request.headers.get("x-cron-secret", "").strip()
     admin_supplied = request.headers.get("x-admin-key", "").strip()
@@ -229,22 +203,9 @@ def wake(request: Request):
     db = SessionLocal()
     try:
         today = date.today()
-        future_count = (
-            db.query(Fixture.id)
-            .filter(
-                func.date(Fixture.match_date) >= today,
-                Fixture.source != "coverage_seed",
-            )
-            .count()
-        )
+        future_count = db.query(Fixture.id).filter(func.date(Fixture.match_date) >= today, Fixture.source != "coverage_seed").count()
         queued = start_coverage_refresh(reason="cron_wake")
-        return {
-            "ok": True,
-            "heartbeat": True,
-            "auth_method": auth_method,
-            "coverage_refresh_queued": queued,
-            "existing_fixtures": future_count,
-        }
+        return {"ok": True, "heartbeat": True, "auth_method": auth_method, "coverage_refresh_queued": queued, "existing_fixtures": future_count}
     except Exception as exc:
         log.exception("Wake endpoint failed")
         raise HTTPException(status_code=503, detail="Wake failed") from exc
