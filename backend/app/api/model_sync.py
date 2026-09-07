@@ -5,12 +5,13 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from pathlib import Path
 
 import joblib
 import requests
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from pathlib import Path
 from sqlalchemy.orm import Session
+from sklearn import __version__ as SKLEARN_VERSION
 
 from app.core.config import get_settings
 from app.db.models import ModelArtifact
@@ -46,6 +47,14 @@ def _validate_bundle(path: Path) -> dict:
     if not sport:
         lowered = path.name.lower()
         sport = "basketball" if "basketball" in lowered else "soccer"
+
+    runtime_versions = bundle.get("runtime_versions") or {}
+    artifact_sklearn = str(runtime_versions.get("scikit_learn") or "").strip()
+    if artifact_sklearn and artifact_sklearn != SKLEARN_VERSION:
+        raise ValueError(
+            f"incompatible scikit-learn artifact version {artifact_sklearn}; production uses {SKLEARN_VERSION}"
+        )
+
     if not 0.0 <= accuracy <= 1.0:
         raise ValueError(f"invalid accuracy: {accuracy}")
     if sample_size <= 0:
@@ -55,6 +64,7 @@ def _validate_bundle(path: Path) -> dict:
         "accuracy": accuracy,
         "sample_size": sample_size,
         "model_type": "+".join(str(x) for x in model_types)[:50] or "uploaded",
+        "runtime_versions": runtime_versions,
     }
 
 
@@ -132,6 +142,7 @@ async def upload_model(
             "sample_size": final_sample_size,
             "model_version_id": mv.id,
             "active": bool(mv.is_active),
+            "runtime_versions": metadata.get("runtime_versions") or {},
         }
     except HTTPException:
         raise
