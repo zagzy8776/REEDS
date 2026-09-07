@@ -1,9 +1,4 @@
-"""Safe production model synchronization.
-
-Downloads model artifacts into a staging directory, validates every artifact,
-and only then replaces production files. A failed download/validation never
-wipes the last known-good model files.
-"""
+"""Safe production model synchronization and durable model uploads."""
 
 from __future__ import annotations
 
@@ -14,10 +9,11 @@ from pathlib import Path
 
 import joblib
 import requests
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.db.models import ModelArtifact
 from app.db.session import get_db
 from app.services.model_registry import register_model
 
@@ -62,6 +58,89 @@ def _validate_bundle(path: Path) -> dict:
     }
 
 
+@router.post("/api/admin/upload-model", dependencies=[Depends(_admin_key)])
+async def upload_model(
+    model: UploadFile = File(...),
+    sport: str = Form(""),
+    model_type: str = Form("uploaded"),
+    accuracy: float = Form(0.0),
+    sample_size: int = Form(0),
+    db: Session = Depends(get_db),
+):
+    """Accept a validated worker model and persist its bytes in Neon.
+
+    Render's filesystem is ephemeral, so the database copy is the durable source
+    of truth. The local file is still written for immediate inference.
+    """
+    settings = get_settings()
+    model_dir = Path(settings.model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        filename = _safe_filename(model.filename or "model.joblib")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload = await model.read()
+    if not payload or len(payload) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Invalid or oversized model artifact")
+
+    fd, temp_name = tempfile.mkstemp(prefix="reeds-upload-", suffix=".joblib", dir=str(model_dir))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        temp_path.write_bytes(payload)
+        metadata = _validate_bundle(temp_path)
+        final_sport = str(sport or metadata["sport"]).strip().lower()
+        final_type = str(model_type or metadata["model_type"])[:120]
+        final_accuracy = float(accuracy or metadata["accuracy"])
+        final_sample_size = int(sample_size or metadata["sample_size"])
+
+        destination = model_dir / filename
+        os.replace(temp_path, destination)
+
+        existing = db.query(ModelArtifact).filter_by(sport=final_sport, filename=filename).first()
+        if existing:
+            existing.model_type = final_type
+            existing.accuracy = final_accuracy
+            existing.sample_size = final_sample_size
+            existing.data = payload
+        else:
+            db.add(ModelArtifact(
+                sport=final_sport,
+                filename=filename,
+                model_type=final_type,
+                accuracy=final_accuracy,
+                sample_size=final_sample_size,
+                data=payload,
+            ))
+        db.flush()
+        mv = register_model(
+            db,
+            final_sport,
+            final_type,
+            str(destination),
+            final_accuracy,
+            final_sample_size,
+        )
+        db.commit()
+        return {
+            "status": "success",
+            "durable": True,
+            "file": filename,
+            "sport": final_sport,
+            "accuracy": final_accuracy,
+            "sample_size": final_sample_size,
+            "model_version_id": mv.id,
+            "active": bool(mv.is_active),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        temp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Model upload failed: {str(exc)[:300]}") from exc
+
+
 @router.post("/api/admin/sync-models-safe", dependencies=[Depends(_admin_key)])
 def sync_models_safe(db: Session = Depends(get_db)):
     """Atomically synchronize the latest GitHub model release into production."""
@@ -97,7 +176,6 @@ def sync_models_safe(db: Session = Depends(get_db)):
     staged: list[tuple[Path, Path, dict]] = []
 
     try:
-        # Phase 1: download and fully validate everything away from production.
         for asset in assets:
             name = _safe_filename(asset.get("name", ""))
             destination = stage / name
@@ -113,7 +191,6 @@ def sync_models_safe(db: Session = Depends(get_db)):
         if not staged:
             return {"status": "nothing_staged", "installed": 0}
 
-        # Phase 2: replace each artifact only after ALL artifacts validated.
         backups: list[tuple[Path, Path]] = []
         installed: list[dict] = []
         try:
@@ -124,19 +201,18 @@ def sync_models_safe(db: Session = Depends(get_db)):
                     backups.append((backup, destination))
                 os.replace(source, destination)
                 installed.append({"file": destination.name, **metadata})
+                db.query(ModelArtifact).filter_by(sport=metadata["sport"], filename=destination.name).delete()
+                db.add(ModelArtifact(
+                    sport=metadata["sport"], filename=destination.name,
+                    model_type=metadata["model_type"], accuracy=metadata["accuracy"],
+                    sample_size=metadata["sample_size"], data=destination.read_bytes(),
+                ))
 
             for item in installed:
                 path = str(model_dir / item["file"])
-                mv = register_model(
-                    db,
-                    item["sport"],
-                    item["model_type"],
-                    path,
-                    item["accuracy"],
-                    item["sample_size"],
-                )
+                mv = register_model(db, item["sport"], item["model_type"], path, item["accuracy"], item["sample_size"])
                 item["active"] = bool(mv.is_active)
-
+            db.commit()
         except Exception:
             for _, destination, _ in reversed(staged):
                 if destination.exists():
@@ -147,11 +223,6 @@ def sync_models_safe(db: Session = Depends(get_db)):
             db.rollback()
             raise
 
-        return {
-            "status": "success",
-            "release": releases[0].get("tag_name"),
-            "installed": len(installed),
-            "models": installed,
-        }
+        return {"status": "success", "release": releases[0].get("tag_name"), "installed": len(installed), "models": installed}
     finally:
         shutil.rmtree(stage, ignore_errors=True)
