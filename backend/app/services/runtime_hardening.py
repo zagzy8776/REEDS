@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from functools import wraps
 import logging
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ def _install_trained_generic_prediction_bridge() -> None:
         from app.ml.generic import GenericSportEngine
         from app.ml.train import GENERIC_SPORT_FEATURES, _build_generic_features
         from app.services.model_registry import active_model_path
+        from app.core.config import get_settings
 
         original = getattr(GenericSportEngine, "predict", None)
         if original is None or getattr(original, "_reeds_trained_bridge", False):
@@ -41,9 +43,15 @@ def _install_trained_generic_prediction_bridge() -> None:
 
             try:
                 db = fixture.get("_db")
-                if db is None:
-                    return original(self, history, fixture)
-                model_path = active_model_path(db, sport)
+                model_path = active_model_path(db, sport) if db is not None else None
+                if not model_path:
+                    model_dir = Path(get_settings().model_dir)
+                    candidates = sorted(
+                        model_dir.glob(f"{sport}_ensemble_*_slim.joblib"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    model_path = str(candidates[0]) if candidates else None
                 if not model_path:
                     return original(self, history, fixture)
 
@@ -104,13 +112,11 @@ def _install_trained_generic_prediction_bridge() -> None:
                 pick = "Home Win" if home_prob >= 0.5 else "Away Win"
                 risk = "Low" if confidence >= 72 else "Medium" if confidence >= 58 else "High"
 
-                items = original(self, history, fixture)
-                if not items:
-                    items = []
+                items = original(self, history, fixture) or []
                 moneyline = next((item for item in items if item.get("market") == "Moneyline"), None)
                 meta = {
                     "summary": f"Trained {sport.replace('_', ' ')} production model used for the Moneyline read.",
-                    "model_source": "active_model_registry",
+                    "model_source": "active_model_registry" if db is not None else "latest_local_model_artifact",
                     "model_path": model_path,
                     "model_accuracy": float(bundle.get("accuracy", 0.0)),
                     "training_rows": int(bundle.get("sample_size", 0)),
