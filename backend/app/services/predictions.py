@@ -6,6 +6,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture, OddsSnapshot, Prediction
+from app.services.prediction_learning import (
+    apply_learning_feedback,
+    build_learning_context,
+    publication_allowed,
+    settle_prediction_outcomes,
+)
 from app.services.prediction_quality import annotate_quality, evaluate_publication
 
 
@@ -41,11 +47,28 @@ def choose_provisional_public_pick(items: list[dict]) -> dict | None:
     return max(candidates, key=lambda item: float(item.get("confidence", 0)))
 
 
-def select_public_picks(items: list[dict], max_picks: int = 4) -> set[int]:
-    """Select only quality-approved public picks; never bypass quality controls."""
+def select_public_picks(
+    items: list[dict],
+    max_picks: int = 4,
+    *,
+    fixture: Fixture | None = None,
+    learning_context: dict | None = None,
+) -> set[int]:
+    """Select only quality-approved public picks plus the closed-loop guard."""
     published: set[int] = set()
     for idx, raw_item in enumerate(items):
         item = annotate_quality(raw_item)
+        if learning_context is not None and fixture is not None:
+            allowed, reason = publication_allowed(item, fixture, learning_context)
+            if not allowed:
+                meta = dict(item.get("engine_meta") or {})
+                meta["publication_quality"] = {
+                    **dict(meta.get("publication_quality") or {}),
+                    "accepted": False,
+                    "reasons": [*(meta.get("publication_quality") or {}).get("reasons", []), reason],
+                }
+                item["engine_meta"] = meta
+                continue
         if should_publish_pick(item) and evaluate_publication(item)[0]:
             published.add(idx)
 
@@ -83,6 +106,18 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
         reasoning = " ".join(pieces)
     elif "risk" not in reasoning.lower():
         reasoning = f"{reasoning} Risk is marked {item.get('risk_level', 'Medium')} based on confidence and available data depth."
+
+    feedback = meta.get("learning_feedback") if isinstance(meta.get("learning_feedback"), dict) else {}
+    adjustment = float(feedback.get("adjustment") or 0.0)
+    if adjustment < 0:
+        reasoning = (
+            f"{reasoning} Recent settled results showed this sport/market regime was running below its "
+            f"historical confidence level, so REEDS reduced this read by {abs(adjustment):.1f} points "
+            "instead of staying adamant."
+        )
+    elif feedback:
+        reasoning = f"{reasoning} Recent settled results are being used as a calibration check for this read."
+
     item["reasoning"] = reasoning
     item["engine_meta"] = {
         "summary": summary or f"LOYAL EDGE reviewed {fixture.sport.replace('_', ' ')} fixture context before selecting this market.",
@@ -198,12 +233,14 @@ def _prediction_signature(item: dict) -> tuple:
         for k, v in probs.items()
         if isinstance(v, (int, float))
     ))
+    feedback = meta.get("learning_feedback") if isinstance(meta.get("learning_feedback"), dict) else {}
     return (
         str(item.get("market", "")),
         str(item.get("pick", "")),
         round(float(item.get("confidence", 0)), 3),
         round(float(item.get("edge_score", 0)), 5),
         normalized_probs,
+        round(float(feedback.get("adjustment", 0)), 3),
     )
 
 
@@ -218,6 +255,16 @@ def generate_today_predictions(db: Session) -> int:
     from app.ml.generic import GenericSportEngine
     from app.ml.ensemble import LoyalEdgeEngine
     from app.services.model_registry import active_model_path
+
+    # First settle any completed public picks, then let the new generation pass
+    # learn from the settled record without changing the actual training labels.
+    try:
+        settle_prediction_outcomes(db, lookback_days=90)
+        learning_context = build_learning_context(db)
+    except Exception:
+        db.rollback()
+        log.exception("Prediction feedback loop could not be refreshed")
+        learning_context = {"guard": "normal"}
 
     today_ref = date.today()
     PRIORITY_LEAGUES = {
@@ -277,13 +324,24 @@ def generate_today_predictions(db: Session) -> int:
                 })
 
             _backfill_fixture_odds(db, fx, items)
-            published_indexes = select_public_picks(items)
+            for item in items:
+                apply_learning_feedback(item, fx, learning_context)
+            published_indexes = select_public_picks(
+                items,
+                fixture=fx,
+                learning_context=learning_context,
+            )
             for idx, item in enumerate(items):
                 item = annotate_quality(explain_prediction_item(item, fx))
                 is_published = idx in published_indexes
                 signature = _prediction_signature(item)
                 meta = dict(item.get("engine_meta") or {})
                 meta["prediction_signature"] = signature
+                meta["learning_context"] = {
+                    "guard": learning_context.get("guard", "normal"),
+                    "daily_losses": learning_context.get("daily_losses", 0),
+                    "recent_accuracy": learning_context.get("recent_accuracy"),
+                }
 
                 existing = (
                     db.query(Prediction)
