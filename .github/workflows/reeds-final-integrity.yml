@@ -1,0 +1,216 @@
+name: REEDS final integrity pass
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/reeds-final-integrity.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Patch production integrity issues
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          # 1) Make fixture writes race-safe. The natural uniqueness key is
+          #    shared by all providers, so concurrent inserts must use a SAVEPOINT.
+          path = Path("backend/app/scraper/loaders.py")
+          text = path.read_text(encoding="utf-8")
+          if "from sqlalchemy.exc import IntegrityError" not in text:
+              text = text.replace(
+                  "from sqlalchemy.orm import Session\n",
+                  "from sqlalchemy.orm import Session\nfrom sqlalchemy.exc import IntegrityError\n",
+                  1,
+              )
+          pattern = re.compile(
+              r"def upsert_fixture\(db: Session, fixture: Fixture\) -> None:\n.*?(?=\n\ndef _to_int_or_none)",
+              re.S,
+          )
+          replacement = '''def upsert_fixture(db: Session, fixture: Fixture) -> None:
+    """Insert/update a fixture while tolerating concurrent provider inserts."""
+    if fixture.extra is None:
+        fixture.extra = {}
+    fixture.league = _country_qualified_league(fixture.league, fixture.extra)
+
+    def _find_existing():
+        return (
+            db.query(Fixture)
+            .filter(
+                Fixture.sport == fixture.sport,
+                Fixture.league == fixture.league,
+                Fixture.match_date == fixture.match_date,
+                Fixture.home_team == fixture.home_team,
+                Fixture.away_team == fixture.away_team,
+            )
+            .first()
+        )
+
+    def _merge(existing):
+        existing.season = fixture.season or existing.season
+        if fixture.home_score is not None:
+            existing.home_score = fixture.home_score
+        if fixture.away_score is not None:
+            existing.away_score = fixture.away_score
+        if fixture.home_odds is not None:
+            existing.home_odds = fixture.home_odds
+        if fixture.draw_odds is not None:
+            existing.draw_odds = fixture.draw_odds
+        if fixture.away_odds is not None:
+            existing.away_odds = fixture.away_odds
+        existing.source = fixture.source or existing.source
+        existing.extra = _merge_extra(existing, fixture.extra)
+
+    existing = _find_existing()
+    if existing:
+        _merge(existing)
+        return
+
+    fixture.extra = _merge_extra(fixture, fixture.extra)
+    try:
+        with db.begin_nested():
+            db.add(fixture)
+            db.flush()
+    except IntegrityError:
+        existing = _find_existing()
+        if existing is None:
+            raise
+        _merge(existing)
+'''
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("loaders.upsert_fixture patch target not found")
+          path.write_text(text, encoding="utf-8")
+
+          # 2) Deep coverage must never make an unauthenticated OpenFoot call.
+          #    The configured-key path in coverage_sources.py is the canonical one.
+          path = Path("backend/app/scraper/deep_coverage.py")
+          text = path.read_text(encoding="utf-8")
+          openfoot_pattern = re.compile(
+              r"def _ingest_openfoot\(db: Session, dates: list\[str\]\) -> int:\n.*?(?=\n\ndef run_deep_coverage)",
+              re.S,
+          )
+          openfoot_replacement = '''def _ingest_openfoot(db: Session, api_key: str | None, dates: list[str]) -> int:
+    """Ingest OpenFoot only when a real production API key is configured."""
+    if not api_key or not dates:
+        return 0
+
+    count = 0
+    session = requests.Session()
+    session.headers.update({
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    })
+    for target_date in dates:
+        try:
+            response = session.get(
+                f"{OPENFOOT_BASE}/matches",
+                params={"date": target_date},
+                timeout=25,
+            )
+            if response.status_code in {401, 403}:
+                log.warning("OpenFoot unavailable: HTTP %s", response.status_code)
+                return count
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            log.warning("OpenFoot request failed for %s: %s", target_date, exc)
+            continue
+
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            kickoff = pd.to_datetime(item.get("kickoffAt"), errors="coerce", utc=True)
+            home = item.get("homeTeam") or {}
+            away = item.get("awayTeam") or {}
+            home_name = home.get("name") if isinstance(home, dict) else str(home)
+            away_name = away.get("name") if isinstance(away, dict) else str(away)
+            if pd.isna(kickoff) or not home_name or not away_name:
+                continue
+            competition = item.get("competition") or item.get("competitionName") or item.get("competitionId") or "Football"
+            if isinstance(competition, dict):
+                competition = competition.get("name") or competition.get("id") or "Football"
+            fx = Fixture(
+                sport="soccer",
+                league=str(competition)[:80],
+                season=str(item.get("season") or kickoff.year)[:20],
+                match_date=kickoff.date(),
+                home_team=resolve_team_name(db, home_name, "soccer", "openfoot_range"),
+                away_team=resolve_team_name(db, away_name, "soccer", "openfoot_range"),
+                home_score=_score(item, "home"),
+                away_score=_score(item, "away"),
+                source="openfoot_range",
+                extra={"openfoot_match_id": item.get("id"), "status": item.get("status")},
+            )
+            upsert_fixture(db, fx)
+            count += 1
+        db.commit()
+    return count
+'''
+          text, count = openfoot_pattern.subn(openfoot_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("deep_coverage OpenFoot patch target not found")
+          text = text.replace(
+              '    run("openfoot", _ingest_openfoot, db, dates)\n',
+              '    if settings.openfoot_api_key:\n        run("openfoot", _ingest_openfoot, db, settings.openfoot_api_key, dates)\n    else:\n        report["sources"]["openfoot"] = {"rows": 0, "status": "not_configured"}\n',
+              1,
+          )
+          path.write_text(text, encoding="utf-8")
+
+          # 3) A failed provider must not poison the shared SQLAlchemy session.
+          path = Path("backend/app/services/scheduler.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''            except Exception as exc:
+                report["skipped"].append({"provider": name, "reason": str(exc)[:300]})
+                log.exception("Fixture provider failed: %s", name)
+'''
+          new = '''            except Exception as exc:
+                try:
+                    db.rollback()
+                except Exception:
+                    log.exception("Could not rollback after provider failure: %s", name)
+                report["skipped"].append({"provider": name, "reason": str(exc)[:300]})
+                log.exception("Fixture provider failed: %s", name)
+'''
+          if old not in text:
+              raise SystemExit("scheduler provider exception block not found")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # 4) Mark the worker source as a new synchronized revision so the HF
+          #    deployment workflow runs and copies the current worker to the Space.
+          path = Path("huggingface_space/app.py")
+          text = path.read_text(encoding="utf-8")
+          marker = "# REEDS_WORKER_SYNC_MARKER"
+          if marker not in text:
+              text += "\n\n# REEDS_WORKER_SYNC_MARKER\n"
+          path.write_text(text, encoding="utf-8")
+          print("Production integrity patch complete")
+          PY
+
+      - name: Validate patched sources
+        run: |
+          python -m compileall -q backend/app huggingface_space/app.py
+
+      - name: Commit patched sources and remove one-shot workflow
+        run: |
+          set -euo pipefail
+          git config user.email "ci@reeds.ai"
+          git config user.name "REEDS CI"
+          git add backend/app/scraper/loaders.py backend/app/scraper/deep_coverage.py backend/app/services/scheduler.py huggingface_space/app.py .github/workflows/reeds-final-integrity.yml
+          git rm .github/workflows/reeds-final-integrity.yml
+          git commit -m "Finalize provider session safety and HF worker sync"
+          git push origin HEAD:main
