@@ -55,6 +55,11 @@ def on_startup():
         install_quality_training()
     except Exception:
         log.exception("Could not install quality training guard")
+    try:
+        from app.services.runtime_hardening import install_provider_runtime_hardening
+        install_provider_runtime_hardening()
+    except Exception:
+        log.exception("Could not install provider runtime hardening")
     threading.Thread(target=_bootstrap_models_background, name="model-bootstrap", daemon=True).start()
     from app.services.prediction_guard import install_prediction_guard
     install_prediction_guard()
