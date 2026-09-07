@@ -6,6 +6,7 @@ available sport models from completed Neon data, publishes artifacts to Render,
 and polls Render for retraining signals.
 """
 
+import hashlib
 import os
 import sys
 import time
@@ -128,11 +129,21 @@ def _load_data(db):
 
 
 def _render_headers() -> dict:
-    return {"x-admin-key": ADMIN_KEY} if ADMIN_KEY else {}
+    return {"x-admin-key": ADMIN_KEY.strip()} if ADMIN_KEY.strip() else {}
 
 
 def _wake_headers() -> dict:
-    return {"X-Cron-Secret": CRON_SECRET} if CRON_SECRET else {}
+    value = CRON_SECRET.strip()
+    return {"X-Cron-Secret": value} if value else {}
+
+
+def _cron_diagnostic(value: str) -> dict:
+    value = value.strip()
+    return {
+        "configured": bool(value),
+        "length": len(value),
+        "sha256_prefix": hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else "",
+    }
 
 
 def _sync_provider_history() -> tuple[bool, str]:
@@ -234,6 +245,10 @@ def action_ingest(max_leagues: int):
                 results.append(f"{name}: {total:,}")
                 _log(f"  {results[-1]}")
             except Exception as exc:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 results.append(f"{name}: ERROR {exc}")
                 _log(f"  ❌ {results[-1]}")
         return "\n".join(["✅ Free historical ingestion finished", *results]), _get_log()
@@ -458,8 +473,32 @@ def action_model_status():
 
 
 def action_wake_render():
+    local = _cron_diagnostic(CRON_SECRET)
+    _log(
+        "🔐 HF cron credential: "
+        f"configured={local['configured']} length={local['length']} sha256={local['sha256_prefix']}"
+    )
     try:
         health = requests.get(f"{RENDER_URL}/api/health", timeout=20)
+        diagnostic = None
+        if ADMIN_KEY:
+            try:
+                diag_response = requests.get(
+                    f"{RENDER_URL}/api/admin/cron-diagnostics",
+                    headers=_render_headers(),
+                    timeout=20,
+                )
+                if diag_response.ok:
+                    diagnostic = diag_response.json()
+                    _log(
+                        "🔎 Render cron credential: "
+                        f"configured={diagnostic.get('configured')} "
+                        f"length={diagnostic.get('length')} "
+                        f"sha256={diagnostic.get('sha256_prefix')}"
+                    )
+            except Exception as exc:
+                _log(f"⚠️ Render credential diagnostic unavailable: {exc}")
+
         response = requests.get(f"{RENDER_URL}/api/wake", headers=_wake_headers(), timeout=60)
         if response.ok:
             data = response.json()
@@ -471,7 +510,20 @@ def action_wake_render():
                 f"existing future fixtures: {data.get('existing_fixtures', 0)}"
             )
         else:
-            message = f"⚠️ HF reached Render but wake returned HTTP {response.status_code}"
+            mismatch = "unknown"
+            if diagnostic:
+                mismatch = "MATCH" if (
+                    diagnostic.get("configured") == local.get("configured")
+                    and diagnostic.get("length") == local.get("length")
+                    and diagnostic.get("sha256_prefix") == local.get("sha256_prefix")
+                ) else "MISMATCH"
+            message = (
+                f"⚠️ HF reached Render but wake returned HTTP {response.status_code}\n"
+                f"cron credential comparison: {mismatch}\n"
+                f"HF configured={local.get('configured')} length={local.get('length')}\n"
+                f"Render configured={diagnostic.get('configured') if diagnostic else 'unknown'} "
+                f"length={diagnostic.get('length') if diagnostic else 'unknown'}"
+            )
     except Exception as exc:
         message = f"❌ HF → Render connection failed: {exc}"
     _log(message)
