@@ -107,20 +107,16 @@ else:
 run([sys.executable, "-m", "pip", "install", "-q", "-r", "backend/requirements.txt"], WORKDIR)
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-train_file = WORKDIR / "backend" / "app" / "ml" / "train.py"
-train_text = train_file.read_text()
-train_text = train_text.replace("if len(X) >= 60000:", "if len(X) >= 20000")
-train_text = train_text.replace("n_trials=15", "n_trials=3")
-train_text = train_text.replace("n_trials=10", "n_trials=3")
-train_file.write_text(train_text)
-print("Kaggle runtime optimization: large-history fast path + 3 Optuna trials")
-
 sys.path.insert(0, str(WORKDIR / "backend"))
 
 from app.db.session import SessionLocal, init_db
 from app.db.models import Fixture
 from app.services.predictions import dataframe_from_db
-from app.ml.train import train_soccer_model, train_basketball_model, train_generic_sport_model
+from app.ml.train_oof import (
+    train_soccer_model_oof,
+    train_basketball_model_oof,
+    train_generic_sport_model_oof,
+)
 
 init_db()
 
@@ -168,18 +164,18 @@ print(f"\nCompleted training rows: {len(data):,}")
 print(data.groupby("sport").size().sort_values(ascending=False).to_string())
 
 trainers = {
-    "soccer": train_soccer_model,
-    "basketball": train_basketball_model,
-    "tennis": lambda frame: train_generic_sport_model(frame, "tennis"),
-    "american_football": lambda frame: train_generic_sport_model(frame, "american_football"),
-    "hockey": lambda frame: train_generic_sport_model(frame, "hockey"),
-    "cricket": lambda frame: train_generic_sport_model(frame, "cricket"),
-    "rugby": lambda frame: train_generic_sport_model(frame, "rugby"),
-    "baseball": lambda frame: train_generic_sport_model(frame, "baseball"),
+    "soccer": train_soccer_model_oof,
+    "basketball": train_basketball_model_oof,
+    "tennis": lambda frame: train_generic_sport_model_oof(frame, "tennis"),
+    "american_football": lambda frame: train_generic_sport_model_oof(frame, "american_football"),
+    "hockey": lambda frame: train_generic_sport_model_oof(frame, "hockey"),
+    "cricket": lambda frame: train_generic_sport_model_oof(frame, "cricket"),
+    "rugby": lambda frame: train_generic_sport_model_oof(frame, "rugby"),
+    "baseball": lambda frame: train_generic_sport_model_oof(frame, "baseball"),
 }
 
 results = []
-print("\n=== MODEL TRAINING ===")
+print("\n=== LEAKAGE-SAFE OOF MODEL TRAINING ===")
 for sport, trainer in trainers.items():
     frame = data[data["sport"] == sport].copy()
     if len(frame) < 200:
@@ -190,7 +186,7 @@ for sport, trainer in trainers.items():
     try:
         result = trainer(frame)
         elapsed = time.time() - started
-        print(f"OK {sport}: accuracy={result['accuracy']:.2%}, rows={result['sample_size']:,}, time={elapsed:.0f}s")
+        print(f"OK {sport}: accuracy={result['accuracy']:.2%}, rows={result['sample_size']:,}, models={','.join(result.get('models_trained', []))}, time={elapsed:.0f}s")
         results.append(result)
     except Exception as exc:
         print(f"FAIL {sport}: {exc}")
@@ -239,4 +235,4 @@ for endpoint in ("/api/admin/predict", "/api/admin/backfill-odds", "/api/admin/c
 print("\n=== KAGGLE TRAINING COMPLETE ===")
 print(f"Models produced: {len(results)}")
 for result in results:
-    print(f"- {result.get('sport', 'soccer')}: {result['accuracy']:.2%} on {result['sample_size']:,} rows")
+    print(f"- {result.get('sport', 'soccer')}: {result['accuracy']:.2%} on {result['sample_size']:,} rows; method={result.get('training_method', 'oof')}")
