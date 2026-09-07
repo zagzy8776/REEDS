@@ -19,7 +19,7 @@ router = APIRouter()
 COVERAGE_FLOOR = 300
 
 
-def _serialize_fixture(fx: Fixture) -> dict:
+def _serialize_fixture(fx: Fixture, *, include_extra: bool = False) -> dict:
     has_odds = any(value is not None for value in (fx.home_odds, fx.draw_odds, fx.away_odds))
     completed = fx.home_score is not None and fx.away_score is not None
     extra = fx.extra if isinstance(fx.extra, dict) else {}
@@ -36,6 +36,12 @@ def _serialize_fixture(fx: Fixture) -> dict:
         result_label = "upcoming"
     else:
         result_label = "past"
+
+    public_extra = {}
+    if extra.get("live"):
+        public_extra["live"] = True
+    if "provider_sources" in extra:
+        public_extra["provider_sources"] = extra["provider_sources"]
 
     return {
         "id": fx.id,
@@ -55,7 +61,7 @@ def _serialize_fixture(fx: Fixture) -> dict:
         "api_status": status,
         "result_label": result_label,
         "source": fx.source,
-        "extra": extra,
+        "extra": extra if include_extra else public_extra,
     }
 
 
@@ -103,6 +109,7 @@ def upcoming_fixtures(
 
     order = [Fixture.match_date.desc(), Fixture.id.desc()] if scope == "results" else [Fixture.match_date.asc(), Fixture.id.asc()]
     fixtures = query.order_by(*order).limit(limit).all()
+    log.info("Fixture endpoint selected %d rows (scope=%s sport=%s league=%s limit=%d)", len(fixtures), scope, sport or "all", league or "all", limit)
 
     # Keep the fixture board aligned with the AI board when the normal fixture
     # query is temporarily empty. Synthetic coverage seeds are never eligible.
@@ -242,4 +249,4 @@ def fixture_detail(fixture_id: int, db: Session = Depends(get_db)):
     fx = db.query(Fixture).filter(Fixture.id == fixture_id, Fixture.source != "coverage_seed").first()
     if not fx:
         raise HTTPException(status_code=404, detail="Fixture not found")
-    return _serialize_fixture(fx)
+    return _serialize_fixture(fx, include_extra=True)
