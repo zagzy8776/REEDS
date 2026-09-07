@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Fixture
 from app.scraper.api_clients import AllSportsApiClient, ApiBasketballClient, ApiFootballClient, ApiFootballComClient, FootballDataOrgClient, SportMonksFootballClient, TheOddsApiClient, TheSportsDbClient
@@ -101,24 +102,26 @@ def _country_qualified_league(league: str, extra: dict | None) -> str:
 
 
 def upsert_fixture(db: Session, fixture: Fixture) -> None:
-    """Insert or update a fixture using the natural uniqueness key."""
+    """Insert/update a fixture while tolerating concurrent provider inserts."""
     if fixture.extra is None:
         fixture.extra = {}
     fixture.league = _country_qualified_league(fixture.league, fixture.extra)
 
-    existing = (
-        db.query(Fixture)
-        .filter(
-            Fixture.sport == fixture.sport,
-            Fixture.league == fixture.league,
-            Fixture.match_date == fixture.match_date,
-            Fixture.home_team == fixture.home_team,
-            Fixture.away_team == fixture.away_team,
+    def _find_existing():
+        return (
+            db.query(Fixture)
+            .filter(
+                Fixture.sport == fixture.sport,
+                Fixture.league == fixture.league,
+                Fixture.match_date == fixture.match_date,
+                Fixture.home_team == fixture.home_team,
+                Fixture.away_team == fixture.away_team,
+            )
+            .first()
         )
-        .first()
-    )
-    if existing:
-        existing.season = fixture.season
+
+    def _merge(existing):
+        existing.season = fixture.season or existing.season
         if fixture.home_score is not None:
             existing.home_score = fixture.home_score
         if fixture.away_score is not None:
@@ -131,9 +134,22 @@ def upsert_fixture(db: Session, fixture: Fixture) -> None:
             existing.away_odds = fixture.away_odds
         existing.source = fixture.source or existing.source
         existing.extra = _merge_extra(existing, fixture.extra)
-    else:
-        fixture.extra = _merge_extra(fixture, fixture.extra)
-        db.add(fixture)
+
+    existing = _find_existing()
+    if existing:
+        _merge(existing)
+        return
+
+    fixture.extra = _merge_extra(fixture, fixture.extra)
+    try:
+        with db.begin_nested():
+            db.add(fixture)
+            db.flush()
+    except IntegrityError:
+        existing = _find_existing()
+        if existing is None:
+            raise
+        _merge(existing)
 
 
 def _to_int_or_none(value) -> int | None:
