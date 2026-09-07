@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: REEDS
+    runtime: python
+    repo: https://github.com/zagzy8776/REEDS
+    branch: main
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /ready
+    autoDeploy: true
+    plan: free
