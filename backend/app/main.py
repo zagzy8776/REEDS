@@ -22,7 +22,7 @@ app.add_middleware(
     allow_origins=settings.allowed_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"] ,
+    allow_headers=["*"],
 )
 app.include_router(public.router, prefix="/api")
 app.include_router(admin.router, prefix="/api/admin")
@@ -99,7 +99,10 @@ def readiness():
         return {"ok": True, "ready": True, "database": "ok"}
     except Exception as exc:
         log.exception("Readiness database check failed")
-        return JSONResponse(status_code=503, content={"ok": False, "ready": False, "database": "error", "detail": str(exc)[:200]})
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "ready": False, "database": "error", "detail": str(exc)[:200]},
+        )
 
 
 @app.get("/api/readiness")
@@ -189,15 +192,14 @@ def api_stats_backtest():
 
 @app.get("/api/wake")
 def wake(request: Request):
-    """Fast authenticated cron heartbeat; enqueue all fixture/model work."""
-    if settings.cron_secret:
-        supplied = request.headers.get("x-cron-secret", "")
+    """Authenticated heartbeat used by the HF worker/cron to trigger coverage work."""
+    expected = (settings.cron_secret or "").strip()
+    if expected:
+        supplied = request.headers.get("x-cron-secret", "").strip()
         if not supplied:
             auth = request.headers.get("authorization", "")
             if auth.lower().startswith("bearer "):
-                supplied = auth[7:]
-        supplied = supplied.strip()
-        expected = (settings.cron_secret or "").strip()
+                supplied = auth[7:].strip()
         if not supplied or not secrets.compare_digest(supplied, expected):
             raise HTTPException(status_code=401, detail="Invalid cron credential")
 
@@ -211,13 +213,21 @@ def wake(request: Request):
         today = date.today()
         future_count = (
             db.query(Fixture.id)
-            .filter(func.date(Fixture.match_date) >= today, Fixture.source != "coverage_seed")
+            .filter(
+                func.date(Fixture.match_date) >= today,
+                Fixture.source != "coverage_seed",
+            )
             .count()
         )
         queued = start_coverage_refresh(reason="cron_wake")
-        return {"ok": True, "heartbeat": True, "coverage_refresh_queued": queued, "existing_fixtures": future_count}
+        return {
+            "ok": True,
+            "heartbeat": True,
+            "coverage_refresh_queued": queued,
+            "existing_fixtures": future_count,
+        }
     except Exception as exc:
         log.exception("Wake endpoint failed")
-        return {"ok": False, "heartbeat": True, "error": str(exc)[:300]}
+        raise HTTPException(status_code=503, detail="Wake failed") from exc
     finally:
         db.close()
