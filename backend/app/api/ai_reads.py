@@ -15,6 +15,26 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _fixture_payload(fixture: Fixture) -> dict:
+    return {
+        "id": fixture.id,
+        "sport": fixture.sport,
+        "league": fixture.league,
+        "season": fixture.season,
+        "match_date": fixture.match_date,
+        "home_team": fixture.home_team,
+        "away_team": fixture.away_team,
+        "home_score": fixture.home_score,
+        "away_score": fixture.away_score,
+        "home_odds": fixture.home_odds,
+        "draw_odds": fixture.draw_odds,
+        "away_odds": fixture.away_odds,
+        "has_odds": any(v is not None for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds)),
+        "source": fixture.source,
+        "provider_sources": (fixture.extra or {}).get("provider_sources", []) if isinstance(fixture.extra, dict) else [],
+    }
+
+
 @router.get("/ai-reads/{fixture_id}")
 def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
     fixture = (
@@ -37,58 +57,42 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
         .all()
     )
 
+    if not rows and fixture.match_date >= date.today():
+        # Generate this one fixture directly rather than depending on the
+        # global 50-fixture prediction cap. A single Match Hub/AI Reads click
+        # should always have an exact on-demand path.
+        try:
+            from app.services.fixture_prediction import generate_fixture_predictions
+            generated = generate_fixture_predictions(db, fixture.id)
+            log.info("Exact AI Reads generation: fixture=%s generated=%s", fixture.id, generated)
+        except Exception:
+            db.rollback()
+            log.exception("Exact AI Reads generation failed for fixture %s", fixture.id)
+
+        rows = (
+            db.query(Prediction, Fixture)
+            .join(Fixture, Prediction.fixture_id == Fixture.id)
+            .filter(
+                Prediction.fixture_id == fixture.id,
+                Prediction.is_published == True,
+                Prediction.status == "active",
+            )
+            .order_by(Prediction.confidence.desc(), Prediction.market.asc())
+            .all()
+        )
+
     if not rows:
-        # AI Reads must never make the user's request execute a long ML build.
-        # Queue the normal Render-side generator and let the client poll.
-        if fixture.match_date >= date.today():
-            try:
-                from app.services.prediction_runner import start_prediction_generation
-                queued = start_prediction_generation(reason=f"ai-reads-missing-{fixture.id}")
-            except Exception:
-                queued = False
-                log.exception("Could not queue prediction generation for fixture %s", fixture.id)
-        else:
-            queued = False
         return {
-            "status": "preparing",
-            "fixture": {
-                "id": fixture.id,
-                "sport": fixture.sport,
-                "league": fixture.league,
-                "match_date": fixture.match_date,
-                "home_team": fixture.home_team,
-                "away_team": fixture.away_team,
-                "home_score": fixture.home_score,
-                "away_score": fixture.away_score,
-                "home_odds": fixture.home_odds,
-                "draw_odds": fixture.draw_odds,
-                "away_odds": fixture.away_odds,
-                "has_odds": any(v is not None for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds)),
-            },
+            "status": "preparing" if fixture.match_date >= date.today() else "unavailable",
+            "fixture": _fixture_payload(fixture),
             "predictions": [],
-            "generation_queued": bool(queued),
-            "message": "AI analysis is being prepared for this match.",
+            "generation_queued": False,
+            "message": "AI analysis is not published for this match yet.",
         }
 
     return {
         "status": "ready",
-        "fixture": {
-            "id": fixture.id,
-            "sport": fixture.sport,
-            "league": fixture.league,
-            "season": fixture.season,
-            "match_date": fixture.match_date,
-            "home_team": fixture.home_team,
-            "away_team": fixture.away_team,
-            "home_score": fixture.home_score,
-            "away_score": fixture.away_score,
-            "home_odds": fixture.home_odds,
-            "draw_odds": fixture.draw_odds,
-            "away_odds": fixture.away_odds,
-            "has_odds": any(v is not None for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds)),
-            "source": fixture.source,
-            "provider_sources": (fixture.extra or {}).get("provider_sources", []) if isinstance(fixture.extra, dict) else [],
-        },
+        "fixture": _fixture_payload(fixture),
         "predictions": [serialize_prediction(prediction, fx) for prediction, fx in rows],
         "responsible_note": "AI Reads are probabilistic analysis, not guaranteed outcomes.",
     }
