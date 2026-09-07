@@ -12,18 +12,11 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import init_db, engine
 
-
 setup_logging()
 log = logging.getLogger(__name__)
 settings = get_settings()
 app = FastAPI(title="LOYAL EDGE API", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.allowed_cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_cors_origins, allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
 app.include_router(public.router, prefix="/api")
 app.include_router(admin.router, prefix="/api/admin")
 app.include_router(live.router, prefix="/api")
@@ -51,11 +44,6 @@ def _bootstrap_models_background() -> None:
 def on_startup():
     init_db()
     try:
-        from app.services.model_bootstrap import install_quality_training
-        install_quality_training()
-    except Exception:
-        log.exception("Could not install quality training guard")
-    try:
         from app.services.runtime_hardening import install_provider_runtime_hardening
         install_provider_runtime_hardening()
     except Exception:
@@ -80,7 +68,6 @@ def api_health():
 
 @app.get("/api/admin/cron-diagnostics", dependencies=[__import__("fastapi").Depends(admin.require_admin)])
 def cron_diagnostics():
-    """Non-secret diagnostic for comparing the running cron credential."""
     value = (settings.cron_secret or "").strip()
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else ""
     return {"configured": bool(value), "length": len(value), "sha256_prefix": digest}
@@ -115,35 +102,14 @@ def api_feed_health():
 
 @app.get("/api/stats/backtest")
 def api_stats_backtest():
-    """Fast read-only model diagnostics: only latest model per sport + recent backtests."""
     from app.db.session import SessionLocal
     from app.db.models import ModelVersion, BacktestRun
-
     db = SessionLocal()
     try:
-        latest_times = (
-            db.query(ModelVersion.sport.label("sport"), func.max(ModelVersion.trained_at).label("trained_at"))
-            .group_by(ModelVersion.sport)
-            .subquery()
-        )
-        model_rows = (
-            db.query(ModelVersion)
-            .join(latest_times, and_(ModelVersion.sport == latest_times.c.sport, ModelVersion.trained_at == latest_times.c.trained_at))
-            .order_by(ModelVersion.sport.asc())
-            .limit(24)
-            .all()
-        )
+        latest_times = db.query(ModelVersion.sport.label("sport"), func.max(ModelVersion.trained_at).label("trained_at")).group_by(ModelVersion.sport).subquery()
+        model_rows = db.query(ModelVersion).join(latest_times, and_(ModelVersion.sport == latest_times.c.sport, ModelVersion.trained_at == latest_times.c.trained_at)).order_by(ModelVersion.sport.asc()).limit(24).all()
         backtests = db.query(BacktestRun).order_by(BacktestRun.created_at.desc()).limit(20).all()
-        return {
-            "models": [
-                {"id": model.id, "sport": model.sport, "type": model.model_type, "sample_size": model.sample_size, "accuracy": model.accuracy, "active": model.is_active, "trained_at": model.trained_at}
-                for model in model_rows
-            ],
-            "backtests": [
-                {"id": run.id, "sport": run.sport, "model_type": run.model_type, "sample_size": run.sample_size, "accuracy": run.accuracy, "brier_score": run.brier_score, "log_loss": run.log_loss, "created_at": run.created_at}
-                for run in backtests
-            ],
-        }
+        return {"models": [{"id": m.id, "sport": m.sport, "type": m.model_type, "sample_size": m.sample_size, "accuracy": m.accuracy, "active": m.is_active, "trained_at": m.trained_at} for m in model_rows], "backtests": [{"id": r.id, "sport": r.sport, "model_type": r.model_type, "sample_size": r.sample_size, "accuracy": r.accuracy, "brier_score": r.brier_score, "log_loss": r.log_loss, "created_at": r.created_at} for r in backtests]}
     except Exception as exc:
         log.exception("Model status endpoint failed")
         raise HTTPException(status_code=503, detail="Model status unavailable") from exc
@@ -153,10 +119,8 @@ def api_stats_backtest():
 
 @app.get("/api/stats/ai-learning")
 def api_stats_ai_learning():
-    """Closed-loop diagnostics for settled public AI picks and calibration behavior."""
     from app.db.session import SessionLocal
     from app.services.prediction_learning import learning_summary, settle_prediction_outcomes
-
     db = SessionLocal()
     try:
         settlement = settle_prediction_outcomes(db, lookback_days=90)
@@ -172,14 +136,12 @@ def api_stats_ai_learning():
 
 @app.get("/api/wake")
 def wake(request: Request):
-    """Authenticated heartbeat used by the HF worker/cron to trigger coverage work."""
     expected = (settings.cron_secret or "").strip()
     supplied_cron = request.headers.get("x-cron-secret", "").strip()
     admin_supplied = request.headers.get("x-admin-key", "").strip()
     auth = request.headers.get("authorization", "")
     if not supplied_cron and auth.lower().startswith("bearer "):
         supplied_cron = auth[7:].strip()
-
     auth_method = "none"
     if expected:
         if supplied_cron and secrets.compare_digest(supplied_cron, expected):
@@ -194,12 +156,10 @@ def wake(request: Request):
         if not admin_expected or not admin_supplied or not secrets.compare_digest(admin_supplied, admin_expected):
             raise HTTPException(status_code=401, detail="Wake authentication is not safely configured")
         auth_method = "admin_api_key"
-
     from datetime import date
     from app.db.models import Fixture
     from app.db.session import SessionLocal
     from app.services.coverage_runner import start_coverage_refresh
-
     db = SessionLocal()
     try:
         today = date.today()
