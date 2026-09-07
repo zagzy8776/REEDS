@@ -1,12 +1,7 @@
 import Link from "next/link";
 
-// Simple Badge component inline to avoid dependency issues
 function Badge({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return (
-    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${className}`}>
-      {children}
-    </span>
-  );
+  return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${className}`}>{children}</span>;
 }
 
 interface PredictionCardProps {
@@ -33,6 +28,14 @@ interface PredictionCardProps {
       line_movement_warning?: boolean;
       market_efficiency_note?: string;
     };
+    engine_meta?: {
+      learning_feedback?: {
+        adjustment?: number;
+        segment_sample?: number;
+        segment_accuracy?: number;
+        guard?: string;
+      };
+    };
     value_betting?: { edge: number; expected_value: number; kelly_stake: number; value_confidence: string; value_note?: string };
     is_premium: boolean;
     version: number;
@@ -56,6 +59,8 @@ export function PredictionCard({ p }: PredictionCardProps) {
   const hasValueBet = p.value_betting || (p.analysis?.value_bets && Object.keys(p.analysis.value_bets).length > 0);
   const hasLineMovementWarning = p.analysis?.line_movement_warning;
   const fixtureId = Number(p.fixture_id);
+  const learning = p.engine_meta?.learning_feedback;
+  const learningAdjustment = Number(learning?.adjustment || 0);
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 hover:border-emerald-400/30 transition-colors">
@@ -137,7 +142,22 @@ export function PredictionCard({ p }: PredictionCardProps) {
         </div>
       )}
 
-      {p.reasoning && <div className="mb-4"><p className="text-xs text-slate-500 mb-2">Model Reasoning</p><p className="text-sm text-slate-300 leading-relaxed">{p.reasoning}</p></div>}
+      {p.reasoning && (
+        <div className="mb-4 rounded-xl border border-sky-400/10 bg-sky-400/5 p-4">
+          <p className="text-xs text-sky-300 uppercase tracking-wide mb-2">Why REEDS picked this</p>
+          <p className="text-sm text-slate-300 leading-relaxed">{p.reasoning}</p>
+        </div>
+      )}
+
+      {learning && (
+        <div className="mb-4 rounded-xl border border-violet-400/10 bg-violet-400/5 p-3">
+          <p className="text-xs text-violet-300 uppercase tracking-wide">Learning & calibration</p>
+          <p className="mt-1 text-xs text-slate-400">
+            {learning.segment_sample ? `${learning.segment_sample} settled reads in this sport/market are feeding calibration.` : "Settled reads are feeding calibration."}
+            {learningAdjustment < 0 ? ` Confidence was reduced by ${Math.abs(learningAdjustment).toFixed(1)} points because recent results were weaker than the confidence level.` : " No negative calibration adjustment was required for this read."}
+          </p>
+        </div>
+      )}
 
       <div className="flex items-center justify-between pt-4 border-t border-slate-800">
         <div className="flex items-center gap-2">
