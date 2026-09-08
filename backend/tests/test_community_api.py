@@ -81,3 +81,64 @@ def test_follow_user_toggle(db):
 
 def test_fixture_consensus_empty(db):
     assert fixture_consensus(db, 999) == {"total": 0, "consensus": [], "entries": []}
+
+
+def test_create_user_prediction_via_service(db):
+    fx = Fixture(sport="soccer", league="Test", season="2025", match_date=date.today(), home_team="A", away_team="B", source="test")
+    db.add(fx)
+    db.commit()
+    pred = UserPrediction(username="tester", fixture_id=fx.id, market="1X2", pick="home", analysis_text="test")
+    db.add(pred)
+    db.commit()
+    assert pred.id is not None
+    assert pred.username == "tester"
+
+
+def test_create_win_slip_via_service(db):
+    slip = WinSlip(username="winner", title="Big win", proof_text="3-1", profit_units=2.5)
+    db.add(slip)
+    db.commit()
+    assert slip.id is not None
+    assert slip.profit_units == 2.5
+
+
+def test_create_community_play_via_service(db):
+    fx = Fixture(sport="soccer", league="Test", season="2025", match_date=date.today(), home_team="A", away_team="B", source="test")
+    db.add(fx)
+    db.commit()
+    pred = UserPrediction(username="tester", fixture_id=fx.id, market="1X2", pick="home")
+    db.add(pred)
+    db.commit()
+    play = CommunityPlay(prediction_id=pred.id, username="follower", stake_units=2.0)
+    db.add(play)
+    db.commit()
+    assert play.id is not None
+    assert play.stake_units == 2.0
+
+
+def test_create_community_comment_via_service(db):
+    fx = Fixture(sport="soccer", league="Test", season="2025", match_date=date.today(), home_team="A", away_team="B", source="test")
+    db.add(fx)
+    db.commit()
+    pred = UserPrediction(username="tester", fixture_id=fx.id, market="1X2", pick="home")
+    db.add(pred)
+    db.commit()
+    comment = CommunityComment(prediction_id=pred.id, username="commenter", comment_text="Nice pick!")
+    db.add(comment)
+    db.commit()
+    assert comment.id is not None
+    assert comment.comment_text == "Nice pick!"
+
+
+def test_create_community_reaction_via_service(db):
+    fx = Fixture(sport="soccer", league="Test", season="2025", match_date=date.today(), home_team="A", away_team="B", source="test")
+    db.add(fx)
+    db.commit()
+    pred = UserPrediction(username="tester", fixture_id=fx.id, market="1X2", pick="home")
+    db.add(pred)
+    db.commit()
+    reaction = CommunityReaction(prediction_id=pred.id, username="reactor", reaction="like", rating=5)
+    db.add(reaction)
+    db.commit()
+    assert reaction.id is not None
+    assert reaction.rating == 5
