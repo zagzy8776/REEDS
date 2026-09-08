@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models import Fixture, Prediction
 from app.db.session import get_db
+from app.services.redis_cache import cache_get_or_set, cache_key
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -171,77 +172,88 @@ def upcoming_fixtures(
 
 @router.get("/fixtures/status")
 def fixtures_status(db: Session = Depends(get_db)):
-    """Compact production diagnostics for current fixture coverage."""
+    """Compact production diagnostics for current fixture coverage.
 
-    today = date.today()
-    horizon = today + timedelta(days=7)
-    base = db.query(Fixture).filter(
-        Fixture.match_date >= today,
-        Fixture.match_date <= horizon,
-        Fixture.source != "coverage_seed",
-    )
-    total = base.count()
-    leagues = db.query(func.count(func.distinct(Fixture.league))).filter(
-        Fixture.match_date >= today,
-        Fixture.match_date <= horizon,
-        Fixture.source != "coverage_seed",
-    ).scalar() or 0
-    with_odds = base.filter(
-        (Fixture.home_odds.isnot(None))
-        | (Fixture.draw_odds.isnot(None))
-        | (Fixture.away_odds.isnot(None))
-    ).count()
-    with_scores = base.filter(
-        Fixture.home_score.isnot(None), Fixture.away_score.isnot(None)
-    ).count()
+    Cached briefly in Redis/in-process: this endpoint is polled by the
+    frontend and its aggregates are read-heavy, write-light.
+    """
 
-    if total == 0:
-        feed_health = "empty"
-    elif total < COVERAGE_FLOOR:
-        feed_health = "degraded"
-    else:
-        feed_health = "active"
+    def _build() -> dict:
+        today = date.today()
+        horizon = today + timedelta(days=7)
+        base = db.query(Fixture).filter(
+            Fixture.match_date >= today,
+            Fixture.match_date <= horizon,
+            Fixture.source != "coverage_seed",
+        )
+        total = base.count()
+        leagues = db.query(func.count(func.distinct(Fixture.league))).filter(
+            Fixture.match_date >= today,
+            Fixture.match_date <= horizon,
+            Fixture.source != "coverage_seed",
+        ).scalar() or 0
+        with_odds = base.filter(
+            (Fixture.home_odds.isnot(None))
+            | (Fixture.draw_odds.isnot(None))
+            | (Fixture.away_odds.isnot(None))
+        ).count()
+        with_scores = base.filter(
+            Fixture.home_score.isnot(None), Fixture.away_score.isnot(None)
+        ).count()
 
-    settings = get_settings()
-    providers = {
-        "sportmonks": bool(settings.sportmonks_api_key),
-        "api_football": bool(settings.api_football_key or settings.api_sports_key),
-        "football_data_org": bool(settings.football_data_api_key),
-        "apifootball_com": bool(settings.api_football_com_key),
-        "bzzoiro": bool(settings.bzzoiro_api_key),
-        "openfoot": True,
-        "fixture_download": True,
-        "sporting_events": True,
-        "allsportsapi": bool(settings.allsportsapi_key),
-        "thesportsdb": bool(settings.thesportsdb_enabled),
-    }
+        if total == 0:
+            feed_health = "empty"
+        elif total < COVERAGE_FLOOR:
+            feed_health = "degraded"
+        else:
+            feed_health = "active"
 
-    return {
-        "feed_health": feed_health,
-        "api_rows": total,
-        "sample_rows": total,
-        "with_scores": with_scores,
-        "with_odds": with_odds,
-        "leagues": leagues,
-        "window_days": 7,
-        "coverage_floor": COVERAGE_FLOOR,
-        "today": today,
-        "configured_providers": providers,
-        "source_counts": {
-            source: count
-            for source, count in db.query(Fixture.source, func.count(Fixture.id))
-            .filter(Fixture.match_date >= today, Fixture.match_date <= horizon, Fixture.source != "coverage_seed")
-            .group_by(Fixture.source)
-            .all()
-        },
-        "sport_counts": {
-            sport: count
-            for sport, count in db.query(Fixture.sport, func.count(Fixture.id))
-            .filter(Fixture.match_date >= today, Fixture.match_date <= horizon, Fixture.source != "coverage_seed")
-            .group_by(Fixture.sport)
-            .all()
-        },
-    }
+        settings = get_settings()
+        providers = {
+            "sportmonks": bool(settings.sportmonks_api_key),
+            "api_football": bool(settings.api_football_key or settings.api_sports_key),
+            "football_data_org": bool(settings.football_data_api_key),
+            "apifootball_com": bool(settings.api_football_com_key),
+            "bzzoiro": bool(settings.bzzoiro_api_key),
+            "openfoot": True,
+            "fixture_download": True,
+            "sporting_events": True,
+            "allsportsapi": bool(settings.allsportsapi_key),
+            "thesportsdb": bool(settings.thesportsdb_enabled),
+        }
+
+        return {
+            "feed_health": feed_health,
+            "api_rows": total,
+            "sample_rows": total,
+            "with_scores": with_scores,
+            "with_odds": with_odds,
+            "leagues": leagues,
+            "window_days": 7,
+            "coverage_floor": COVERAGE_FLOOR,
+            "today": today,
+            "configured_providers": providers,
+            "source_counts": {
+                source: count
+                for source, count in db.query(Fixture.source, func.count(Fixture.id))
+                .filter(Fixture.match_date >= today, Fixture.match_date <= horizon, Fixture.source != "coverage_seed")
+                .group_by(Fixture.source)
+                .all()
+            },
+            "sport_counts": {
+                sport: count
+                for sport, count in db.query(Fixture.sport, func.count(Fixture.id))
+                .filter(Fixture.match_date >= today, Fixture.match_date <= horizon, Fixture.source != "coverage_seed")
+                .group_by(Fixture.sport)
+                .all()
+            },
+        }
+
+    try:
+        return cache_get_or_set(cache_key("fixtures", "status", "v1"), 60, _build)
+    except Exception:
+        log.exception("Fixture status cache failed; computing directly")
+        return _build()
 
 
 @router.get("/fixtures/{fixture_id}")
