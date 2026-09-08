@@ -65,7 +65,9 @@ engine_kwargs = {
 if not is_sqlite:
     # Keep the free Render instance conservative: fewer idle DB connections
     # means less memory and less chance of exhausting the external DB pool.
-    engine_kwargs.update({"pool_size": 2, "max_overflow": 1, "pool_timeout": 10})
+    # pool_size + max_overflow must still cover background threads
+    # (scheduler, coverage, db-recovery) plus concurrent API requests.
+    engine_kwargs.update({"pool_size": 5, "max_overflow": 5, "pool_timeout": 30})
 
 engine = create_engine(database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
