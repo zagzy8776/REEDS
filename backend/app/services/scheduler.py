@@ -325,8 +325,8 @@ def start_scheduler() -> BackgroundScheduler:
     # Render and Fly both deploy this app; a PostgreSQL advisory lock ensures a
     # single owner of the expensive ingestion/prediction passes.
     try:
-        from app.services.scheduler_leader import scheduler_via_cron, acquire_scheduler_leadership
-        if scheduler_via_cron():
+        from app.services.scheduler_leader import schedule_via_cron, acquire_scheduler_leadership
+        if schedule_via_cron():
             log.info("Scheduler skipped: SCHEDULE_DISABLED/SCHEDULE_VIA_CRON configured on this instance")
             return None
         from app.db.session import engine
