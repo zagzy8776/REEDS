@@ -282,6 +282,11 @@ def start_scheduler() -> BackgroundScheduler:
         db = SessionLocal()
         try:
             result = settle_prediction_outcomes(db, lookback_days=90)
+            try:
+                from app.services.market_gate import compute_market_evidence
+                compute_market_evidence(db)
+            except Exception:
+                log.exception("Market evidence computation failed")
             context = build_learning_context(db)
             db.commit()
             log.info(
@@ -316,6 +321,21 @@ def start_scheduler() -> BackgroundScheduler:
     scheduler.add_job(value_scan_job, "interval", minutes=30, id="value_scan", replace_existing=True, max_instances=1, coalesce=True)
     scheduler.add_job(refresh_job, "date", run_date=datetime.utcnow() + timedelta(seconds=30), id="startup_refresh", replace_existing=True, max_instances=1)
 
+    # Only the cross-instance scheduler leader starts the periodic jobs.
+    # Render and Fly both deploy this app; a PostgreSQL advisory lock ensures a
+    # single owner of the expensive ingestion/prediction passes.
+    try:
+        from app.services.scheduler_leader import scheduler_via_cron, acquire_scheduler_leadership
+        if scheduler_via_cron():
+            log.info("Scheduler skipped: SCHEDULE_DISABLED/SCHEDULE_VIA_CRON configured on this instance")
+            return None
+        from app.db.session import engine
+        if not acquire_scheduler_leadership(engine):
+            return None
+    except Exception:
+        log.exception("Scheduler leadership check failed — scheduler will not start")
+        return None
+
     scheduler.start()
-    log.info("Scheduler started — multi-source coverage, live prediction refresh, and closed-loop learning enabled")
+    log.info("Scheduler started (leader) — multi-source coverage, live prediction refresh, and closed-loop learning enabled")
     return scheduler
