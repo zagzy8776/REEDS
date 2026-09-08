@@ -129,7 +129,19 @@ def upcoming_fixtures(
             prediction_query = prediction_query.filter(Fixture.sport == sport)
         if league:
             prediction_query = prediction_query.filter(Fixture.league.ilike(f"%{league.strip()}%"))
-        fixtures = prediction_query.distinct(Fixture.id).order_by(Fixture.match_date.asc(), Fixture.id.asc()).limit(limit).all()
+        # Recover the fixture board from active predictions when the normal
+        # fixture query is temporarily empty. DISTINCT ON is avoided because
+        # PostgreSQL rejects it whenever its expressions don't head the ORDER
+        # BY — even on an empty table — so we dedupe via a distinct-ID
+        # subquery and then order the outer query by match date.
+        pred_subq = prediction_query.with_entities(Fixture.id).distinct().subquery()
+        fixtures = (
+            db.query(Fixture)
+            .filter(Fixture.id.in_(pred_subq))
+            .order_by(Fixture.match_date.asc(), Fixture.id.asc())
+            .limit(limit)
+            .all()
+        )
         if fixtures:
             log.warning("Fixture board recovered %d rows from active predictions", len(fixtures))
 
