@@ -16,11 +16,42 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
+def force_ipv4_hostaddr(url: str) -> str:
+    """Force PostgreSQL to use IPv4 when DNS also advertises an unreachable IPv6 route.
+
+    Render instances can fail with ``Network is unreachable`` when psycopg selects
+    a Neon IPv6 address. We keep the hostname for TLS/identity but provide libpq
+    with a resolved IPv4 ``hostaddr`` for the actual socket connection.
+    """
+    if not url or url.startswith("sqlite"):
+        return url
+    try:
+        import socket
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+        parts = urlsplit(url)
+        hostname = parts.hostname
+        if not hostname:
+            return url
+        addresses = socket.getaddrinfo(hostname, parts.port or 5432, socket.AF_INET, socket.SOCK_STREAM)
+        ipv4 = next((item[4][0] for item in addresses if item and item[4]), None)
+        if not ipv4:
+            return url
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        query["hostaddr"] = ipv4
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    except Exception:
+        return url
+
+
 database_url = normalize_database_url(settings.database_url)
 if settings.app_env.lower() == "production" and (not database_url or database_url.startswith("sqlite")):
     raise RuntimeError("DATABASE_URL must point to PostgreSQL in production")
 
 is_sqlite = database_url.startswith("sqlite")
+if not is_sqlite:
+    database_url = force_ipv4_hostaddr(database_url)
+
 connect_args = {"check_same_thread": False} if is_sqlite else {
     "connect_timeout": 10,
     "application_name": "loyal-edge-api",
