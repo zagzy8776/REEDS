@@ -16,32 +16,28 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
-def force_ipv4_hostaddr(url: str) -> str:
-    """Force PostgreSQL to use IPv4 when DNS also advertises an unreachable IPv6 route.
-
-    Render instances can fail with ``Network is unreachable`` when psycopg selects
-    a Neon IPv6 address. We keep the hostname for TLS/identity but provide libpq
-    with a resolved IPv4 ``hostaddr`` for the actual socket connection.
-    """
+def resolve_ipv4_host(url: str) -> str | None:
+    """Resolve a PostgreSQL hostname to an IPv4 address when IPv6 is unusable."""
     if not url or url.startswith("sqlite"):
-        return url
+        return None
     try:
         import socket
-        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        from urllib.parse import urlsplit
 
         parts = urlsplit(url)
-        hostname = parts.hostname
-        if not hostname:
-            return url
-        addresses = socket.getaddrinfo(hostname, parts.port or 5432, socket.AF_INET, socket.SOCK_STREAM)
-        ipv4 = next((item[4][0] for item in addresses if item and item[4]), None)
-        if not ipv4:
-            return url
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        query["hostaddr"] = ipv4
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+        host = parts.hostname
+        if not host:
+            return None
+        rows = socket.getaddrinfo(host, parts.port or 5432, socket.AF_INET, socket.SOCK_STREAM)
+        for row in rows:
+            sockaddr = row[4] if len(row) > 4 else None
+            if sockaddr:
+                address = sockaddr[0]
+                if address and "." in address:
+                    return address
     except Exception:
-        return url
+        return None
+    return None
 
 
 database_url = normalize_database_url(settings.database_url)
@@ -49,13 +45,17 @@ if settings.app_env.lower() == "production" and (not database_url or database_ur
     raise RuntimeError("DATABASE_URL must point to PostgreSQL in production")
 
 is_sqlite = database_url.startswith("sqlite")
-if not is_sqlite:
-    database_url = force_ipv4_hostaddr(database_url)
-
 connect_args = {"check_same_thread": False} if is_sqlite else {
     "connect_timeout": 10,
     "application_name": "loyal-edge-api",
 }
+if not is_sqlite:
+    # Render's network currently cannot route to the IPv6 address returned by
+    # some Neon endpoints. libpq/psycopg supports hostaddr separately from host:
+    # keep the hostname for TLS identity while forcing the TCP socket to IPv4.
+    ipv4 = resolve_ipv4_host(database_url)
+    if ipv4:
+        connect_args["hostaddr"] = ipv4
 
 engine_kwargs = {
     "pool_pre_ping": True,
@@ -63,7 +63,9 @@ engine_kwargs = {
     "connect_args": connect_args,
 }
 if not is_sqlite:
-    engine_kwargs.update({"pool_size": 5, "max_overflow": 5, "pool_timeout": 10})
+    # Keep the free Render instance conservative: fewer idle DB connections
+    # means less memory and less chance of exhausting the external DB pool.
+    engine_kwargs.update({"pool_size": 2, "max_overflow": 1, "pool_timeout": 10})
 
 engine = create_engine(database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
