@@ -112,14 +112,20 @@ def topo_order(conn) -> list[str]:
 
 
 def copy_table(src_conn, dst_conn, table: str) -> int:
-    """Stream one table source->target via binary COPY. Returns row count."""
-    rows = 0
+    """Stream one table source->target via binary COPY. Returns row count.
+
+    Streams raw binary blocks byte-for-byte (``write()``, not
+    ``write_row()``). Parsing the COPY stream into rows (``rows()``) breaks
+    behind PgBouncer-style poolers (Neon) with ``DataError: bad copy data``,
+    and re-serializing rows is slower; the raw byte stream is valid because
+    source and target share the identical schema and column order.
+    """
+    rows = table_count(src_conn, table)
     with src_conn.cursor() as src_cur, dst_conn.cursor() as dst_cur:
         with src_cur.copy(f'COPY "{table}" TO STDOUT (FORMAT BINARY)') as src_copy:
             with dst_cur.copy(f'COPY "{table}" FROM STDIN (FORMAT BINARY)') as dst_copy:
-                for row in src_copy:
-                    dst_copy.write_row(row)
-                    rows += 1
+                for block in src_copy:
+                    dst_copy.write(block)
     return rows
 
 
@@ -201,13 +207,14 @@ def cmd_export(args) -> int:
         manifest: dict[str, int] = {}
         for table in order:
             path = out_dir / f"{table}.copybin"
-            rows = 0
             with path.open("wb") as fh:
                 with src_conn.cursor() as cur:
                     with cur.copy(f'COPY "{table}" TO STDOUT (FORMAT BINARY)') as cp:
                         for chunk in cp:
                             fh.write(bytes(chunk))
-                            rows += 1
+            # Iterating a TO-STDOUT copy yields raw blocks, not rows — count
+            # rows exactly via SQL so manifest verification is trustworthy.
+            rows = table_count(src_conn, table)
             manifest[table] = rows
             print(f"  exported {table:32s} {rows:>8d} rows")
         (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
