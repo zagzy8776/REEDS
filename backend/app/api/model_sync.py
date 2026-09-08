@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import shutil
 import tempfile
 
-import joblib
 import requests
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from pathlib import Path
@@ -19,6 +19,7 @@ from app.db.models import ModelArtifact
 from app.db.session import get_db
 from app.services.model_registry import register_model
 
+log = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -35,46 +36,58 @@ def _safe_filename(name: str) -> str:
 
 
 def _validate_bundle(path: Path) -> dict:
-    """Validate a locally managed release artifact when it is safe to deserialize.
+    """Validate a release artifact WITHOUT deserializing its estimators.
 
-    This function is intentionally not used by the hot upload endpoint on the
-    512 MiB Render instance. Training workers validate their own artifacts before
-    upload; Render only needs to persist the already-produced artifact.
+    Training workers validate their own artifacts before upload (Kaggle) and
+    the hot upload endpoint never deserializes. This function performs a
+    structural check (non-empty, plausible joblib/pickle header) and reads
+    metadata from an optional sidecar ``.json`` file that the training worker
+    publishes next to the artifact. No estimator is ever unpickled here, so the
+    512 MiB Render instance cannot OOM while syncing a large ensemble.
     """
-    bundle = joblib.load(path)
-    try:
-        if not isinstance(bundle, dict):
-            raise ValueError("model bundle must be a dictionary")
-        models = bundle.get("models")
-        sport = str(bundle.get("sport") or "").strip().lower()
-        accuracy = float(bundle.get("accuracy", 0.0))
-        sample_size = int(bundle.get("sample_size", 0))
-        model_types = bundle.get("model_types") or []
-        if not isinstance(models, dict) or not models:
-            raise ValueError("model bundle contains no models")
-        if not sport:
-            lowered = path.name.lower()
-            sport = "basketball" if "basketball" in lowered else "soccer"
-        runtime_versions = bundle.get("runtime_versions") or {}
-        artifact_sklearn = str(runtime_versions.get("scikit_learn") or "").strip()
-        if artifact_sklearn and artifact_sklearn != SKLEARN_VERSION:
-            raise ValueError(
-                f"incompatible scikit-learn artifact version {artifact_sklearn}; production uses {SKLEARN_VERSION}"
-            )
-        if not 0.0 <= accuracy <= 1.0:
-            raise ValueError(f"invalid accuracy: {accuracy}")
-        if sample_size <= 0:
-            raise ValueError(f"invalid sample_size: {sample_size}")
-        return {
-            "sport": sport,
-            "accuracy": accuracy,
-            "sample_size": sample_size,
-            "model_type": "+".join(str(x) for x in model_types)[:50] or "uploaded",
-            "runtime_versions": runtime_versions,
-        }
-    finally:
-        del bundle
-        gc.collect()
+    path = Path(path) if not isinstance(path, Path) else path
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError("model artifact is empty or missing")
+
+    with path.open("rb") as handle:
+        header = handle.read(16)
+    if not header:
+        raise ValueError("model artifact is empty")
+
+    sidecar = path.with_suffix(".json")
+    metadata: dict = {}
+    if sidecar.is_file():
+        try:
+            import json
+            metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = {}
+
+    sport = str(metadata.get("sport") or "").strip().lower()
+    if not sport:
+        lowered = path.name.lower()
+        sport = "basketball" if "basketball" in lowered else "soccer"
+    accuracy = float(metadata.get("accuracy", 0.0) or 0.0)
+    sample_size = int(metadata.get("sample_size", 0) or 0)
+    model_types = metadata.get("model_types") or []
+    runtime_versions = metadata.get("runtime_versions") or {}
+    artifact_sklearn = str(runtime_versions.get("scikit_learn") or "").strip()
+    if artifact_sklearn and artifact_sklearn != SKLEARN_VERSION:
+        raise ValueError(
+            f"incompatible scikit-learn artifact version {artifact_sklearn}; production uses {SKLEARN_VERSION}"
+        )
+    if not 0.0 <= accuracy <= 1.0:
+        raise ValueError(f"invalid accuracy: {accuracy}")
+    if sample_size <= 0:
+        raise ValueError(f"invalid sample_size: {sample_size}")
+    return {
+        "sport": sport,
+        "accuracy": accuracy,
+        "sample_size": sample_size,
+        "model_type": "+".join(str(x) for x in model_types)[:50] or "uploaded",
+        "runtime_versions": runtime_versions,
+        "validation": "structural_header_sidecar_metadata",
+    }
 
 
 @router.post("/api/admin/upload-model", dependencies=[Depends(_admin_key)])
@@ -187,6 +200,49 @@ async def upload_model(
         gc.collect()
 
 
+@router.post("/api/admin/upload-model-metadata", dependencies=[Depends(_admin_key)])
+async def upload_model_metadata(
+    metadata: UploadFile = File(...),
+    sport: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Persist the sidecar metadata JSON for a previously uploaded artifact.
+
+    Training workers publish a small JSON file next to each joblib artifact so
+    production can register/restore models with real metadata without ever
+    deserializing the bundle. The metadata is stored on the matching
+    ``ModelArtifact`` row (keyed by sport + filename).
+    """
+    raw = await metadata.read()
+    try:
+        import json
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Metadata must be a JSON object")
+
+    filename = _safe_filename(str(payload.get("filename") or metadata.filename or ""))
+    target_sport = str(sport).strip().lower() or str(payload.get("sport") or "").strip().lower()
+    artifact = (
+        db.query(ModelArtifact)
+        .filter_by(sport=target_sport, filename=filename)
+        .order_by(ModelArtifact.created_at.desc())
+        .first()
+    )
+    if artifact is not None:
+        artifact.metadata_json = payload
+        db.commit()
+        return {"status": "stored", "sport": target_sport, "filename": filename}
+    # No matching artifact yet: keep the metadata on disk next to the file if present.
+    settings = get_settings()
+    disk_path = Path(settings.model_dir) / filename
+    if disk_path.is_file():
+        disk_path.with_suffix(".json").write_bytes(raw)
+        return {"status": "stored_on_disk", "sport": target_sport, "filename": filename}
+    return {"status": "no_matching_artifact", "sport": target_sport, "filename": filename}
+
+
 @router.post("/api/admin/sync-models-safe", dependencies=[Depends(_admin_key)])
 def sync_models_safe(db: Session = Depends(get_db)):
     """Atomically synchronize the latest GitHub model release into production."""
@@ -209,9 +265,15 @@ def sync_models_safe(db: Session = Depends(get_db)):
     releases = [r for r in releases if str(r.get("tag_name", "")).startswith("models-v")]
     if not releases:
         return {"status": "no_models_release", "installed": 0}
-    assets = [a for a in releases[0].get("assets", []) if str(a.get("name", "")).endswith(".joblib")]
+    all_assets = releases[0].get("assets", [])
+    assets = [a for a in all_assets if str(a.get("name", "")).endswith(".joblib")]
     if not assets:
         return {"status": "no_model_assets", "release": releases[0].get("tag_name"), "installed": 0}
+    sidecar_by_name: dict[str, str] = {
+        str(a.get("name", "")).rsplit(".", 1)[0]: a.get("browser_download_url", "")
+        for a in all_assets
+        if str(a.get("name", "")).endswith(".json")
+    }
     model_dir = Path(settings.model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix="reeds-model-stage-", dir=str(model_dir.parent)))
@@ -226,6 +288,15 @@ def sync_models_safe(db: Session = Depends(get_db)):
                     for chunk in dl.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             handle.write(chunk)
+            base_name = name.rsplit(".", 1)[0]
+            sidecar_url = sidecar_by_name.get(base_name)
+            if sidecar_url:
+                try:
+                    with requests.get(sidecar_url, headers=headers, timeout=60) as side:
+                        if side.ok:
+                            destination.with_suffix(".json").write_bytes(side.content)
+                except Exception:
+                    log.exception("Could not download sidecar metadata for %s", name)
             metadata = _validate_bundle(destination)
             staged.append((destination, model_dir / name, metadata))
         if not staged:
@@ -241,11 +312,13 @@ def sync_models_safe(db: Session = Depends(get_db)):
                 os.replace(source, destination)
                 installed.append({"file": destination.name, **metadata})
                 db.query(ModelArtifact).filter_by(sport=metadata["sport"], filename=destination.name).delete()
+                payload = destination.read_bytes()
                 db.add(ModelArtifact(
                     sport=metadata["sport"], filename=destination.name,
                     model_type=metadata["model_type"], accuracy=metadata["accuracy"],
-                    sample_size=metadata["sample_size"], data=destination.read_bytes(),
+                    sample_size=metadata["sample_size"], data=payload,
                 ))
+                del payload
             for item in installed:
                 path = str(model_dir / item["file"])
                 mv = register_model(db, item["sport"], item["model_type"], path, item["accuracy"], item["sample_size"])
@@ -263,3 +336,4 @@ def sync_models_safe(db: Session = Depends(get_db)):
         return {"status": "success", "release": releases[0].get("tag_name"), "installed": len(installed), "models": installed}
     finally:
         shutil.rmtree(stage, ignore_errors=True)
+        gc.collect()

@@ -1,10 +1,10 @@
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 
 from app.ml.features import features_for_fixture
+from app.ml.model_cache import load_model_bundle
 from app.ml.poisson import soccer_probabilities
 from app.ml.calibration import apply_calibration
 from app.ml.value_engine import ValueBettingEngine, PoissonValueEngine
@@ -18,19 +18,34 @@ class LoyalEdgeEngine:
     Loads the ensemble bundle trained by train.py (which may contain XGBoost,
     and RandomForest).
     Blends ensemble probabilities with Poisson goal simulation for final output.
+
+    The bundle is loaded lazily through the bounded model cache on first
+    prediction, never at construction time, so startup and upload validation
+    do not deserialize large artifacts on the 512 MiB Render instance.
     """
 
     def __init__(self, model_path: str | None = None):
-        self.bundle = joblib.load(model_path) if model_path and Path(model_path).exists() else None
+        self.model_path = model_path
+        self.bundle = None
+
+    def _load_bundle(self) -> dict | None:
+        if self.bundle is not None:
+            return self.bundle
+        if not self.model_path or not Path(self.model_path).exists():
+            return None
+        bundle = load_model_bundle(self.model_path)
+        self.bundle = bundle if isinstance(bundle, dict) else None
+        return self.bundle
 
     def _ensemble_predict(self, features_row: dict, labels: list[int]) -> dict[str, float]:
         """Run the ensemble on a single fixture feature vector."""
-        if not self.bundle or "models" not in self.bundle:
+        bundle = self._load_bundle()
+        if not bundle or "models" not in bundle:
             return {"away": 0.33, "draw": 0.33, "home": 0.34}
 
-        x = pd.DataFrame([features_row]).reindex(columns=self.bundle["features"], fill_value=0)
-        models = self.bundle["models"]
-        weights = self.bundle.get("weights", [1.0] * len(models))
+        x = pd.DataFrame([features_row]).reindex(columns=bundle["features"], fill_value=0)
+        models = bundle["models"]
+        weights = bundle.get("weights", [1.0] * len(models))
         total_weight = sum(weights)
         all_probas = []
 
@@ -90,7 +105,8 @@ class LoyalEdgeEngine:
         # Ensemble prediction with meta-learner blend
         labels = [0, 1, 2]  # away, draw, home
         ml_probs = self._ensemble_predict(f, labels)
-        ml_probs = apply_calibration(ml_probs, self.bundle.get("calibrator_path") if self.bundle else None)
+        bundle = self._load_bundle()
+        ml_probs = apply_calibration(ml_probs, bundle.get("calibrator_path") if bundle else None)
 
         form_total = f["home_form_points"] + f["away_form_points"] + 0.01
         one_x_two = {

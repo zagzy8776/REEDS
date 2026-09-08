@@ -25,7 +25,7 @@ def _install_trained_soccer_meta_bridge() -> None:
 
         def meta_ensemble_predict(self, features_row, labels):
             result = original(self, features_row, labels)
-            bundle = getattr(self, "bundle", None)
+            bundle = self._load_bundle()
             meta = bundle.get("meta_learner") if isinstance(bundle, dict) else None
             models = bundle.get("models") if isinstance(bundle, dict) else None
             weights = bundle.get("weights") if isinstance(bundle, dict) else None
@@ -71,9 +71,9 @@ def _install_trained_soccer_meta_bridge() -> None:
 def _install_trained_generic_prediction_bridge() -> None:
     """Make trained generic-sport artifacts the primary Moneyline engine."""
     try:
-        import joblib
         import pandas as pd
         from app.ml.generic import GenericSportEngine
+        from app.ml.model_cache import load_model_bundle
         from app.ml.train import GENERIC_SPORT_FEATURES, _build_generic_features
         from app.services.model_registry import active_model_path
         from app.core.config import get_settings
@@ -106,7 +106,7 @@ def _install_trained_generic_prediction_bridge() -> None:
                 if not model_path:
                     return original(self, history, fixture)
 
-                bundle = joblib.load(model_path)
+                bundle = load_model_bundle(model_path)
                 models = bundle.get("models") if isinstance(bundle, dict) else None
                 if not isinstance(models, dict) or not models:
                     return original(self, history, fixture)

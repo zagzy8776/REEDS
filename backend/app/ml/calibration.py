@@ -127,7 +127,10 @@ def fit_soccer_platt_calibrator(fixtures: pd.DataFrame, min_train_rows: int = 10
 def apply_calibration(raw_probs: dict[str, float], calibrator_path: str | None) -> dict[str, float]:
     if not calibrator_path or not Path(calibrator_path).exists():
         return raw_probs
-    bundle = joblib.load(calibrator_path)
+    from app.ml.model_cache import load_model_bundle
+    bundle = load_model_bundle(calibrator_path)
+    if not isinstance(bundle, dict) or "calibrator" not in bundle:
+        return raw_probs
     labels = bundle["labels"]
     ordered = np.array([[raw_probs.get("away", 0.0), raw_probs.get("draw", 0.0), raw_probs.get("home", 0.0)]])
     calibrated = bundle["calibrator"].predict_proba(ordered)[0]

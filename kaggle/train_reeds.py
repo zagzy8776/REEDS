@@ -210,6 +210,21 @@ for result in results:
     if not path.exists():
         print(f"SKIP upload: missing artifact {path}")
         continue
+    # Publish a sidecar metadata JSON next to the artifact so Render can
+    # register the model without deserializing the joblib bundle.
+    sidecar = path.with_suffix(".json")
+    try:
+        import json
+        sidecar.write_text(json.dumps({
+            "sport": result.get("sport") or path.name.split("_")[0],
+            "model_type": result.get("model_type", "uploaded"),
+            "accuracy": float(result.get("accuracy", 0.0)),
+            "sample_size": int(result.get("sample_size", 0)),
+            "model_types": result.get("models_trained", []),
+            "runtime_versions": result.get("runtime_versions", {}),
+        }))
+    except Exception as exc:
+        print(f"WARNING: could not write sidecar metadata: {exc}")
     for upload_attempt in range(1, 4):
         try:
             with path.open("rb") as handle:
@@ -226,6 +241,15 @@ for result in results:
                     },
                 )
             print(response.json())
+            if sidecar.exists():
+                with sidecar.open("rb") as handle:
+                    post(
+                        "/api/admin/upload-model-metadata",
+                        timeout=60,
+                        retries=3,
+                        files={"metadata": (sidecar.name, handle, "application/json")},
+                        data={"sport": result.get("sport") or path.name.split("_")[0]},
+                    )
             break
         except Exception as exc:
             if upload_attempt == 3:

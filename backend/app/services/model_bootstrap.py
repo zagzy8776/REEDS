@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import requests
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sklearn import __version__ as SKLEARN_VERSION
 
@@ -41,27 +42,49 @@ def _local_model_inventory(model_dir: Path) -> list[dict]:
 
 
 def _restore_from_neon(db: Session, model_dir: Path) -> list[dict]:
+    """Restore the latest durable artifact per sport without loading all rows.
+
+    Previously this fetched every ``ModelArtifact`` row and materialized each
+    ``data`` blob (a full model binary) into memory on Render. Now it queries
+    the sports list, then fetches the newest artifact per sport one at a time,
+    streams it to disk, and releases the bytes immediately.
+    """
     restored = []
-    seen_sports: set[str] = set()
-    artifacts = db.query(ModelArtifact).order_by(ModelArtifact.created_at.desc()).all()
-    for artifact in artifacts:
-        sport = str(artifact.sport or "soccer").strip().lower()
-        if sport in seen_sports or not artifact.data:
+    sports = [
+        row[0]
+        for row in db.query(ModelArtifact.sport)
+        .distinct()
+        .order_by(ModelArtifact.sport.asc())
+        .all()
+        if row[0]
+    ]
+    for sport in sorted(sports):
+        sport = str(sport).strip().lower()
+        artifact = (
+            db.query(ModelArtifact)
+            .filter(func.lower(ModelArtifact.sport) == sport)
+            .order_by(ModelArtifact.created_at.desc(), ModelArtifact.id.desc())
+            .first()
+        )
+        if artifact is None or not artifact.data:
             continue
         destination = model_dir / Path(artifact.filename).name
         temp_path = destination.with_suffix(destination.suffix + ".tmp")
+        payload = artifact.data
         try:
             with temp_path.open("wb") as handle:
-                handle.write(bytes(artifact.data))
+                handle.write(payload)
+            del payload
             os.replace(temp_path, destination)
             mv = register_model(
                 db, sport, str(artifact.model_type or "restored")[:50], str(destination),
                 float(artifact.accuracy or 0.0), int(artifact.sample_size or 0),
             )
-            restored.append({"sport": sport, "file": destination.name, "active": bool(mv.is_active), "source": "neon"})
-            seen_sports.add(sport)
+            restored.append({"sport": sport, "file": destination.name, "active": bool(mv.is_active), "source": "postgres"})
         except Exception:
             temp_path.unlink(missing_ok=True)
+        finally:
+            payload = None
     return restored
 
 

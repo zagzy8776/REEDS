@@ -1,10 +1,10 @@
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 
 from app.ml.features import basketball_features_for_fixture
+from app.ml.model_cache import load_model_bundle
 from app.utils.team_names import normalize_team_name
 
 
@@ -17,12 +17,22 @@ class BasketballEngine:
     """Basketball prediction engine: trained model when available, safe heuristic fallback otherwise."""
 
     def __init__(self, model_path: str | None = None):
-        self.bundle = joblib.load(model_path) if model_path and Path(model_path).exists() else None
+        self.model_path = model_path
+        self.bundle = None
+
+    def _load_bundle(self) -> dict | None:
+        if self.bundle is not None:
+            return self.bundle
+        if not self.model_path or not Path(self.model_path).exists():
+            return None
+        bundle = load_model_bundle(self.model_path)
+        self.bundle = bundle if isinstance(bundle, dict) else None
+        return self.bundle
 
     def _bundle_home_win_probability(self, features: dict) -> float | None:
         """Serve both legacy single-model bundles and new ensemble bundles."""
 
-        if not self.bundle:
+        if not self._load_bundle():
             return None
         x = pd.DataFrame([features]).reindex(columns=self.bundle["features"], fill_value=0)
 
