@@ -168,7 +168,7 @@ class ModelVersion(Base):
 
 
 class ModelArtifact(Base):
-    """Durable model bytes stored in Neon so Render restarts cannot erase models."""
+    """Durable model bytes stored in PostgreSQL so restarts cannot erase models."""
 
     __tablename__ = "model_artifacts"
     __table_args__ = (UniqueConstraint("sport", "filename", name="uq_model_artifact"),)
@@ -180,7 +180,42 @@ class ModelArtifact(Base):
     accuracy: Mapped[float] = mapped_column(Float, default=0.0)
     sample_size: Mapped[int] = mapped_column(Integer, default=0)
     data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class MarketEvidence(Base):
+    """Durable per (sport, market) publication evidence.
+
+    Tracks settled prediction outcomes so public publication is gated on
+    empirical evidence rather than generic confidence alone. A market with
+    insufficient sample size, poor recent accuracy, or repeated losses is
+    blocked from public publication while remaining internally evaluated.
+    """
+
+    __tablename__ = "market_evidence"
+    __table_args__ = (UniqueConstraint("sport", "market", name="uq_market_evidence"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    market: Mapped[str] = mapped_column(String(50), index=True)
+    settled: Mapped[int] = mapped_column(Integer, default=0)
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    losses: Mapped[int] = mapped_column(Integer, default=0)
+    pushes: Mapped[int] = mapped_column(Integer, default=0)
+    recent_settled: Mapped[int] = mapped_column(Integer, default=0)
+    recent_wins: Mapped[int] = mapped_column(Integer, default=0)
+    recent_losses: Mapped[int] = mapped_column(Integer, default=0)
+    accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recent_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    brier_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roi_units: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_loss_streak: Mapped[int] = mapped_column(Integer, default=0)
+    publication_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    block_reasons: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    is_model_trained: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
 class UserSubscription(Base):

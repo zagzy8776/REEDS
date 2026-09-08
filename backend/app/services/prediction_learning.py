@@ -93,7 +93,7 @@ def settle_prediction_outcomes(db: Session, lookback_days: int = 90) -> dict[str
     rows = (
         db.query(Prediction, Fixture)
         .join(Fixture, Prediction.fixture_id == Fixture.id)
-        .filter(Prediction.is_published == True, Fixture.match_date >= cutoff, Fixture.home_score.isnot(None), Fixture.away_score.isnot(None))
+        .filter(Prediction.status == "active", Fixture.match_date >= cutoff, Fixture.home_score.isnot(None), Fixture.away_score.isnot(None))
         .order_by(Fixture.match_date.desc(), Prediction.id.desc())
         .limit(12000)
         .all()
@@ -132,6 +132,11 @@ def settle_prediction_outcomes(db: Session, lookback_days: int = 90) -> dict[str
             changed += 1
     if changed:
         db.flush()
+    try:
+        from app.services.market_gate import compute_market_evidence
+        compute_market_evidence(db)
+    except Exception:
+        log.exception("Market evidence refresh failed during settlement")
     return {"settled": settled, "won": won, "lost": lost, "updated": changed}
 
 
