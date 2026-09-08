@@ -18,7 +18,7 @@ export default function PredictionDetail() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    getPrediction(id)
+    getPrediction(String(id))
       .then(setPrediction)
       .catch(() => {})
       .finally(() => setLoading(false));
