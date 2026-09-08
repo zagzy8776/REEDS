@@ -1,6 +1,7 @@
 """Closed-loop prediction feedback, live-match adaptation, and publication guard."""
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture, MatchEvent, Prediction
+
+log = logging.getLogger(__name__)
 
 DAILY_LOSS_LIMIT = 6
 MAX_OPEN_PUBLIC_PICKS = 12

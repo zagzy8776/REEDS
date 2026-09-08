@@ -98,6 +98,7 @@ def _database_recovery_loop() -> None:
 
 @app.on_event("startup")
 def on_startup():
+    global _startup_db_ready
     """Start the API even when PostgreSQL is temporarily unavailable.
 
     A bounded number of init attempts happen inline; if they fail the process
