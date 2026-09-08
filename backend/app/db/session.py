@@ -123,3 +123,11 @@ def repair_runtime_schema() -> None:
         _add_column_if_missing("predictions", "engine_meta", "JSON")
         _add_column_if_missing("predictions", "published_at", "DATETIME")
         _add_column_if_missing("predictions", "superseded_at", "DATETIME")
+
+    if "model_artifacts" in inspector.get_table_names():
+        _add_column_if_missing("model_artifacts", "metadata_json", "JSON" if engine.dialect.name == "postgresql" else "JSON")
+
+    # MarketEvidence is created by Base.metadata.create_all; this is a safety
+    # net for deployments that skip the alembic migration.
+    from app.db.models import MarketEvidence  # noqa: F401
+    Base.metadata.create_all(bind=engine, tables=[MarketEvidence.__table__])

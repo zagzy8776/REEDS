@@ -33,8 +33,14 @@ def choose_provisional_public_pick(items: list[dict]) -> dict | None:
     return max(candidates, key=lambda item: float(item.get("confidence", 0))) if candidates else None
 
 
-def select_public_picks(items: list[dict], max_picks: int = 2, *, fixture: Fixture | None = None, learning_context: dict | None = None) -> set[int]:
-    """Select quality-approved public picks plus the closed-loop guard."""
+def select_public_picks(items: list[dict], max_picks: int = 2, *, fixture: Fixture | None = None, learning_context: dict | None = None, db: Session | None = None) -> set[int]:
+    """Select quality-approved public picks plus the closed-loop and market gates.
+
+    In addition to confidence/edge thresholds, every candidate market must pass
+    the empirical market-level publication gate when a DB session is supplied.
+    A market with no settled evidence or poor recent performance is blocked even
+    if its mathematical confidence is high.
+    """
     published: set[int] = set()
     for idx, raw_item in enumerate(items):
         item = annotate_quality(raw_item)
@@ -45,6 +51,16 @@ def select_public_picks(items: list[dict], max_picks: int = 2, *, fixture: Fixtu
                 quality = dict(meta.get("publication_quality") or {})
                 quality["accepted"] = False
                 quality["reasons"] = [*quality.get("reasons", []), reason]
+                item["engine_meta"] = {**meta, "publication_quality": quality}
+                continue
+        if db is not None and fixture is not None:
+            from app.services.market_gate import market_publication_policy
+            allowed, reasons = market_publication_policy(db, fixture.sport, str(item.get("market") or ""))
+            if not allowed:
+                meta = dict(item.get("engine_meta") or {})
+                quality = dict(meta.get("publication_quality") or {})
+                quality["accepted"] = False
+                quality["reasons"] = [*quality.get("reasons", []), *reasons]
                 item["engine_meta"] = {**meta, "publication_quality": quality}
                 continue
         if should_publish_pick(item) and evaluate_publication(item)[0]:
@@ -212,7 +228,7 @@ def generate_today_predictions(db: Session) -> int:
             for item in items:
                 apply_learning_feedback(item, fx, learning_context)
                 apply_live_match_context(db, item, fx)
-            published_indexes = select_public_picks(items, fixture=fx, learning_context=learning_context)
+            published_indexes = select_public_picks(items, fixture=fx, learning_context=learning_context, db=db)
             for idx, item in enumerate(items):
                 item = annotate_quality(explain_prediction_item(item, fx))
                 desired_published = idx in published_indexes

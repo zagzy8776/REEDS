@@ -61,18 +61,51 @@ def latest_snapshot(db: Session, prediction_id: int, phase: str) -> OddsSnapshot
     )
 
 
-def roi_clv_summary(db: Session) -> dict:
-    rows = (
+def _recent_settled_rows(db: Session, limit: int = 5000):
+    """Bounded set of settled published predictions, newest first."""
+    from datetime import date, timedelta
+    cutoff = date.today() - timedelta(days=180)
+    return (
         db.query(Prediction, Fixture)
         .join(Fixture, Prediction.fixture_id == Fixture.id)
-        .filter(Prediction.is_published == True, Fixture.home_score != None, Fixture.away_score != None)
+        .filter(
+            Prediction.is_published == True,
+            Fixture.home_score != None,
+            Fixture.away_score != None,
+            Fixture.match_date >= cutoff,
+        )
+        .order_by(Fixture.match_date.desc())
+        .limit(limit)
         .all()
     )
+
+
+def _snapshot_map(db: Session, prediction_ids: list[int], phase: str) -> dict[int, OddsSnapshot]:
+    """Fetch the latest snapshot per prediction in one query (no N+1)."""
+    if not prediction_ids:
+        return {}
+    rows = (
+        db.query(OddsSnapshot)
+        .filter(OddsSnapshot.prediction_id.in_(prediction_ids), OddsSnapshot.phase == phase)
+        .order_by(OddsSnapshot.prediction_id.asc(), OddsSnapshot.captured_at.desc())
+        .all()
+    )
+    result: dict[int, OddsSnapshot] = {}
+    for snap in rows:
+        result.setdefault(snap.prediction_id, snap)
+    return result
+
+
+def roi_clv_summary(db: Session) -> dict:
+    rows = _recent_settled_rows(db)
+    ids = [pred.id for pred, _ in rows]
+    published_snaps = _snapshots(db, ids, "published")
+    closing_snaps = _snapshots(db, ids, "closing")
     roi_total = roi_profit = clv_total = clv_positive = 0
     by_market: dict[str, dict] = {}
 
     for pred, fx in rows:
-        published = latest_snapshot(db, pred.id, "published")
+        published = published_snaps.get(pred.id)
         if not published:
             continue
         published_odds = selected_decimal_odds(pred, published)
@@ -84,15 +117,14 @@ def roi_clv_summary(db: Session) -> dict:
             market_row = by_market.setdefault(pred.market, {"market": pred.market, "bets": 0, "profit": 0.0, "clv_total": 0, "clv_positive": 0})
             market_row["bets"] += 1
             market_row["profit"] += profit
+            roi_count += 1
 
-            closing = latest_snapshot(db, pred.id, "closing")
+            closing = closing_snaps.get(pred.id)
             if closing:
                 closing_odds = selected_decimal_odds(pred, closing)
                 if closing_odds:
                     clv_total += 1
                     market_row["clv_total"] += 1
-                    # For decimal odds, beating the close means the published price
-                    # was higher than the closing price for the same selection.
                     if published_odds > closing_odds:
                         clv_positive += 1
                         market_row["clv_positive"] += 1
@@ -100,7 +132,7 @@ def roi_clv_summary(db: Session) -> dict:
     return {
         "tracked_bets": roi_total,
         "profit_units": round(roi_profit, 2),
-        "roi_percent": round((roi_profit / roi_total) * 100, 2) if roi_total else 0,
+        "roi_percent": round((roi_profit / roi_count) * 100, 2) if roi_count else 0,
         "clv_tracked": clv_total,
         "positive_clv_rate": round((clv_positive / clv_total) * 100, 2) if clv_total else 0,
         "by_market": [
@@ -112,7 +144,7 @@ def roi_clv_summary(db: Session) -> dict:
             }
             for row in by_market.values()
         ],
-        "note": "ROI is calculated as flat 1-unit staking on supported settled markets. CLV requires matching closing odds snapshots.",
+        "note": "ROI is calculated as flat 1-unit staking on recent supported settled markets. CLV requires matching closing odds snapshots.",
     }
 
 
@@ -128,16 +160,9 @@ def yield_by_tier(db: Session) -> dict:
     """
     from app.db.models import Fixture, Prediction
 
-    rows = (
-        db.query(Prediction, Fixture)
-        .join(Fixture, Prediction.fixture_id == Fixture.id)
-        .filter(
-            Prediction.is_published == True,
-            Fixture.home_score != None,
-            Fixture.away_score != None,
-        )
-        .all()
-    )
+    rows = _recent_settled_rows(db)
+    ids = [pred.id for pred, _ in rows]
+    published_snaps = _snapshots(db, ids, "published")
 
     tiers: dict[str, dict] = {
         "elite":    {"label": "Elite (≥60%)", "bets": 0, "wins": 0, "profit": 0.0, "threshold": 60},
@@ -149,7 +174,7 @@ def yield_by_tier(db: Session) -> dict:
         won = prediction_won(pred, fx)
         if won is None:
             continue
-        snap = latest_snapshot(db, pred.id, "published")
+        snap = published_snaps.get(pred.id)
         odds = selected_decimal_odds(pred, snap) if snap else None
 
         conf = pred.confidence

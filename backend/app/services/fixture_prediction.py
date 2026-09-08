@@ -59,7 +59,7 @@ def generate_fixture_predictions(db: Session, fixture_id: int) -> int:
         })
 
     _backfill_fixture_odds(db, fx, items)
-    published = select_public_picks(items)
+    published = select_public_picks(items, fixture=fx, db=db)
     generated = 0
 
     for idx, raw in enumerate(items):
