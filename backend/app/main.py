@@ -26,6 +26,10 @@ app.include_router(ml_pipeline.router, prefix="/api")
 app.include_router(ai_reads.router, prefix="/api")
 
 
+_startup_db_ready = False
+_startup_db_lock = threading.Lock()
+
+
 def _bootstrap_models_background() -> None:
     try:
         from app.db.session import SessionLocal
@@ -40,25 +44,80 @@ def _bootstrap_models_background() -> None:
         log.exception("Background model bootstrap failed")
 
 
+def _finish_startup_once() -> None:
+    """Install DB-dependent guards + scheduler after the database returns."""
+    global _startup_db_ready
+    if _startup_db_ready:
+        return
+    if not _startup_db_lock.acquire(blocking=False):
+        return
+    try:
+        if not _check_database_ready():
+            log.warning("Database still unavailable; startup completion deferred")
+            return
+        from app.services.resource_guard import install_resource_guards
+        try:
+            install_resource_guards()
+        except Exception:
+            log.exception("Could not install resource guards")
+        from app.services.runtime_hardening import install_provider_runtime_hardening
+        try:
+            install_provider_runtime_hardening()
+        except Exception:
+            log.exception("Could not install provider runtime hardening")
+        from app.services.prediction_guard import install_prediction_guard
+        install_prediction_guard()
+        if settings.enable_scheduler:
+            from app.services.scheduler import start_scheduler
+            start_scheduler()
+        _startup_db_ready = True
+    finally:
+        _startup_db_lock.release()
+
+
+def _check_database_ready() -> bool:
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        log.warning("Explicit database connectivity check failed")
+        return False
+
+
+def _database_recovery_loop() -> None:
+    """Keep the API alive and retry bounded startup steps while Postgres is down."""
+    import time
+    while True:
+        time.sleep(120)
+        try:
+            _finish_startup_once()
+        except Exception:
+            log.exception("Deferred startup completion attempt failed")
+
+
 @app.on_event("startup")
 def on_startup():
-    init_db()
+    """Start the API even when PostgreSQL is temporarily unavailable.
+
+    A bounded number of init attempts happen inline; if they fail the process
+    still serves /health and public reads, and a background recovery thread
+    completes guards/scheduler once the database returns. Optional providers
+    and the GitHub release API are never fatal to startup.
+    """
     try:
-        from app.services.resource_guard import install_resource_guards
-        install_resource_guards()
+        init_db()
+        _startup_db_ready = True
     except Exception:
-        log.exception("Could not install resource guards")
-    try:
-        from app.services.runtime_hardening import install_provider_runtime_hardening
-        install_provider_runtime_hardening()
-    except Exception:
-        log.exception("Could not install provider runtime hardening")
+        log.exception("Database initialization failed; continuing degraded and retrying in the background")
+    finally:
+        if not _startup_db_ready:
+            threading.Thread(target=_database_recovery_loop, name="db-recovery", daemon=True).start()
     threading.Thread(target=_bootstrap_models_background, name="model-bootstrap", daemon=True).start()
-    from app.services.prediction_guard import install_prediction_guard
-    install_prediction_guard()
-    if settings.enable_scheduler:
-        from app.services.scheduler import start_scheduler
-        start_scheduler()
+    if _startup_db_ready:
+        _finish_startup_once()
+    else:
+        log.warning("Startup deferred until the database is reachable (/ready will report database status)")
 
 
 @app.get("/health")
@@ -137,6 +196,27 @@ def api_stats_ai_learning():
         raise HTTPException(status_code=503, detail="AI learning diagnostics unavailable") from exc
     finally:
         db.close()
+
+
+@app.get("/api/stats/market-gate")
+def api_stats_market_gate():
+    """Empirical market-level publication evidence (non-secret)."""
+    from app.db.session import SessionLocal
+    from app.services.market_gate import market_evidence_summary
+    from app.services.redis_cache import cache_get_or_set
+
+    def _build() -> dict:
+        db = SessionLocal()
+        try:
+            return market_evidence_summary(db)
+        finally:
+            db.close()
+
+    try:
+        return cache_get_or_set("stats:market-gate:v1", 180, _build)
+    except Exception as exc:
+        log.exception("Market evidence statistics failed")
+        raise HTTPException(status_code=503, detail="Market evidence unavailable") from exc
 
 
 @app.get("/api/wake")
