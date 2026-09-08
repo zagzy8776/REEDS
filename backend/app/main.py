@@ -189,7 +189,8 @@ def api_stats_summary():
     from collections import defaultdict
     from datetime import date, timedelta
 
-    from app.db.models import BacktestRun, MarketEvidence, ModelVersion, OddsSnapshot, Prediction
+    from app.db.models import BacktestRun, Fixture, MarketEvidence, ModelVersion, OddsSnapshot, Prediction
+    from app.db.session import SessionLocal
     from app.services.market_metrics import selected_decimal_odds
     from app.services.prediction_learning import build_learning_context
 
