@@ -1,39 +1,42 @@
-# REPLACE with your own app name before `fly launch`/`fly deploy`.
-app = "reeds-backend-worker"
-primary_region = "iad"
+# fly.toml app configuration file generated for reeds on 2026-09-08T14:23:21Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'reeds'
+primary_region = 'fra'
 
 [build]
-  # Dockerfile lives in this directory (backend/)
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "8080"
-  APP_ENV = "production"
-  # Fly runs the heavier inference/prediction worker. Render keeps the
-  # scheduler leader; set this to "false"/"yes" if you want Fly to own the
-  # schedule instead (the advisory lock prevents both from duplicating work).
-  ENABLE_SCHEDULER = "false"
-  SCHEDULE_DISABLED = "1"
+  APP_ENV = 'production'
+  ENABLE_SCHEDULER = 'false'
+  PORT = '8080'
+  SCHEDULE_DISABLED = '1'
 
-[services]
-  protocol = "tcp"
-  internal_port = 8080
+[http_service]
+  internal_port = 8000
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
+  processes = ['app']
 
-  [[services.checks]]
-    grace_period = "45s"
-    interval = "30s"
-    method = "GET"
-    path = "/health"
-    timeout = "5s"
+[[services]]
+  protocol = 'tcp'
+  internal_port = 8080
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  ports = []
 
-[metrics]
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 2048
+
+[[metrics]]
   port = 8080
-  path = "/health"
-
-# All secrets are provided via `fly secrets set`:
-#   DATABASE_URL, ADMIN_API_KEY, CRON_SECRET, THE_ODDS_API_KEY, ...
-# Never commit real secrets to the repository.
+  path = '/health'
