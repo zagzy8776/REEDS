@@ -1,4 +1,4 @@
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://reeds-phj1.onrender.com";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://reeds.fly.dev";
 
 const DEFAULT_API_TIMEOUT_MS = 70000;
 
@@ -46,11 +46,11 @@ export async function getPrediction(id: string) {
 }
 
 export async function getCombo() {
-  return safeFetchJson(`${API_URL}/api/predictions/combo?legs=3&min_confidence=55`, { legs: [] });
+  return safeFetchJson(`${API_URL}/api/predictions/combo?legs=3&min_confidence=60`, { legs: [] });
 }
 
 export async function getStats() {
-  return safeFetchJson(`${API_URL}/api/stats/backtest`, { models: [], note: "Backend stats are not available yet." });
+  return safeFetchJson(`${API_URL}/api/stats/summary`, { results: { settled_picks: 0, wins: 0, losses: 0, hit_rate: 0, by_sport: [], by_market: [], confidence_buckets: [] }, market_proof: { tracked_bets: 0, profit_units: 0, roi_percent: 0, clv_tracked: 0, positive_clv_rate: 0, by_market: [], note: "ROI/CLV tracking is warming up." }, backtests: [], models: [], data_quality: {} });
 }
 
 export async function getUpcomingFixtures() {

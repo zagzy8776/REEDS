@@ -259,6 +259,10 @@ def fixtures_status(db: Session = Depends(get_db)):
                 .group_by(Fixture.sport)
                 .all()
             },
+            "sports": list({sport: count for sport, count in db.query(Fixture.sport, func.count(Fixture.id))
+                .filter(Fixture.match_date >= today, Fixture.match_date <= horizon, Fixture.source != "coverage_seed")
+                .group_by(Fixture.sport)
+                .all()}.keys()),
         }
 
     try:

@@ -3,8 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { getPrediction } from "../../../lib/api";
 
 function formatDate(value?: string) {
   if (!value) return "TBA";
@@ -19,8 +18,7 @@ export default function PredictionDetail() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/predictions/${id}`)
-      .then((r) => r.json())
+    getPrediction(id)
       .then(setPrediction)
       .catch(() => {})
       .finally(() => setLoading(false));

@@ -2,12 +2,13 @@ import hashlib
 import logging
 import secrets
 import threading
+from collections import defaultdict
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import and_, text, func
 
-from app.api import admin, public, live, fixtures, model_sync, ml_pipeline, ai_reads
+from app.api import admin, public, live, fixtures, model_sync, ml_pipeline, ai_reads, community
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import init_db, engine
@@ -24,6 +25,7 @@ app.include_router(fixtures.router, prefix="/api")
 app.include_router(model_sync.router)
 app.include_router(ml_pipeline.router, prefix="/api")
 app.include_router(ai_reads.router, prefix="/api")
+app.include_router(community.router, prefix="/api")
 
 
 _startup_db_ready = False
@@ -178,6 +180,128 @@ def api_stats_backtest():
     except Exception as exc:
         log.exception("Model status endpoint failed")
         raise HTTPException(status_code=503, detail="Model status unavailable") from exc
+    finally:
+        db.close()
+
+
+@app.get("/api/stats/summary")
+def api_stats_summary():
+    from collections import defaultdict
+    from datetime import date, timedelta
+
+    from app.db.models import BacktestRun, MarketEvidence, ModelVersion, OddsSnapshot, Prediction
+    from app.services.market_metrics import selected_decimal_odds
+    from app.services.prediction_learning import build_learning_context
+
+    db = SessionLocal()
+    try:
+        context = build_learning_context(db)
+        settled_predictions = context.get("settled_predictions", 0)
+        recent_wins = context.get("recent_wins", 0)
+        recent_losses = context.get("recent_losses", 0)
+        recent_accuracy = context.get("recent_accuracy")
+        confidence_buckets = context.get("confidence_buckets", [])
+
+        rows = (
+            db.query(Prediction, Fixture)
+            .join(Fixture, Prediction.fixture_id == Fixture.id)
+            .filter(Prediction.is_published == True, Fixture.home_score != None, Fixture.away_score != None)
+            .order_by(Fixture.match_date.desc())
+            .limit(12000)
+            .all()
+        )
+        by_sport: dict[str, dict] = defaultdict(lambda: {"wins": 0, "total": 0, "hit_rate": 0.0})
+        by_market: dict[str, dict] = defaultdict(lambda: {"wins": 0, "total": 0, "hit_rate": 0.0})
+        for pred, fx in rows:
+            sport = fx.sport or "unknown"
+            market = pred.market or "unknown"
+            by_sport[sport]["total"] += 1
+            by_market[market]["total"] += 1
+            won = pred.engine_meta.get("outcome", {}).get("result") == "won" if isinstance(pred.engine_meta, dict) else False
+            if won:
+                by_sport[sport]["wins"] += 1
+                by_market[market]["wins"] += 1
+        by_sport_out = [
+            {"sport": k, "wins": v["wins"], "total": v["total"], "hit_rate": round((v["wins"] / v["total"]) * 100, 1) if v["total"] else 0.0}
+            for k, v in sorted(by_sport.items())
+        ]
+        by_market_out = [
+            {"market": k, "wins": v["wins"], "total": v["total"], "hit_rate": round((v["wins"] / v["total"]) * 100, 1) if v["total"] else 0.0}
+            for k, v in sorted(by_market.items())
+        ]
+
+        tracked_bets = 0
+        profit_units = 0.0
+        clv_tracked = 0
+        positive_clv = 0
+        market_proof_rows: dict[str, dict] = {}
+        for pred, fx in rows:
+            snap = db.query(OddsSnapshot).filter(OddsSnapshot.prediction_id == pred.id, OddsSnapshot.phase == "published").order_by(OddsSnapshot.captured_at.desc()).first()
+            if not snap:
+                continue
+            odds = selected_decimal_odds(pred, snap)
+            if odds is None or odds <= 1.0:
+                continue
+            won = pred.engine_meta.get("outcome", {}).get("result") == "won" if isinstance(pred.engine_meta, dict) else False
+            if won is None:
+                continue
+            tracked_bets += 1
+            profit_units += (odds - 1) if won else -1.0
+            market_row = market_proof_rows.setdefault(pred.market, {"market": pred.market, "bets": 0, "profit": 0.0, "clv_total": 0, "clv_positive": 0})
+            market_row["bets"] += 1
+            market_row["profit"] += (odds - 1) if won else -1.0
+            closing = db.query(OddsSnapshot).filter(OddsSnapshot.prediction_id == pred.id, OddsSnapshot.phase == "closing").order_by(OddsSnapshot.captured_at.desc()).first()
+            if closing:
+                closing_odds = selected_decimal_odds(pred, closing)
+                if closing_odds:
+                    clv_tracked += 1
+                    market_row["clv_total"] += 1
+                    if odds > closing_odds:
+                        positive_clv += 1
+                        market_row["clv_positive"] += 1
+        market_proof = {
+            "tracked_bets": tracked_bets,
+            "profit_units": round(profit_units, 2),
+            "roi_percent": round((profit_units / tracked_bets) * 100, 2) if tracked_bets else 0,
+            "clv_tracked": clv_tracked,
+            "positive_clv_rate": round((positive_clv / clv_tracked) * 100, 2) if clv_tracked else 0,
+            "by_market": [
+                {
+                    "market": r["market"],
+                    "bets": r["bets"],
+                    "profit": round(r["profit"], 2),
+                    "roi_percent": round((r["profit"] / r["bets"]) * 100, 2) if r["bets"] else 0,
+                    "clv_total": r["clv_total"],
+                    "positive_clv_rate": round((r["clv_positive"] / r["clv_total"]) * 100, 2) if r["clv_total"] else 0,
+                }
+                for r in sorted(market_proof_rows.values(), key=lambda x: x["market"])
+            ],
+            "note": "ROI is calculated as flat 1-unit staking on recent supported settled markets. CLV requires matching closing odds snapshots.",
+        }
+
+        latest_times = db.query(ModelVersion.sport.label("sport"), func.max(ModelVersion.trained_at).label("trained_at")).group_by(ModelVersion.sport).subquery()
+        model_rows = db.query(ModelVersion).join(latest_times, and_(ModelVersion.sport == latest_times.c.sport, ModelVersion.trained_at == latest_times.c.trained_at)).order_by(ModelVersion.sport.asc()).limit(24).all()
+        backtests = db.query(BacktestRun).order_by(BacktestRun.created_at.desc()).limit(20).all()
+        odds_snapshots_count = db.query(OddsSnapshot).count()
+
+        return {
+            "results": {
+                "settled_picks": settled_predictions,
+                "wins": recent_wins,
+                "losses": recent_losses,
+                "hit_rate": round(recent_accuracy, 1) if recent_accuracy is not None else 0,
+                "by_sport": by_sport_out,
+                "by_market": by_market_out,
+                "confidence_buckets": confidence_buckets,
+            },
+            "market_proof": market_proof,
+            "backtests": [{"id": r.id, "sport": r.sport, "model_type": r.model_type, "sample_size": r.sample_size, "accuracy": r.accuracy, "brier_score": r.brier_score, "log_loss": r.log_loss, "created_at": r.created_at} for r in backtests],
+            "models": [{"id": m.id, "sport": m.sport, "type": m.model_type, "sample_size": m.sample_size, "accuracy": m.accuracy, "active": m.is_active, "trained_at": m.trained_at} for m in model_rows],
+            "data_quality": {"odds_snapshots": odds_snapshots_count},
+        }
+    except Exception as exc:
+        log.exception("Stats summary endpoint failed")
+        raise HTTPException(status_code=503, detail="Stats summary unavailable") from exc
     finally:
         db.close()
 
