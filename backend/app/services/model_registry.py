@@ -1,10 +1,10 @@
 import math
 import os
 
-import joblib
 from sqlalchemy.orm import Session
 
 from app.db.models import ModelVersion
+from app.ml.model_cache import model_bundle_filesize
 
 
 MIN_ACTIVE_SAMPLES = {
@@ -22,31 +22,21 @@ MAX_ACCURACY_REGRESSION = 0.001
 MIN_SAMPLE_RATIO_TO_REPLACE = 0.90
 
 
-def _artifact_is_loadable(path: str) -> bool:
+def _artifact_exists(path: str) -> bool:
+    """Cheap, non-deserializing artifact check.
+
+    Previously this function called ``joblib.load()`` to confirm a bundle was
+    loadable. On the 512 MiB Render instance that deserialization is exactly
+    what OOMs the process during upload validation and startup. Training
+    workers validate their own artifacts before upload; production only needs
+    to know that the file is present and non-empty.
+    """
     if not path or not os.path.isfile(path):
         return False
     try:
-        bundle = joblib.load(path)
-    except Exception:
+        return os.path.getsize(path) > 0
+    except OSError:
         return False
-
-    candidates = [bundle]
-    if isinstance(bundle, dict):
-        for key in ("model", "models", "ensemble", "estimator", "classifier"):
-            value = bundle.get(key)
-            if value is not None:
-                if isinstance(value, dict):
-                    candidates.extend(value.values())
-                elif isinstance(value, (list, tuple)):
-                    candidates.extend(value)
-                else:
-                    candidates.append(value)
-
-    return any(
-        callable(getattr(candidate, "predict", None))
-        or callable(getattr(candidate, "predict_proba", None))
-        for candidate in candidates
-    )
 
 
 def _metric(value, default=None):
@@ -88,7 +78,7 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
-    if mv and _artifact_is_loadable(mv.path):
+    if mv and _artifact_exists(mv.path):
         return mv
 
     available = (
@@ -98,7 +88,7 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
         .all()
     )
     for candidate in available:
-        if _artifact_is_loadable(candidate.path):
+        if _artifact_exists(candidate.path):
             return candidate
     return None
 
@@ -123,7 +113,7 @@ def register_model(
     sample_size = int(sample_size)
 
     min_samples = MIN_ACTIVE_SAMPLES.get(sport, 100)
-    artifact_ok = _artifact_is_loadable(path)
+    artifact_ok = _artifact_exists(path)
     sample_ok = sample_size >= min_samples
     accuracy_ok = math.isfinite(accuracy) and 0.0 <= accuracy <= 1.0
     worker_training = (
@@ -138,7 +128,7 @@ def register_model(
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
-    current_artifact_ok = bool(current and _artifact_is_loadable(current.path))
+    current_artifact_ok = bool(current and _artifact_exists(current.path))
     current_sample_ok = bool(current and current.sample_size >= min_samples and current_artifact_ok)
 
     if worker_training:
