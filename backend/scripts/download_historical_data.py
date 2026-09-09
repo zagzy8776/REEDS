@@ -59,13 +59,15 @@ def download_football_data(start_year: int, end_year: int, output_dir: Path, lea
         code = season_code(year)
         for league_name in leagues:
             league_code = FOOTBALL_DATA_LEAGUES[league_name]
-            url = f"https://www.football-data.co.uk/mmz4281/{code}/{league_code}.csv"
             path = output_dir / "football" / league_name.lower() / f"{league_name}_{code}.csv"
-            if download_file(url, path):
-                downloaded.append(path)
-                print({"downloaded": str(path), "url": url}, flush=True)
+            for host in (f"https://football-data.co.uk/mmz4281/{code}/{league_code}.csv",
+                         f"https://www.football-data.co.uk/mmz4281/{code}/{league_code}.csv"):
+                if download_file(host, path):
+                    downloaded.append(path)
+                    print({"downloaded": str(path), "url": host}, flush=True)
+                    break
             else:
-                print({"skipped": url}, flush=True)
+                print({"skipped": host}, flush=True)
     return downloaded
 
 

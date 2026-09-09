@@ -131,5 +131,22 @@ def repair_runtime_schema() -> None:
 
     # MarketEvidence is created by Base.metadata.create_all; this is a safety
     # net for deployments that skip the alembic migration.
-    from app.db.models import MarketEvidence  # noqa: F401
+    from app.db.models import HistoricalEvaluation, MarketEvidence  # noqa: F401
     Base.metadata.create_all(bind=engine, tables=[MarketEvidence.__table__])
+    Base.metadata.create_all(bind=engine, tables=[HistoricalEvaluation.__table__])
+
+    # Health-evidence columns for MarketEvidence (safety net; alembic 0006 owns
+    # the migration, this keeps create_all-only deployments alive).
+    for col, ddl in (
+        ("historical_settled", "INTEGER DEFAULT 0 NOT NULL"),
+        ("historical_wins", "INTEGER DEFAULT 0 NOT NULL"),
+        ("historical_losses", "INTEGER DEFAULT 0 NOT NULL"),
+        ("historical_accuracy", "DOUBLE PRECISION"),
+        ("historical_brier_sum", "DOUBLE PRECISION"),
+        ("historical_brier_count", "INTEGER DEFAULT 0 NOT NULL"),
+        ("historical_odds_count", "INTEGER DEFAULT 0 NOT NULL"),
+        ("historical_roi_units", "DOUBLE PRECISION"),
+        ("historical_has_odds", "BOOLEAN DEFAULT FALSE NOT NULL"),
+        ("bootstrap_updated_at", "TIMESTAMP"),
+    ):
+        _add_column_if_missing("market_evidence", col, ddl)

@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     the_odds_api_sport_keys: str = "soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league,soccer_fifa_world_cup_qualifier,soccer_uefa_european_championship_qualifier,soccer_conmebol_world_cup_qualifier,soccer_concacaf_world_cup_qualifier,soccer_afc_asian_cup_qualifier,soccer_caf_africa_cup_of_nations_qualifier,soccer_international_friendly,basketball_nba,basketball_euroleague,americanfootball_nfl,baseball_mlb,icehockey_nhl,tennis_atp_us_open,tennis_wta_us_open"
     live_ingest_days: int = 7
     github_repo: str = "zagzy8776/REEDS"
+    historical_bootstrap_enabled: bool = False
+    fcdo_leagues: str = "E0,E1,E2,E3,SP1,D1,D2,I1,I2,F1,F2"
+    fcdo_seasons: str = "2425,2324,2223,2221,2021,1920,1819,1718"
+    bootstrap_odds_source: str = "B365"
 
     @property
     def allowed_cors_origins(self) -> list[str]:

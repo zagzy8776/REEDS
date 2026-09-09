@@ -17,6 +17,8 @@ REPO_URL = "https://github.com/zagzy8776/REEDS.git"
 WORKDIR = Path("/kaggle/working/REEDS")
 MODEL_DIR = Path("/kaggle/working/reeds_models")
 EXPECTED_SKLEARN = "1.6.0"
+SKLEARN_MIN_VER = (1, 6)
+SKLEARN_MAX_VER = (1, 7)
 
 
 def secret(name: str) -> str:
@@ -112,11 +114,13 @@ sys.path.insert(0, str(WORKDIR / "backend"))
 
 import sklearn
 
-if sklearn.__version__ != EXPECTED_SKLEARN:
+sklearn_ver = tuple(int(part) for part in sklearn.__version__.split(".")[:2])
+if not (SKLEARN_MIN_VER <= sklearn_ver < SKLEARN_MAX_VER):
     raise RuntimeError(
-        f"Kaggle scikit-learn mismatch: expected {EXPECTED_SKLEARN}, got {sklearn.__version__}"
+        f"Kaggle scikit-learn mismatch: expected 1.6.x (got {sklearn.__version__}) — "
+        "later scikit-learn versions change model internals and break uploaded artifacts"
     )
-print(f"ML runtime locked: scikit-learn={sklearn.__version__}")
+print(f"ML runtime locked: scikit-learn {sklearn.__version__} (range {'.'.join(map(str, SKLEARN_MIN_VER))}.x)")
 
 from app.db.session import SessionLocal, init_db
 from app.db.models import Fixture
