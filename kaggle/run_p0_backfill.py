@@ -15,6 +15,11 @@ Season codes are explicit and VERIFIED against football-data.co.uk HTTP 200:
 
 Secrets (Kaggle Add-ons -> Secrets, or env vars): DATABASE_URL
 Optional (verify only): ADMIN_API_KEY, RENDER_URL
+
+Execution contract: the Kaggle launcher is responsible for checking out the
+exact branch/commit. This worker NEVER fetches, resets, applies hard resets,
+or clones. It only verifies that the checked-out REEDS repository exists and
+reports the commit it runs against.
 """
 
 from __future__ import annotations
@@ -27,7 +32,6 @@ from pathlib import Path
 
 import requests
 
-REPO_URL = "https://github.com/zagzy8776/REEDS.git"
 WORKDIR = Path("/kaggle/working/REEDS")
 DEFAULT_LEAGUES = "E0,E1,E2,E3,SP1,D1,D2,I1,I2,F1,F2"
 DEFAULT_SEASONS = "2425,2324,2223,2122,2021,1920,1819,1718"
@@ -64,12 +68,22 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
 
 
-print("=== GIT ===", flush=True)
-if WORKDIR.exists():
-    run(["git", "-C", str(WORKDIR), "fetch", "origin", "main"])
-    run(["git", "-C", str(WORKDIR), "reset", "--hard", "origin/main"])
-else:
-    run(["git", "clone", "--depth=1", REPO_URL, str(WORKDIR)])
+print("=== VERIFY CHECKOUT (no Git mutation) ===", flush=True)
+if not WORKDIR.exists():
+    raise RuntimeError(
+        f"{WORKDIR} does not exist. The Kaggle launcher must clone/check out the "
+        "p0-backfill branch first; this worker never fetches/resets/clones."
+    )
+
+current_commit = subprocess.run(
+    ["git", "-C", str(WORKDIR), "rev-parse", "HEAD"],
+    capture_output=True, text=True,
+)
+if current_commit.returncode != 0:
+    raise RuntimeError(f"{WORKDIR} is not a Git repository: {current_commit.stderr.strip()}")
+if not (WORKDIR / "backend").exists():
+    raise RuntimeError(f"{WORKDIR}/backend missing; checkout looks incomplete")
+print(f"Working on commit {current_commit.stdout.strip()} (taken as-is, Git state untouched)", flush=True)
 
 BACKEND = WORKDIR / "backend"
 
