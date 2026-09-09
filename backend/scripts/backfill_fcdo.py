@@ -9,7 +9,7 @@ from app.db.session import SessionLocal, init_db
 from app.scraper.loaders import load_football_csv
 
 DEFAULT_LEAGUES = "E0,E1,E2,E3,SP1,D1,D2,I1,I2,F1,F2"
-DEFAULT_SEASONS = "2425,2324,2223,2221,2021,1920,1819,1718"
+DEFAULT_SEASONS = "2425,2324,2223,2122,2021,1920,1819,1718"
 
 
 def season_start_year(code: str) -> int:

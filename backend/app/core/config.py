@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     github_repo: str = "zagzy8776/REEDS"
     historical_bootstrap_enabled: bool = False
     fcdo_leagues: str = "E0,E1,E2,E3,SP1,D1,D2,I1,I2,F1,F2"
-    fcdo_seasons: str = "2425,2324,2223,2221,2021,1920,1819,1718"
+    fcdo_seasons: str = "2425,2324,2223,2122,2021,1920,1819,1718"
     bootstrap_odds_source: str = "B365"
 
     @property

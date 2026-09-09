@@ -54,7 +54,7 @@ if not DATABASE_URL or not ADMIN_API_KEY:
 os.environ["DATABASE_URL"] = DATABASE_URL
 os.environ["APP_ENV"] = "production"
 os.environ["FCDO_LEAGUES"] = os.getenv("FCDO_LEAGUES", "E0,E1,E2,E3,SP1,D1,D2,I1,I2,F1,F2")
-os.environ["FCDO_SEASONS"] = os.getenv("FCDO_SEASONS", "2425,2324,2223,2221,2021,1920,1819,1718")
+os.environ["FCDO_SEASONS"] = os.getenv("FCDO_SEASONS", "2425,2324,2223,2122,2021,1920,1819,1718")
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> None:
