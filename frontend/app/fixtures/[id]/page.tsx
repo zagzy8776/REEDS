@@ -70,8 +70,16 @@ export default async function FixtureDetail({ params }: { params: Promise<{ id: 
             <p className="mt-2">This match has been queued for the Render prediction worker. Refresh this page shortly to see the finished analysis.</p>
           </div>
         ) : (
-          <div className="mt-5 grid gap-5 md:grid-cols-2">
-            {picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="card text-slate-400">No published AI reads are available for this match yet.</div>}
+          <div className="mt-5">
+            {data.status === "draft" ? (
+              <div className="mb-4 rounded-xl border border-amber-400/25 bg-amber-400/5 p-4 text-slate-300">
+                <b className="text-amber-300">Draft analysis — not yet public.</b>{" "}
+                These reads are generated for this exact match but are provisional until empirical evidence unlocks tracked publication.
+              </div>
+            ) : null}
+            <div className="grid gap-5 md:grid-cols-2">
+              {picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="card text-slate-400">No published AI reads are available for this match yet.</div>}
+            </div>
           </div>
         )}
       </section>

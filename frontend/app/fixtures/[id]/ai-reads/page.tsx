@@ -43,7 +43,7 @@ export default async function FixtureAIReads({ params }: { params: Promise<{ id:
       {data.status === "preparing" ? (
         <section className="card mt-8 border border-amber-400/20 bg-amber-400/5">
           <h2 className="text-2xl font-black text-white">Analysis is being prepared</h2>
-          <p className="mt-2 text-slate-400">REEDS has queued this exact fixture for analysis. Refresh shortly; the page will automatically show the published reads when they are ready.</p>
+          <p className="mt-2 text-slate-400">REEDS has queued this exact fixture for analysis. Refresh shortly; the page will automatically show the reads when they are ready.</p>
           <div className="mt-5 flex flex-wrap gap-3">
             <Link href={`/fixtures/${id}`} className="rounded-xl bg-emerald-400 px-4 py-2 font-black text-slate-950">Back to Match Hub</Link>
             <Link href="/predictions" className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 font-bold">View current AI board</Link>
@@ -52,9 +52,19 @@ export default async function FixtureAIReads({ params }: { params: Promise<{ id:
       ) : (
         <section className="mt-8">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div><p className="badge inline-block">Published analysis</p><h2 className="mt-3 text-2xl font-black">What REEDS reads for this match</h2></div>
+            <div>
+              <p className="badge inline-block">{data.status === "draft" ? "Draft analysis" : "Published analysis"}</p>
+              <h2 className="mt-3 text-2xl font-black">What REEDS reads for this match</h2>
+            </div>
             <span className="text-sm text-slate-500">{picks.length} active read{picks.length === 1 ? "" : "s"}</span>
           </div>
+          {data.status === "draft" && picks.length ? (
+            <div className="mt-4 rounded-xl border border-amber-400/25 bg-amber-400/5 p-4 text-slate-300">
+              <b className="text-amber-300">Draft analysis — not yet public.</b> These reads are
+              generated for this exact match but are provisional until empirical evidence
+              unlocks tracked publication.
+            </div>
+          ) : null}
           <div className="mt-5 grid gap-5 md:grid-cols-2">
             {picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="card text-slate-400">No published AI reads are available for this fixture yet.</div>}
           </div>
