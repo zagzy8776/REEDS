@@ -174,9 +174,9 @@ def normalize_result(home_score: int, away_score: int) -> int:
 
 def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     if "sport" in fixtures.columns:
-        df = fixtures[fixtures["sport"] == "soccer"].sort_values("match_date").copy()
+        df = fixtures[fixtures["sport"] == "soccer"].sort_values("match_date", kind="stable").copy()
     else:
-        df = fixtures.sort_values("match_date").copy()
+        df = fixtures.sort_values("match_date", kind="stable").copy()
     rows, y = [], []
     team_hist: dict[str, list[dict]] = {}
     team_home_hist: dict[str, list[dict]] = {}
@@ -623,9 +623,9 @@ def features_for_fixture(
 
 def build_basketball_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     if "sport" in fixtures.columns:
-        df = fixtures[fixtures["sport"] == "basketball"].sort_values("match_date").copy()
+        df = fixtures[fixtures["sport"] == "basketball"].sort_values("match_date", kind="stable").copy()
     else:
-        df = fixtures.sort_values("match_date").copy()
+        df = fixtures.sort_values("match_date", kind="stable").copy()
     rows, y = [], []
     team_hist: dict[str, list[dict]] = {}
     team_elo: dict[str, float] = {}

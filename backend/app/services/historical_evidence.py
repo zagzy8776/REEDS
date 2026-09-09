@@ -96,6 +96,7 @@ def _walk_forward_predictions(
     y: pd.Series,
     labels: list[int],
     sport: str,
+    aligned_ids: pd.Series,
     *,
     min_train_rows: int,
     fold_size: int,
@@ -104,11 +105,13 @@ def _walk_forward_predictions(
 
     Each test fixture is predicted by a model that only saw strictly older rows.
     ``X``/``y`` must already be the as-of-safe feature matrix from the shared
-    feature builders (computed in chronological order).
+    feature builders (computed in chronological order). Seats are keyed to the
+    real fixture row via ``aligned_ids`` (never by positional frame indexing).
     """
     if len(X) < min_train_rows + fold_size:
         return []
     n = len(X)
+    row_by_id = {int(r["id"]): r for _, r in frame.iterrows() if pd.notna(r.get("id"))}
     windows: list[dict[str, Any]] = []
     fold_index = 0
     for fold_start in range(min_train_rows, n, fold_size):
@@ -127,13 +130,17 @@ def _walk_forward_predictions(
         )
         model.fit(train_X, train_y)
         proba = _fold_predict(model, list(model.classes_), labels, X.iloc[fold_start:fold_end])
-        for offset, (_, fixture_row) in enumerate(frame.iloc[fold_start:fold_end].iterrows()):
-            best = int(np.argmax(proba[offset]))
+        for offset in range(fold_start, fold_end):
+            fixture_id = int(aligned_ids.iloc[offset])
+            fixture_row = row_by_id.get(fixture_id)
+            if fixture_row is None:
+                continue
+            best = int(np.argmax(proba[offset - fold_start]))
             pick = _soccer_pick_from_label(best) if sport == "soccer" else ("Home Win" if best == 1 else "Away Win")
             windows.append({
                 "fixture_row": fixture_row,
                 "pick": pick,
-                "confidence": round(float(proba[offset][best]) * 100.0, 3),
+                "confidence": round(float(proba[offset - fold_start][best]) * 100.0, 3),
                 "fold_index": fold_index,
             })
         fold_index += 1
@@ -247,20 +254,42 @@ def _completed_fixtures(db: Session, sport: str) -> pd.DataFrame:
     ])
 
 
-def _feature_matrix(frame: pd.DataFrame, sport: str) -> tuple[pd.DataFrame, pd.Series, list[int]]:
+def _feature_matrix(frame: pd.DataFrame, sport: str) -> tuple[pd.DataFrame, pd.Series, list[int], pd.Series]:
+    """Return (X, y, labels, aligned_ids).
+
+    ``aligned_ids`` carries each feature row's fixture id so walk-forward seats
+    stay keyed to the correct fixture even if the as-of-safe builders reorder
+    or drop rows (stable sort keeps ties in match_date/id order, but we never
+    rely on positional equality with ``frame``).
+    """
+    sport_col = "sport" in frame.columns
     if sport == "soccer":
-        X, y = build_soccer_features(frame)
+        ordered = frame.sort_values(["match_date", "id"], kind="stable")
+        X, y = build_soccer_features(ordered)
         X = X.reindex(columns=FEATURES, fill_value=0)
         labels = [0, 1, 2]
     elif sport == "basketball":
-        X, y = build_basketball_features(frame)
+        ordered = frame.sort_values(["match_date", "id"], kind="stable")
+        X, y = build_basketball_features(ordered)
         X = X.reindex(columns=BASKETBALL_FEATURES, fill_value=0)
         labels = [0, 1]
     else:
-        X, y = _build_generic_features(frame, sport)
+        ordered = frame.sort_values(["match_date", "id"], kind="stable")
+        X, y = _build_generic_features(ordered, sport)
         X = X.reindex(columns=GENERIC_SPORT_FEATURES, fill_value=0)
         labels = [0, 1]
-    return X.reset_index(drop=True), y.reset_index(drop=True), labels
+
+    # Ids for the rows the feature builder actually consumed (in builder order).
+    # Feed a stable-sorted frame; builders filter by sport, so the consumed
+    # rows are exactly the frame's sport rows in (match_date, id) order.
+    consumed = ordered if (not sport_col) or ordered["sport"].eq(sport).all() else ordered[ordered["sport"] == sport]
+    aligned_ids = consumed["id"].reset_index(drop=True).iloc[: len(X)].reset_index(drop=True)
+    if len(aligned_ids) != len(X):
+        raise ValueError(
+            f"Feature matrix length mismatch for {sport}: X rows={len(X)} but aligned ids={len(aligned_ids)}. "
+            "As-of-safe builders dropped rows unexpectedly."
+        )
+    return X.reset_index(drop=True), y.reset_index(drop=True), labels, aligned_ids
 
 
 def run_historical_evidence(
@@ -286,7 +315,7 @@ def run_historical_evidence(
             summary.append({"sport": sport, "status": "no_data"})
             continue
         try:
-            X, y, labels = _feature_matrix(frame, sport)
+            X, y, labels, aligned_ids = _feature_matrix(frame, sport)
         except Exception as exc:
             log.warning("Feature matrix failed for %s: %s", sport, exc)
             summary.append({"sport": sport, "status": "feature_error", "detail": str(exc)})
@@ -297,7 +326,7 @@ def run_historical_evidence(
 
         markets = SOCCER_MARKETS if sport == "soccer" else (BASKETBALL_MARKETS if sport == "basketball" else GENERIC_SPORT_MARKETS)
         seats = _walk_forward_predictions(
-            frame, X, y, labels, sport,
+            frame, X, y, labels, sport, aligned_ids,
             min_train_rows=min_train_rows, fold_size=fold_size,
         )
         market_counts: dict[str, int] = {m: 0 for m in markets}
