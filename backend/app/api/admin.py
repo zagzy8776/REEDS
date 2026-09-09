@@ -10,7 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import BacktestRun, Fixture, OddsSnapshot, Team, TeamAlias
+from app.db.models import BacktestRun, Fixture, MarketEvidence, OddsSnapshot, Team, TeamAlias
 from app.db.session import get_db
 from app.ml.backtest import walk_forward_backtest
 from app.ml.train import train_basketball_model, train_soccer_model
@@ -223,6 +223,120 @@ def refresh_board(days: int | None = None, db: Session = Depends(get_db)):
     coverage_seeded = ensure_multisport_showcase(db)
     generated = generate_today_predictions(db)
     return {"ingest": ingest_report, "coverage_seeded": coverage_seeded, "generated_predictions": generated}
+
+
+_bootstrap_lock = threading.Lock()
+
+
+@router.get("/bootstrap-summary", dependencies=[Depends(require_admin)])
+def bootstrap_summary(db: Session = Depends(get_db)):
+    """Read-only aggregation of HistoricalEvaluation rows (BACKTEST/BOOTSTRAP only)."""
+    from app.services.historical_evidence import historical_evidence_summary
+
+    return historical_evidence_summary(db)
+
+
+@router.get("/bootstrap-markets", dependencies=[Depends(require_admin)])
+def bootstrap_markets(db: Session = Depends(get_db)):
+    """Admin view of persisted MarketEvidence historical columns + gate provenance.
+
+    Read-only: never writes, never produces public picks.
+    """
+    rows = (
+        db.query(MarketEvidence)
+        .order_by(MarketEvidence.sport.asc(), MarketEvidence.market.asc())
+        .limit(500)
+        .all()
+    )
+    return {
+        "markets": [
+            {
+                "sport": r.sport,
+                "market": r.market,
+                "live_settled": r.settled,
+                "historical_settled": r.historical_settled,
+                "total_settled": (r.settled or 0) + (r.historical_settled or 0),
+                "historical_accuracy": round(r.historical_accuracy, 4) if r.historical_accuracy is not None else None,
+                "historical_brier_count": r.historical_brier_count,
+                "historical_odds_count": r.historical_odds_count,
+                "historical_roi_units": round(r.historical_roi_units, 4) if r.historical_roi_units is not None else None,
+                "historical_has_odds": r.historical_has_odds,
+                "publication_blocked": r.publication_blocked,
+                "block_reasons": r.block_reasons or [],
+                "bootstrap_updated_at": r.bootstrap_updated_at.isoformat() if r.bootstrap_updated_at else None,
+            }
+            for r in rows
+        ],
+        "note": "Historical walk-forward evaluations count toward sample bar/overall accuracy only; recent accuracy and loss streak stay live-only.",
+    }
+
+
+@router.post("/bootstrap/run", dependencies=[Depends(require_admin)])
+def bootstrap_run(
+    sport: str | None = None,
+    min_train_rows: int = 400,
+    fold_size: int = 400,
+    dry_run: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Trigger walk-forward historical evidence in a background thread.
+
+    Gated by HISTORICAL_BOOTSTRAP_ENABLED (default off). Prefer running this on
+    the Kaggle/Colab worker for heavy sports; live API hosts stay lean.
+    """
+    settings = get_settings()
+    if dry_run:
+        from app.services.historical_evidence import run_historical_evidence
+
+        return run_historical_evidence(
+            db,
+            sports=[sport] if sport else None,
+            min_train_rows=min_train_rows,
+            fold_size=fold_size,
+            job_id="bootstrap",
+            dry_run=True,
+        )
+
+    if not settings.historical_bootstrap_enabled:
+        return {
+            "status": "disabled",
+            "message": "HISTORICAL_BOOTSTRAP_ENABLED is false. Set it to true to allow bootstrap evaluations.",
+        }
+    if not _bootstrap_lock.acquire(blocking=False):
+        return {"status": "already_running"}
+
+    from app.db.session import SessionLocal
+
+    def _run():
+        try:
+            _db = SessionLocal()
+            try:
+                from app.services.historical_evidence import run_historical_evidence
+                from app.services.evidence_pivot import pivot_historical_evidence
+                from app.services.market_gate import compute_market_evidence
+
+                report = run_historical_evidence(
+                    _db,
+                    sports=[sport] if sport else None,
+                    min_train_rows=min_train_rows,
+                    fold_size=fold_size,
+                    job_id="bootstrap",
+                )
+                pivot = pivot_historical_evidence(_db)
+                recomputed = compute_market_evidence(_db)
+                log.info("Bootstrap complete: %s | pivot=%s", report.get("job_id"), pivot)
+            finally:
+                _db.close()
+        except Exception:
+            log.exception("Background historical bootstrap failed")
+        finally:
+            _bootstrap_lock.release()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {
+        "status": "started",
+        "message": "Historical bootstrap running in background thread. Poll /api/admin/bootstrap-summary to see results.",
+    }
 
 
 @router.post("/coverage-seed", dependencies=[Depends(require_admin)])

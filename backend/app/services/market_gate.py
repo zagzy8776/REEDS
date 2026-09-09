@@ -186,21 +186,40 @@ def compute_market_evidence(db: Session) -> dict[str, dict]:
         brier = (seg["brier_sum"] / seg["brier_count"]) if seg["brier_count"] else None
         roi = (seg["profit"] / seg["ev_count"]) if seg["ev_count"] else None
 
+        # Merge walk-forward historical evidence (from HistoricalEvaluation
+        # aggregates). The sample bar and overall accuracy use the combined
+        # live+historical totals; recent accuracy and loss streak stay live-only
+        # — that is the pacing mechanism that prevents historical volume from
+        # masking live decay.
+        hist = _historical_evidence_for(db, sport, market)
+        total_settled = settled + hist["settled"]
+        total_wins = wins + hist["wins"]
+        total_losses = losses + hist["losses"]
+        combined_accuracy = (total_wins / total_settled) if total_settled else accuracy
+        combined_brier = (
+            (seg["brier_sum"] + hist["brier_sum"]) / (seg["brier_count"] + hist["brier_count"])
+            if (seg["brier_count"] + hist["brier_count"]) else (brier if brier is not None else None)
+        )
+        combined_roi = (
+            (seg["profit"] + hist["roi"]) / (seg["ev_count"] + hist["odds_count"])
+            if (seg["ev_count"] + hist["odds_count"]) else roi
+        )
+
         reasons: list[str] = []
         blocked = False
-        if settled < MIN_PUBLIC_SAMPLE:
+        if total_settled < MIN_PUBLIC_SAMPLE:
             blocked = True
-            reasons.append(f"insufficient settled sample ({settled} < {MIN_PUBLIC_SAMPLE})")
-        if accuracy is not None and accuracy < MIN_EMPIRICAL_ACCURACY:
+            reasons.append(f"insufficient settled sample ({total_settled} < {MIN_PUBLIC_SAMPLE})")
+        if combined_accuracy is not None and combined_accuracy < MIN_EMPIRICAL_ACCURACY:
             blocked = True
-            reasons.append(f"empirical accuracy {accuracy:.1%} below {MIN_EMPIRICAL_ACCURACY:.0%}")
+            reasons.append(f"empirical accuracy {combined_accuracy:.1%} below {MIN_EMPIRICAL_ACCURACY:.0%}")
         if seg["recent_settled"] >= MIN_RECENT_SAMPLE and recent_accuracy is not None and recent_accuracy < MIN_RECENT_ACCURACY:
             blocked = True
             reasons.append(f"recent accuracy {recent_accuracy:.1%} below {MIN_RECENT_ACCURACY:.0%}")
         if seg["max_loss_streak"] >= MAX_LOSS_STREAK:
             blocked = True
             reasons.append(f"repeated losses (streak of {seg['max_loss_streak']})")
-        if not market_is_model_trained(sport, market) and settled < MIN_PUBLIC_SAMPLE * 2:
+        if not market_is_model_trained(sport, market) and total_settled < MIN_PUBLIC_SAMPLE * 2:
             blocked = True
             if not reasons:
                 reasons.append("analytical market needs a larger settled sample before public publication")
@@ -224,10 +243,50 @@ def compute_market_evidence(db: Session) -> dict[str, dict]:
             "publication_blocked": blocked,
             "block_reasons": reasons,
             "is_model_trained": market_is_model_trained(sport, market),
+            "historical_settled": hist["settled"],
+            "historical_wins": hist["wins"],
+            "historical_losses": hist["losses"],
+            "historical_accuracy": hist["accuracy"] if hist["settled"] else None,
+            "historical_brier_sum": round(hist["brier_sum"], 4),
+            "historical_brier_count": hist["brier_count"],
+            "historical_odds_count": hist["odds_count"],
+            "historical_roi_units": round(hist["roi"], 4),
+            "historical_has_odds": hist["has_odds"],
+            "total_settled": total_settled,
+            "combined_accuracy": combined_accuracy,
+            "combined_brier": combined_brier,
+            "combined_ev": combined_roi,
         }
         result[f"{sport}|{market}"] = record
         _persist_evidence(db, record)
     return result
+
+
+def _historical_evidence_for(db: Session, sport: str, market: str) -> dict:
+    """Live-summary of the HistoricalEvaluation aggregates for a segment."""
+    from app.db.models import MarketEvidence as _ME
+    row = (
+        db.query(_ME)
+        .filter(_ME.sport == sport, _ME.market == market)
+        .first()
+    )
+    if row is None:
+        return {
+            "settled": 0, "wins": 0, "losses": 0, "pushes": 0,
+            "brier_sum": 0.0, "brier_count": 0, "odds_count": 0, "roi": 0.0,
+            "has_odds": False,
+        }
+    return {
+        "settled": row.historical_settled or 0,
+        "wins": row.historical_wins or 0,
+        "losses": row.historical_losses or 0,
+        "pushes": 0,
+        "brier_sum": row.historical_brier_sum or 0.0,
+        "brier_count": row.historical_brier_count or 0,
+        "odds_count": row.historical_odds_count or 0,
+        "roi": row.historical_roi_units or 0.0,
+        "has_odds": bool(row.historical_has_odds),
+    }
 
 
 def _persist_evidence(db: Session, record: dict) -> None:
@@ -245,6 +304,9 @@ def _persist_evidence(db: Session, record: dict) -> None:
             "recent_losses", "accuracy", "recent_accuracy", "brier_score",
             "expected_value", "roi_units", "last_loss_streak", "publication_blocked",
             "block_reasons", "is_model_trained",
+            "historical_settled", "historical_wins", "historical_losses",
+            "historical_accuracy", "historical_brier_sum", "historical_brier_count",
+            "historical_odds_count", "historical_roi_units", "historical_has_odds",
         ):
             setattr(existing, key, record[key])
         existing.updated_at = func.now()
@@ -268,8 +330,9 @@ def market_publication_policy(db: Session, sport: str, market: str) -> tuple[boo
         return False, ["no settled market evidence yet"]
     if evidence.publication_blocked:
         return False, list(evidence.block_reasons or [])
-    if evidence.settled < MIN_PUBLIC_SAMPLE:
-        return False, [f"insufficient settled sample ({evidence.settled})"]
+    total_settled = (evidence.settled or 0) + (evidence.historical_settled or 0)
+    if total_settled < MIN_PUBLIC_SAMPLE:
+        return False, [f"insufficient settled sample ({total_settled})"]
     return True, []
 
 
@@ -296,8 +359,22 @@ def market_evidence_summary(db: Session) -> dict:
                 "publication_blocked": row.publication_blocked,
                 "block_reasons": row.block_reasons or [],
                 "is_model_trained": row.is_model_trained,
+                "total_settled": (row.settled or 0) + (row.historical_settled or 0),
+                "combined_accuracy": (
+                    round(
+                        ((row.wins or 0) + (row.historical_wins or 0))
+                        / ((row.settled or 0) + (row.historical_settled or 0)),
+                        4,
+                    )
+                    if ((row.settled or 0) + (row.historical_settled or 0))
+                    else None
+                ),
+                "historical_settled": row.historical_settled or 0,
+                "historical_wins": row.historical_wins or 0,
+                "historical_losses": row.historical_losses or 0,
+                "historical_accuracy": round(row.historical_accuracy, 4) if row.historical_accuracy is not None else None,
             }
             for row in rows
         ],
-        "note": "Markets with insufficient evidence or poor empirical accuracy are blocked from public publication.",
+        "note": "Markets with insufficient evidence or poor empirical accuracy are blocked from public publication. Historical walk-forward evaluations count toward the sample bar and overall accuracy; recent accuracy and loss streak stay live-only.",
     }

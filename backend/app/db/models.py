@@ -215,6 +215,16 @@ class MarketEvidence(Base):
     publication_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     block_reasons: Mapped[list | None] = mapped_column(JSON, nullable=True)
     is_model_trained: Mapped[bool] = mapped_column(Boolean, default=False)
+    historical_settled: Mapped[int] = mapped_column(Integer, default=0)
+    historical_wins: Mapped[int] = mapped_column(Integer, default=0)
+    historical_losses: Mapped[int] = mapped_column(Integer, default=0)
+    historical_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    historical_brier_sum: Mapped[float | None] = mapped_column(Float, nullable=True)
+    historical_brier_count: Mapped[int] = mapped_column(Integer, default=0)
+    historical_odds_count: Mapped[int] = mapped_column(Integer, default=0)
+    historical_roi_units: Mapped[float | None] = mapped_column(Float, nullable=True)
+    historical_has_odds: Mapped[bool] = mapped_column(Boolean, default=False)
+    bootstrap_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
@@ -305,3 +315,43 @@ class InsiderSignal(Base):
     source: Mapped[str] = mapped_column(String(80), default="manual")
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class HistoricalEvaluation(Base):
+    """Walk-forward out-of-sample evaluation of historical fixtures.
+
+    Every record represents one (fixture, market) scored by a fold model that
+    was trained on strictly prior data — no in-sample leakage. These rows
+    feed the market gate's evidence engine without touching the live
+    Prediction table or publication balance.
+    """
+
+    __tablename__ = "historical_evaluation"
+    __table_args__ = (
+        UniqueConstraint("fixture_id", "market", "model_version_id", "fold_index", name="uq_historical_eval"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fixture_id: Mapped[int] = mapped_column(Integer, index=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    league: Mapped[str] = mapped_column(String(80), nullable=True)
+    match_date: Mapped[date] = mapped_column(Date, index=True)
+    home_team: Mapped[str] = mapped_column(String(120))
+    away_team: Mapped[str] = mapped_column(String(120))
+    home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    market: Mapped[str] = mapped_column(String(50), index=True)
+    pick: Mapped[str] = mapped_column(String(120))
+    confidence: Mapped[float] = mapped_column(Float)
+    edge_score: Mapped[float] = mapped_column(Float, default=0.0)
+    outcome: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    brier_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    has_odds: Mapped[bool] = mapped_column(Boolean, default=False)
+    applied_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roi_units: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    inference_mode: Mapped[str] = mapped_column(String(40), default="walk_forward_fold")
+    fold_index: Mapped[int] = mapped_column(Integer, default=0)
+    job_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    source: Mapped[str] = mapped_column(String(80), default="bootstrap")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
