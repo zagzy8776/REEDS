@@ -221,4 +221,19 @@ for window_name, window in (("live-path-90d", 90), ("full-corpus", None)):
             populated += 1
     print(f"  fixtures with populated history-based features: {populated}/{len(upcoming)}", flush=True)
 
+print("\n=== CODE CHECKS (run in this Kaggle environment) ===", flush=True)
+run([sys.executable, "-m", "compileall", "-q", "backend"], WORKDIR)
+
+# Tests that are runnable with only pydantic-settings+sqlalchemy+pandas deps
+# (fastapi/sklearn/joblib tests are excluded — environment cannot install them).
+run([sys.executable, "-m", "pip", "install", "-q", "pytest"], WORKDIR)
+try:
+    subprocess.run(
+        [sys.executable, "-m", "pytest", "-q",
+         "tests/test_market_gate.py", "tests/test_evidence_pivot.py", "tests/test_redis_cache.py"],
+        cwd=str(BACKEND), check=False,
+    )
+except Exception as exc:  # noqa: BLE001
+    print(f"pytest error: {exc}", flush=True)
+
 print("\n=== P0 BACKFILL COMPLETE (STOPPING — did NOT continue into P1) ===", flush=True)
