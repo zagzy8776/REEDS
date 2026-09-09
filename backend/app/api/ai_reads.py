@@ -45,19 +45,49 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
     if not fixture:
         raise HTTPException(status_code=404, detail="Fixture not found")
 
-    rows = (
-        db.query(Prediction, Fixture)
-        .join(Fixture, Prediction.fixture_id == Fixture.id)
-        .filter(
-            Prediction.fixture_id == fixture.id,
-            Prediction.is_published == True,
-            Prediction.status == "active",
+    def _rows(published_only: bool | None = None) -> list[tuple[Prediction, Fixture]]:
+        query = (
+            db.query(Prediction, Fixture)
+            .join(Fixture, Prediction.fixture_id == Fixture.id)
+            .filter(
+                Prediction.fixture_id == fixture.id,
+                Prediction.status == "active",
+            )
+            .order_by(Prediction.confidence.desc(), Prediction.market.asc())
         )
-        .order_by(Prediction.confidence.desc(), Prediction.market.asc())
-        .all()
-    )
+        if published_only is True:
+            query = query.filter(Prediction.is_published == True)
+        elif published_only is False:
+            query = query.filter(Prediction.is_published == False)
+        return query.all()
 
-    if not rows and fixture.match_date >= date.today():
+    def _response(rows: list[tuple[Prediction, Fixture]], status: str) -> dict:
+        return {
+            "status": status,
+            "fixture": _fixture_payload(fixture),
+            "predictions": [serialize_prediction(prediction, fx) for prediction, fx in rows],
+            "generation_queued": False,
+            "message": (
+                "AI Reads are probabilistic analysis, not guaranteed outcomes."
+            ),
+            "responsible_note": "AI Reads are probabilistic analysis, not guaranteed outcomes.",
+        }
+
+    published = _rows(published_only=True)
+    if published:
+        return _response(published, "ready")
+
+    draft = _rows(published_only=False)
+    if draft:
+        response = _response(draft, "draft")
+        response["message"] = (
+            "Draft analysis — generated for this exact match but not yet part "
+            "of the public tracked record. These reads are provisional until "
+            "empirical evidence unlocks publication."
+        )
+        return response
+
+    if fixture.match_date >= date.today():
         # Generate this one fixture directly rather than depending on the
         # global 50-fixture prediction cap. A single Match Hub/AI Reads click
         # should always have an exact on-demand path.
@@ -69,30 +99,23 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
             db.rollback()
             log.exception("Exact AI Reads generation failed for fixture %s", fixture.id)
 
-        rows = (
-            db.query(Prediction, Fixture)
-            .join(Fixture, Prediction.fixture_id == Fixture.id)
-            .filter(
-                Prediction.fixture_id == fixture.id,
-                Prediction.is_published == True,
-                Prediction.status == "active",
+        published = _rows(published_only=True)
+        if published:
+            return _response(published, "ready")
+        draft = _rows(published_only=False)
+        if draft:
+            response = _response(draft, "draft")
+            response["message"] = (
+                "Draft analysis — generated for this exact match but not yet part "
+                "of the public tracked record. These reads are provisional until "
+                "empirical evidence unlocks publication."
             )
-            .order_by(Prediction.confidence.desc(), Prediction.market.asc())
-            .all()
-        )
-
-    if not rows:
-        return {
-            "status": "preparing" if fixture.match_date >= date.today() else "unavailable",
-            "fixture": _fixture_payload(fixture),
-            "predictions": [],
-            "generation_queued": False,
-            "message": "AI analysis is not published for this match yet.",
-        }
+            return response
 
     return {
-        "status": "ready",
+        "status": "preparing" if fixture.match_date >= date.today() else "unavailable",
         "fixture": _fixture_payload(fixture),
-        "predictions": [serialize_prediction(prediction, fx) for prediction, fx in rows],
-        "responsible_note": "AI Reads are probabilistic analysis, not guaranteed outcomes.",
+        "predictions": [],
+        "generation_queued": False,
+        "message": "AI analysis is not published for this match yet.",
     }

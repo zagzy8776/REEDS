@@ -41,6 +41,7 @@ interface PredictionCardProps {
     version: number;
     status: string;
     published_at: string;
+    is_published?: boolean;
     result: "pending" | "won" | "lost";
   };
 }
@@ -162,6 +163,7 @@ export function PredictionCard({ p }: PredictionCardProps) {
       <div className="flex items-center justify-between pt-4 border-t border-slate-800">
         <div className="flex items-center gap-2">
           <Badge className={getRiskColor(p.risk_level)}>{p.risk_level} Risk</Badge>
+          {p.is_published === false && <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/30">DRAFT</Badge>}
           {p.is_premium && <Badge className="bg-purple-500/20 text-purple-300 border-purple-500/30">Premium</Badge>}
         </div>
         <div className="flex items-center gap-2">

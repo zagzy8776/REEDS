@@ -129,6 +129,7 @@ def serialize_prediction(p: Prediction, f: Fixture) -> dict:
         "edge_score": p.edge_score, "risk_level": p.risk_level, "reasoning": p.reasoning,
         "analysis": engine_meta, "value_betting": value_info, "is_premium": p.is_premium,
         "version": p.version, "status": p.status, "published_at": p.published_at,
+        "is_published": p.is_published,
         "result": "pending" if result is None else "won" if result else "lost",
     }
 
