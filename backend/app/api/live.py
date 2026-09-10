@@ -1,12 +1,4 @@
-"""Live match events API — SSE stream + REST endpoints.
-
-Provides:
-  GET  /api/live/events/{fixture_id}        — all stored events for a fixture
-  GET  /api/live/lineups/{fixture_id}       — starting XI + bench
-  GET  /api/live/stream/{fixture_id}        — SSE stream (new events pushed)
-  GET  /api/live/matches                    — all currently live fixtures
-  POST /api/live/subscribe                  — save push notification subscription
-"""
+"""Live match events API — SSE stream + REST endpoints."""
 
 import asyncio
 import json
@@ -37,6 +29,7 @@ def _event_label(event_type: str) -> str:
         "goal": "⚽ Goal",
         "score_update": "⚽ Score update",
         "stats_update": "📊 Live stats",
+        "live_intelligence": "🧠 Live read",
         "yellow_card": "🟨 Yellow Card",
         "red_card": "🟥 Red Card",
         "substitution": "🔄 Substitution",
@@ -83,6 +76,7 @@ def _live_payload(fx: Fixture) -> dict:
         "last_synced_at": extra.get("live_last_synced_at"),
         "stats_updated_at": extra.get("live_stats_updated_at"),
         "stats": extra.get("live_stats") or {},
+        "intelligence": extra.get("live_intelligence") or {},
     }
 
 
@@ -118,6 +112,7 @@ def fixture_events(fixture_id: int, db: Session = Depends(get_db)):
         "last_synced_at": extra.get("live_last_synced_at"),
         "stats_updated_at": extra.get("live_stats_updated_at"),
         "stats": extra.get("live_stats") or {},
+        "intelligence": extra.get("live_intelligence") or {},
         "events": [_serialize_event(ev) for ev in events],
     }
 
