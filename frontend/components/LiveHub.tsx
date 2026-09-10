@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { API_URL, getLiveEvents, getLiveMatches, getLatestAlerts } from "../lib/api";
 
@@ -83,13 +83,10 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
             return next;
           }));
           if (event.event_type && event.event_type !== "stats_update") {
-            setEventsByFixture((prev) => ({
-              ...prev,
-              [id]: [...(prev[id] || []), event].slice(-30),
-            }));
+            setEventsByFixture((prev) => ({ ...prev, [id]: [...(prev[id] || []), event].slice(-30) }));
           }
         } catch {
-          // Ignore malformed SSE frames; the 15s REST refresh remains authoritative.
+          // REST refresh remains the authoritative fallback if an SSE frame is malformed.
         }
       };
       streams.push(stream);
@@ -99,9 +96,7 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
 
   const loadEvents = async (id: number) => {
     const data = await getLiveEvents(id);
-    if (Array.isArray(data?.events)) {
-      setEventsByFixture((prev) => ({ ...prev, [id]: data.events }));
-    }
+    if (Array.isArray(data?.events)) setEventsByFixture((prev) => ({ ...prev, [id]: data.events }));
     if (data) {
       setMatches((prev) => prev.map((m) => Number(m.id) === id ? {
         ...m,
@@ -123,7 +118,7 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-bold">Live right now</h2>
         <div className="flex items-center gap-3 text-xs text-slate-500">
-          {lastRefresh ? <span>Live feed • fallback refresh 15s</span> : <span>Connecting…</span>}
+          {lastRefresh ? <span>Live feed • SSE + fallback refresh</span> : <span>Connecting…</span>}
           <span className="inline-flex items-center gap-1.5">
             <span className="h-2 w-2 animate-pulse rounded-full bg-red-400" />
             {live.filter((m) => m.status !== "HT" && m.status !== "BT" && m.status !== "INT").length} in play
@@ -151,10 +146,7 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
                 </div>
                 <div className="text-right">
                   <p className="text-2xl font-black">{m.home_score ?? "-"} : {m.away_score ?? "-"}</p>
-                  <p className="text-xs font-bold text-slate-400">
-                    {STATUS_LABEL[(m.status || "").toUpperCase()] || m.status || "Live"}
-                    {liveClock(m, now) ? ` • ${liveClock(m, now)}` : ""}
-                  </p>
+                  <p className="text-xs font-bold text-slate-400">{STATUS_LABEL[(m.status || "").toUpperCase()] || m.status || "Live"}{liveClock(m, now) ? ` • ${liveClock(m, now)}` : ""}</p>
                 </div>
               </div>
 
@@ -168,16 +160,10 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
 
               {stats.length > 0 && (
                 <div className="mt-4 rounded-xl border border-white/10 bg-slate-950/50 p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs font-black uppercase tracking-wider text-slate-500">Live statistics</p>
-                    <span className="text-[10px] text-slate-600">provider data</span>
-                  </div>
+                  <div className="flex items-center justify-between"><p className="text-xs font-black uppercase tracking-wider text-slate-500">Live statistics</p><span className="text-[10px] text-slate-600">provider data</span></div>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2">
                     {stats.map(([name, value]: any) => (
-                      <div key={name} className="flex items-center justify-between rounded-lg border border-white/5 px-3 py-2 text-xs">
-                        <span className="text-slate-400">{name}</span>
-                        <span className="font-bold text-slate-200">{statValue(value?.home)} — {statValue(value?.away)}</span>
-                      </div>
+                      <div key={name} className="flex items-center justify-between rounded-lg border border-white/5 px-3 py-2 text-xs"><span className="text-slate-400">{name}</span><span className="font-bold text-slate-200">{statValue(value?.home)} — {statValue(value?.away)}</span></div>
                     ))}
                   </div>
                 </div>
@@ -187,8 +173,7 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
                   {eventsByFixture[m.id].map((ev: any, i: number) => (
                     <div key={`${ev.id || "live"}-${i}`} className={`rounded-lg border bg-slate-950/60 p-2 text-xs ${EVENT_TONE[ev.event_type] || "border-slate-800 text-slate-400"}`}>
-                      <span className="font-bold">{ev.label || ev.event_type}</span>
-                      <span className="ml-1 text-slate-500">{ev.minute ? `${ev.minute}'` : ""}</span>
+                      <span className="font-bold">{ev.label || ev.event_type}</span><span className="ml-1 text-slate-500">{ev.minute ? `${ev.minute}'` : ""}</span>
                       {ev.score ? <span className="ml-1 text-slate-400">{ev.score}</span> : null}
                       {ev.player ? <span className="ml-1 text-slate-400">{ev.player}</span> : null}
                       {ev.detail && ev.event_type === "score_update" ? <span className="ml-1 text-slate-500">{ev.detail}</span> : null}
@@ -207,10 +192,7 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
           <div className="mt-3 grid gap-2">
             {alerts.slice(0, 8).map((a: any, i: number) => (
               <div key={i} className="flex items-center justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm">
-                <div>
-                  <p className="font-bold text-slate-200">{a.title}</p>
-                  <p className="text-xs text-slate-500">{a.message}</p>
-                </div>
+                <div><p className="font-bold text-slate-200">{a.title}</p><p className="text-xs text-slate-500">{a.message}</p></div>
                 <span className="shrink-0 text-xs text-slate-500">{a.time_label || a.occurred_at || ""}</span>
               </div>
             ))}
