@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db.models import Fixture, MatchEvent, MatchLineup, PushSubscription
+from app.db.session import get_db
 from app.services.live_events import pop_events_since
 
 log = logging.getLogger(__name__)
