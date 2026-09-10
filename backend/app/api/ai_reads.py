@@ -14,7 +14,6 @@ from app.api.public import serialize_prediction
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-
 _LIVE_STATUSES = {"1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT"}
 
 
@@ -43,34 +42,24 @@ def _fixture_payload(fixture: Fixture) -> dict:
 
 
 def _supported_draft(prediction: Prediction) -> bool:
-    """Only expose an early read when its stored quality gate accepted it.
-
-    Cold-start / neutral-prior rows stay internal. The public tracked record
-    remains governed by ``is_published`` separately.
-    """
     meta = prediction.engine_meta if isinstance(prediction.engine_meta, dict) else {}
     if meta.get("cold_start") is True:
         return False
-    if str(meta.get("data_depth") or "").lower() in {"none", "thin", "cold_start", "default"}:
-        if str(meta.get("data_depth") or "").lower() == "cold_start":
-            return False
+    if str(meta.get("data_depth") or "").lower() == "cold_start":
+        return False
     quality = meta.get("publication_quality") if isinstance(meta.get("publication_quality"), dict) else {}
     if quality.get("default_driven") is True:
         return False
     if quality.get("accepted") is not True:
         return False
     reasons = quality.get("reasons") if isinstance(quality.get("reasons"), list) else []
-    blocked_markers = (
-        "neutral/default priors",
-        "insufficient",
-        "correct-score market is disabled",
-    )
+    blocked_markers = ("neutral/default priors", "insufficient", "correct-score market is disabled")
     if any(any(marker in str(r).lower() for marker in blocked_markers) for r in reasons):
         return False
     return True
 
 
-def _response(db: Session, fixture: Fixture, rows: list[tuple[Prediction, Fixture]], status: str) -> dict:
+def _response(db: Session, fixture: Fixture, rows: list, status: str) -> dict:
     from app.services.feedback import post_match_analysis
     from app.services.match_intelligence import market_overview, prediction_revisions, prediction_timeline
     from app.api.public import records_map
@@ -110,7 +99,7 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
     if not fixture:
         raise HTTPException(status_code=404, detail="Fixture not found")
 
-    def _rows(published_only: bool | None = None) -> list[tuple[Prediction, Fixture]]:
+    def _rows(published_only: bool | None = None):
         query = (
             db.query(Prediction, Fixture)
             .join(Fixture, Prediction.fixture_id == Fixture.id)
@@ -145,36 +134,62 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
         response["message"] = "Early read — generated for this exact match, but it is not yet part of the public tracked record."
         return response
 
-    # Generated rows may exist but all are cold-start / rejected by quality gate.
     any_internal = (
         db.query(Prediction)
         .filter(Prediction.fixture_id == fixture.id, Prediction.status == "active")
         .count()
     )
     if any_internal:
+        from app.services.fixture_quality import prediction_readiness
+        readiness = prediction_readiness(db, fixture)
+        checks = readiness.get("checks") or {}
         return {
             "status": "insufficient_data",
             "fixture": _fixture_payload(fixture),
             "predictions": [],
-            "intelligence": {
-                "revisions": [],
-                "market": {},
-                "timeline": [],
-            },
+            "intelligence": {"revisions": [], "market": {}, "timeline": []},
             "generation_queued": False,
+            "readiness": readiness,
             "message": (
                 "REEDS analysed this fixture but found insufficient team-specific history "
                 "(cold-start / neutral priors). No customer-facing read is shown until "
                 "real form and results for these clubs are available."
             ),
             "responsible_note": "AI Reads require match-specific evidence. Default priors are never published as recommendations.",
+            "evidence_checklist": {
+                "fixture_found": True,
+                "league_identified": bool(checks.get("league_identified")),
+                "odds_present": bool(checks.get("odds_present")),
+                "history_present": bool(checks.get("history_present")),
+                "teams_valid": bool(checks.get("teams_valid")),
+                "gaps": readiness.get("reason") or [],
+            },
         }
 
+    from app.services.fixture_quality import prediction_readiness
+    readiness = prediction_readiness(db, fixture)
+    status = "preparing" if fixture.match_date >= date.today() else "unavailable"
+    if not readiness.get("ready"):
+        status = "insufficient_data"
+    checks = readiness.get("checks") or {}
     return {
-        "status": "preparing" if fixture.match_date >= date.today() else "unavailable",
+        "status": status,
         "fixture": _fixture_payload(fixture),
         "predictions": [],
+        "intelligence": {"revisions": [], "market": {}, "timeline": []},
         "generation_queued": False,
-        "message": "REEDS is withholding this read because the available evidence is not match-specific enough yet.",
+        "readiness": readiness,
+        "message": (
+            "REEDS intelligence check: this match is detected, but analysis is unavailable "
+            "until evidence reaches the required threshold."
+        ),
         "responsible_note": "No public read is shown until REEDS has sufficient match-specific evidence.",
+        "evidence_checklist": {
+            "fixture_found": True,
+            "league_identified": bool(checks.get("league_identified")),
+            "odds_present": bool(checks.get("odds_present")),
+            "history_present": bool(checks.get("history_present")),
+            "teams_valid": bool(checks.get("teams_valid")),
+            "gaps": readiness.get("reason") or [],
+        },
     }
