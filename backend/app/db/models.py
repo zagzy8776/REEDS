@@ -317,6 +317,65 @@ class InsiderSignal(Base):
     extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
+class ModelFeedback(Base):
+    """Structured post-match feedback record for one settled prediction.
+
+    Created at settlement time from real data only. ``successful_signals`` /
+    ``failed_signals`` / ``error_type`` are derived strictly from the stored
+    feature snapshot, match events, and market context — never invented. One
+    prediction = one feedback row (unique ``prediction_id``). A single match
+    never rewrites model weights; ``feedback_status`` marks whether a repeated
+    pattern has been promoted into calibration (``validated``) or not.
+    """
+
+    __tablename__ = "model_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prediction_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    fixture_id: Mapped[int] = mapped_column(Integer, index=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    league: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    market: Mapped[str] = mapped_column(String(50), index=True)
+    pick: Mapped[str] = mapped_column(String(120))
+    predicted_probability: Mapped[float] = mapped_column(Float)
+    actual_result: Mapped[str] = mapped_column(String(10), index=True)
+    probability_error: Mapped[float] = mapped_column(Float, default=0.0)
+    brier_score: Mapped[float] = mapped_column(Float, default=0.0)
+    final_score: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    outcome_text: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    feature_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    successful_signals: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    failed_signals: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    contributing_factors: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    feedback_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    validated_pattern: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    model_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class UserFollow(Base):
+    """Lightweight follow infrastructure (teams / leagues / sports).
+
+    Anonymous browsing stays fully public; follows only affect personalized
+    feed ordering for a self-declared username. Never blocks public content.
+    """
+
+    __tablename__ = "user_follows"
+    __table_args__ = (
+        UniqueConstraint("username", "entity_type", "entity_value", name="uq_user_follow"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
+    entity_type: Mapped[str] = mapped_column(String(20), index=True)
+    entity_value: Mapped[str] = mapped_column(String(120), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class HistoricalEvaluation(Base):
     """Walk-forward out-of-sample evaluation of historical fixtures.
 

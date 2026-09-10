@@ -16,6 +16,7 @@ router = APIRouter()
 
 
 def _fixture_payload(fixture: Fixture) -> dict:
+    extra = fixture.extra if isinstance(fixture.extra, dict) else {}
     return {
         "id": fixture.id,
         "sport": fixture.sport,
@@ -30,8 +31,43 @@ def _fixture_payload(fixture: Fixture) -> dict:
         "draw_odds": fixture.draw_odds,
         "away_odds": fixture.away_odds,
         "has_odds": any(v is not None for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds)),
+        "status": extra.get("status"),
+        "elapsed": extra.get("elapsed"),
+        "is_live": bool(extra.get("live")) or str(extra.get("status", "")).upper() in {"1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT"},
         "source": fixture.source,
-        "provider_sources": (fixture.extra or {}).get("provider_sources", []) if isinstance(fixture.extra, dict) else [],
+        "provider_sources": extra.get("provider_sources", []) if isinstance(extra.get("provider_sources"), list) else [],
+    }
+
+
+def _response(db: Session, fixture: Fixture, rows: list[tuple[Prediction, Fixture]], status: str) -> dict:
+    from app.services.feedback import post_match_analysis
+    from app.services.match_intelligence import market_overview, prediction_revisions, prediction_timeline
+    from app.api.public import records_map
+
+    records = records_map(db, {(fixture.sport, p.market) for p, _ in rows})
+    predictions = []
+    for prediction, fx in rows:
+        item = serialize_prediction(prediction, fx, records.get(f"{fx.sport}::{prediction.market}"))
+        if item.get("result") != "pending":
+            post = post_match_analysis(db, prediction.id)
+            if post:
+                item["post_match"] = post
+        predictions.append(item)
+    intelligence = {
+        "revisions": prediction_revisions(db, fixture.id),
+        "market": market_overview(db, fixture),
+        "timeline": prediction_timeline(db, fixture),
+    }
+    return {
+        "status": status,
+        "fixture": _fixture_payload(fixture),
+        "predictions": predictions,
+        "intelligence": intelligence,
+        "generation_queued": False,
+        "message": (
+            "AI Reads are probabilistic analysis, not guaranteed outcomes."
+        ),
+        "responsible_note": "AI Reads are probabilistic analysis, not guaranteed outcomes.",
     }
 
 
@@ -61,25 +97,13 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
             query = query.filter(Prediction.is_published == False)
         return query.all()
 
-    def _response(rows: list[tuple[Prediction, Fixture]], status: str) -> dict:
-        return {
-            "status": status,
-            "fixture": _fixture_payload(fixture),
-            "predictions": [serialize_prediction(prediction, fx) for prediction, fx in rows],
-            "generation_queued": False,
-            "message": (
-                "AI Reads are probabilistic analysis, not guaranteed outcomes."
-            ),
-            "responsible_note": "AI Reads are probabilistic analysis, not guaranteed outcomes.",
-        }
-
     published = _rows(published_only=True)
     if published:
-        return _response(published, "ready")
+        return _response(db, fixture, published, "ready")
 
     draft = _rows(published_only=False)
     if draft:
-        response = _response(draft, "draft")
+        response = _response(db, fixture, draft, "draft")
         response["message"] = (
             "Draft analysis — generated for this exact match but not yet part "
             "of the public tracked record. These reads are provisional until "
@@ -101,10 +125,10 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
 
         published = _rows(published_only=True)
         if published:
-            return _response(published, "ready")
+            return _response(db, fixture, published, "ready")
         draft = _rows(published_only=False)
         if draft:
-            response = _response(draft, "draft")
+            response = _response(db, fixture, draft, "draft")
             response["message"] = (
                 "Draft analysis — generated for this exact match but not yet part "
                 "of the public tracked record. These reads are provisional until "

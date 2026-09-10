@@ -23,3 +23,6 @@ data/raw/statsbomb_open_data/
 
 #Ignore cursor AI rules
 .cursor\rules\codacy.mdc
+
+# Separate repo — never commit
+coach/

@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import and_, text, func
 
-from app.api import admin, public, live, fixtures, model_sync, ml_pipeline, ai_reads, community
+from app.api import admin, public, live, fixtures, model_sync, ml_pipeline, ai_reads, community, analytics
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import init_db, engine
@@ -26,6 +26,7 @@ app.include_router(model_sync.router)
 app.include_router(ml_pipeline.router, prefix="/api")
 app.include_router(ai_reads.router, prefix="/api")
 app.include_router(community.router, prefix="/api")
+app.include_router(analytics.router, prefix="/api")
 
 
 _startup_db_ready = False
