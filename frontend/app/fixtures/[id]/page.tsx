@@ -61,18 +61,27 @@ export default async function FixtureDetail({ params }: { params: Promise<{ id: 
       <section className="mt-8">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div><p className="badge inline-block">AI Reads</p><h2 className="mt-3 text-2xl font-black">Analysis for this exact match</h2></div>
-          <p className="text-sm text-slate-500">{data.status === "ready" ? `${picks.length} active read${picks.length === 1 ? "" : "s"}` : "Analysis status: preparing"}</p>
+          <p className="text-sm text-slate-500">{data.status === "ready" ? `${picks.length} active read${picks.length === 1 ? "" : "s"}` : "Analysis status: checking evidence"}</p>
         </div>
 
-        {data.status === "preparing" ? (
+        {data.status === "preparing" || data.status === "insufficient_data" ? (
           <div className="card mt-5 border border-amber-400/20 bg-amber-400/5 text-slate-300">
-            <h3 className="text-xl font-black text-white">AI analysis is being prepared.</h3>
-            <p className="mt-2">This match has been queued for the Render prediction worker. Refresh this page shortly to see the finished analysis.</p>
-          </div>
-        ) : data.status === "insufficient_data" ? (
-          <div className="card mt-5 border border-rose-400/20 bg-rose-400/5 text-slate-300">
-            <h3 className="text-xl font-black text-white">Insufficient match-specific data</h3>
-            <p className="mt-2">{data.message || "REEDS will not show a read built only from neutral priors. Team history is required."}</p>
+            <p className="text-xs font-bold uppercase tracking-[0.14em] text-amber-300">REEDS intelligence check</p>
+            <h3 className="mt-2 text-xl font-black text-white">This match is detected.</h3>
+            <p className="mt-2 text-sm text-slate-400">Analysis unavailable until evidence reaches the required threshold.</p>
+            <ul className="mt-4 space-y-1.5 text-sm">
+              <li className="text-emerald-300">✓ Fixture found</li>
+              <li className={data.evidence_checklist?.league_identified !== false ? "text-emerald-300" : "text-rose-300"}>
+                {data.evidence_checklist?.league_identified !== false ? "✓" : "✕"} League identified
+              </li>
+              <li className={data.evidence_checklist?.odds_present ? "text-emerald-300" : "text-rose-300"}>
+                {data.evidence_checklist?.odds_present ? "✓" : "✕"} Odds market
+              </li>
+              <li className={data.evidence_checklist?.history_present ? "text-emerald-300" : "text-rose-300"}>
+                {data.evidence_checklist?.history_present ? "✓" : "✕"} Historical team data
+              </li>
+            </ul>
+            <p className="mt-4 text-xs text-slate-500">REEDS will publish when evidence reaches the required threshold.</p>
           </div>
         ) : (
           <div className="mt-5">
