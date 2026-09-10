@@ -69,6 +69,11 @@ export default async function FixtureDetail({ params }: { params: Promise<{ id: 
             <h3 className="text-xl font-black text-white">AI analysis is being prepared.</h3>
             <p className="mt-2">This match has been queued for the Render prediction worker. Refresh this page shortly to see the finished analysis.</p>
           </div>
+        ) : data.status === "insufficient_data" ? (
+          <div className="card mt-5 border border-rose-400/20 bg-rose-400/5 text-slate-300">
+            <h3 className="text-xl font-black text-white">Insufficient match-specific data</h3>
+            <p className="mt-2">{data.message || "REEDS will not show a read built only from neutral priors. Team history is required."}</p>
+          </div>
         ) : (
           <div className="mt-5">
             {data.status === "draft" ? (
