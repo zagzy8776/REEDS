@@ -1,0 +1,4 @@
+2026-09-10
+on-main: team_names, prediction_quality, FIXES_2026-09-10.md
+pending: predictions.py (signature), ai_reads.py, features.py, ensemble.py, frontend pages
+full patch: artifacts/reeds_fix_patch.zip
