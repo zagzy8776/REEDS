@@ -4,9 +4,6 @@
 Run once after deploying the fixture quality gate:
 
     cd backend && python -m scripts.cleanup_invalid_fixtures
-
-Safe to re-run: already-quarantined patterns are skipped if the fixture row
-no longer exists.
 """
 
 from __future__ import annotations
@@ -20,7 +17,8 @@ if str(ROOT) not in sys.path:
 
 from sqlalchemy import or_
 
-from app.db.models import Fixture, Prediction, RejectedFixture
+from app.db.models import Fixture, Prediction
+from app.db.rejected_fixture import RejectedFixture
 from app.db.session import SessionLocal, engine, Base
 from app.services.fixture_quality import BAD_WORDS, validate_fixture, save_rejected_fixture
 
@@ -39,7 +37,6 @@ def main() -> int:
             quality = validate_fixture(fx.home_team, fx.away_team, fx.sport)
             if quality.get("valid"):
                 continue
-
             reason = str(quality.get("reason") or "invalid_team_name")
             save_rejected_fixture(
                 db,
@@ -52,27 +49,14 @@ def main() -> int:
                 match_date=fx.match_date,
                 raw_payload={"fixture_id": fx.id, "extra": fx.extra},
             )
-            deleted = (
-                db.query(Prediction)
-                .filter(Prediction.fixture_id == fx.id)
-                .delete(synchronize_session=False)
-            )
+            deleted = db.query(Prediction).filter(Prediction.fixture_id == fx.id).delete(synchronize_session=False)
             prediction_rows_removed += int(deleted or 0)
             db.delete(fx)
             moved += 1
 
         for word in BAD_WORDS:
             pattern = f"%{word}%"
-            rows = (
-                db.query(Fixture)
-                .filter(
-                    or_(
-                        Fixture.home_team.ilike(pattern),
-                        Fixture.away_team.ilike(pattern),
-                    )
-                )
-                .all()
-            )
+            rows = db.query(Fixture).filter(or_(Fixture.home_team.ilike(pattern), Fixture.away_team.ilike(pattern))).all()
             for fx in rows:
                 save_rejected_fixture(
                     db,
@@ -85,20 +69,12 @@ def main() -> int:
                     match_date=fx.match_date,
                     raw_payload={"fixture_id": fx.id},
                 )
-                deleted = (
-                    db.query(Prediction)
-                    .filter(Prediction.fixture_id == fx.id)
-                    .delete(synchronize_session=False)
-                )
+                deleted = db.query(Prediction).filter(Prediction.fixture_id == fx.id).delete(synchronize_session=False)
                 prediction_rows_removed += int(deleted or 0)
                 db.delete(fx)
                 moved += 1
 
-        long_rows = [
-            fx
-            for fx in db.query(Fixture).all()
-            if len(fx.home_team or "") > 60 or len(fx.away_team or "") > 60
-        ]
+        long_rows = [fx for fx in db.query(Fixture).all() if len(fx.home_team or "") > 60 or len(fx.away_team or "") > 60]
         for fx in long_rows:
             save_rejected_fixture(
                 db,
@@ -111,11 +87,7 @@ def main() -> int:
                 match_date=fx.match_date,
                 raw_payload={"fixture_id": fx.id},
             )
-            deleted = (
-                db.query(Prediction)
-                .filter(Prediction.fixture_id == fx.id)
-                .delete(synchronize_session=False)
-            )
+            deleted = db.query(Prediction).filter(Prediction.fixture_id == fx.id).delete(synchronize_session=False)
             prediction_rows_removed += int(deleted or 0)
             db.delete(fx)
             moved += 1
@@ -127,10 +99,7 @@ def main() -> int:
     finally:
         db.close()
 
-    print(
-        f"cleanup_invalid_fixtures: scanned={scanned} moved={moved} "
-        f"predictions_removed={prediction_rows_removed}"
-    )
+    print(f"cleanup_invalid_fixtures: scanned={scanned} moved={moved} predictions_removed={prediction_rows_removed}")
     return 0
 
 
