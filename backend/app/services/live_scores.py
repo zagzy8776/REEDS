@@ -13,6 +13,7 @@ from app.services.live_intelligence import build_live_intelligence
 
 log = logging.getLogger(__name__)
 _LIVE_STATUSES = {"1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT"}
+_MISSED_LIVE_POLLS_BEFORE_FINISH = 3
 
 
 def _int_or_none(value):
@@ -36,6 +37,20 @@ def _normalise_stats(raw) -> dict:
         if metric:
             stats[metric] = {"home": row.get("home"), "away": row.get("away")}
     return stats
+
+
+def _provider_match_date(item: dict) -> date:
+    """Use the provider date when available; fall back to today for live discovery."""
+    raw = str(item.get("event_date") or item.get("event_date_start") or "").strip()
+    if raw:
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        except ValueError:
+            try:
+                return date.fromisoformat(raw[:10])
+            except ValueError:
+                pass
+    return date.today()
 
 
 def _live_fixture_candidates(db: Session) -> list[Fixture]:
@@ -68,6 +83,69 @@ def _match_fixture(db: Session, item: dict) -> Fixture | None:
         if home_norm == " ".join(str(fx.home_team or "").casefold().split()) and away_norm == " ".join(str(fx.away_team or "").casefold().split()):
             return fx
     return None
+
+
+def _discover_live_fixture(db: Session, item: dict) -> Fixture | None:
+    """Create a fixture directly from a provider live event when ingestion missed it."""
+    existing = _match_fixture(db, item)
+    if existing:
+        return existing
+
+    home = str(item.get("event_home_team") or "").strip()
+    away = str(item.get("event_away_team") or "").strip()
+    if not home or not away:
+        return None
+
+    match_date = _provider_match_date(item)
+    league = str(
+        item.get("event_league_name")
+        or item.get("event_league")
+        or item.get("league_name")
+        or "Live"
+    ).strip()[:80] or "Live"
+    sport = "basketball" if str(item.get("event_sport_type") or "").lower() in {"basketball", "basket ball"} else "football"
+    event_key = str(item.get("event_key") or "").strip() or None
+
+    # Team/date lookup is deliberately repeated here to handle a fixture that
+    # falls outside the normal +/-1 day window but has the provider's event key.
+    existing = (
+        db.query(Fixture)
+        .filter(
+            Fixture.sport == sport,
+            Fixture.match_date == match_date,
+            Fixture.home_team == home,
+            Fixture.away_team == away,
+        )
+        .first()
+    )
+    if existing:
+        return existing
+
+    extra = {
+        "allsports_event_key": event_key,
+        "status": str(item.get("event_status") or "LIVE").strip() or "LIVE",
+        "live": True,
+        "live_provider": "allsportsapi",
+        "live_discovered": True,
+        "live_miss_count": 0,
+        "live_last_synced_at": datetime.utcnow().isoformat(),
+    }
+    fx = Fixture(
+        sport=sport,
+        league=league,
+        season=str(match_date.year),
+        match_date=match_date,
+        home_team=home,
+        away_team=away,
+        home_score=_int_or_none(item.get("event_current_home_score")),
+        away_score=_int_or_none(item.get("event_current_away_score")),
+        source="allsportsapi_live",
+        extra=extra,
+    )
+    db.add(fx)
+    db.flush()
+    log.info("Discovered live fixture directly from AllSports: %s vs %s (%s)", home, away, league)
+    return fx
 
 
 def _record_score_event(db: Session, fx: Fixture, minute: int | None) -> None:
@@ -118,12 +196,63 @@ def _intelligence_signature(value: dict | None) -> dict:
     return {k: v for k, v in value.items() if k != "generated_at"}
 
 
+def _mark_missing_live_fixtures(db: Session, seen_keys: set[str], seen_teams: set[tuple[str, str]]) -> list[Fixture]:
+    """Expire fixtures that disappeared from the live feed and settle their picks.
+
+    AllSports' Livescore endpoint is a current-live feed, so a finished game can
+    disappear instead of sending an explicit FT row. Three consecutive 30s
+    misses gives the provider a short grace period while preventing a match from
+    remaining permanently stuck in the LIVE board.
+    """
+    today = date.today()
+    rows = (
+        db.query(Fixture)
+        .filter(
+            Fixture.match_date >= today - timedelta(days=1),
+            Fixture.match_date <= today + timedelta(days=1),
+        )
+        .all()
+    )
+    finished: list[Fixture] = []
+    for fx in rows:
+        extra = dict(fx.extra or {})
+        if str(extra.get("live_provider") or "") != "allsportsapi" or not extra.get("live"):
+            continue
+        key = str(extra.get("allsports_event_key") or "").strip()
+        teams = (
+            " ".join(str(fx.home_team or "").casefold().split()),
+            " ".join(str(fx.away_team or "").casefold().split()),
+        )
+        if (key and key in seen_keys) or teams in seen_teams:
+            extra["live_miss_count"] = 0
+            fx.extra = extra
+            continue
+        misses = int(extra.get("live_miss_count") or 0) + 1
+        extra["live_miss_count"] = misses
+        if misses >= _MISSED_LIVE_POLLS_BEFORE_FINISH:
+            extra["live"] = False
+            extra["status"] = "FT"
+            extra["finished_at"] = datetime.utcnow().isoformat()
+            fx.extra = extra
+            finished.append(fx)
+            push_live_event(fx.id, {
+                "fixture_id": fx.id,
+                "event_type": "match_finished",
+                "status": "FT",
+                "home_score": fx.home_score,
+                "away_score": fx.away_score,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+        else:
+            fx.extra = extra
+    return finished
+
+
 def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football") -> dict:
     """Synchronize the shared provider live feed in one request.
 
-    The scheduler calls this frequently only when AllSports is configured.
-    Every browser receives the resulting state through REEDS SSE; browsers
-    never call the provider directly.
+    Live discovery is authoritative: if AllSports says a match is live, REEDS
+    creates the fixture even when normal scheduled ingestion never saw it.
     """
     if not api_key:
         return {"provider": "allsportsapi", "checked": 0, "updated": 0, "score_changes": 0, "stats_updates": 0, "skipped": "not configured"}
@@ -142,13 +271,25 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
     if not isinstance(events, list):
         events = []
 
-    checked = updated = score_changes = stats_updates = intelligence_updates = 0
+    checked = updated = score_changes = stats_updates = intelligence_updates = discovered = 0
+    seen_keys: set[str] = set()
+    seen_teams: set[tuple[str, str]] = set()
     for item in events:
         if not isinstance(item, dict):
             continue
-        fx = _match_fixture(db, item)
+        event_key = str(item.get("event_key") or "").strip()
+        home_raw = str(item.get("event_home_team") or "").strip()
+        away_raw = str(item.get("event_away_team") or "").strip()
+        if event_key:
+            seen_keys.add(event_key)
+        if home_raw and away_raw:
+            seen_teams.add((" ".join(home_raw.casefold().split()), " ".join(away_raw.casefold().split())))
+
+        fx = _discover_live_fixture(db, item)
         if not fx:
             continue
+        if fx.source == "allsportsapi_live" and fx.id:
+            discovered += int(bool((fx.extra or {}).get("live_discovered")))
         checked += 1
         old_home, old_away = fx.home_score, fx.away_score
         old_status = str((fx.extra or {}).get("status") or "")
@@ -179,11 +320,12 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
         extra = dict(fx.extra or {})
         extra.update({
             "allsports_event_key": item.get("event_key"),
-            "status": status or old_status,
+            "status": status or old_status or "LIVE",
             "live": is_live or status.upper() in _LIVE_STATUSES,
             "elapsed": elapsed if elapsed is not None else extra.get("elapsed"),
             "live_last_synced_at": datetime.utcnow().isoformat(),
             "live_provider": "allsportsapi",
+            "live_miss_count": 0,
             "live_intelligence": intelligence,
         })
         if stats:
@@ -228,7 +370,22 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
         if score_changed or old_status != status or stats or intelligence_changed:
             updated += 1
 
+    finished = _mark_missing_live_fixtures(db, seen_keys, seen_teams)
     db.commit()
+
+    # Settlement happens in the same 30-second live cycle. A finished match is
+    # therefore eligible for history/performance immediately after its final
+    # provider state is persisted; no separate daily job is required.
+    settled = {"settled": 0, "won": 0, "lost": 0, "updated": 0}
+    if finished:
+        try:
+            from app.services.prediction_learning import settle_prediction_outcomes
+            settled = settle_prediction_outcomes(db, lookback_days=730)
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.exception("Immediate live settlement failed")
+
     return {
         "provider": "allsportsapi",
         "checked": checked,
@@ -236,4 +393,9 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
         "score_changes": score_changes,
         "stats_updates": stats_updates,
         "intelligence_updates": intelligence_updates,
+        "discovered": discovered,
+        "finished": len(finished),
+        "settled": settled.get("settled", 0),
+        "settled_won": settled.get("won", 0),
+        "settled_lost": settled.get("lost", 0),
     }
