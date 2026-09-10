@@ -83,10 +83,22 @@ def _live_payload(fx: Fixture) -> dict:
 
 @router.get("/live/matches")
 def live_matches(db: Session = Depends(get_db)):
-    """All matches currently in progress."""
+    """Return provider-confirmed live matches without assuming UTC date boundaries.
+
+    Fixture dates can be stored using a competition/local timezone while Render
+    runs the API in UTC. Restricting this query to ``date.today()`` could hide a
+    genuinely live fixture near midnight. We inspect a small recent window and
+    then trust the live status flag itself, so stale completed fixtures are not
+    returned just because they are recent.
+    """
     today = date.today()
-    fixtures = db.query(Fixture).filter(Fixture.match_date == today).all()
+    fixtures = (
+        db.query(Fixture)
+        .filter(Fixture.match_date >= today - timedelta(days=1), Fixture.match_date <= today + timedelta(days=1))
+        .all()
+    )
     live = [fx for fx in fixtures if _is_live(fx)]
+    live.sort(key=lambda fx: (str((fx.extra or {}).get("status") or ""), fx.id))
     return [_live_payload(fx) for fx in live]
 
 
