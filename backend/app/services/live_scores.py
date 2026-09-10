@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -38,12 +38,22 @@ def _normalise_stats(raw) -> dict:
     return stats
 
 
+def _live_fixture_candidates(db: Session) -> list[Fixture]:
+    """Load a small date window so provider/local timezone differences cannot hide live games."""
+    today = date.today()
+    return (
+        db.query(Fixture)
+        .filter(Fixture.match_date >= today - timedelta(days=1), Fixture.match_date <= today + timedelta(days=1))
+        .all()
+    )
+
+
 def _match_fixture(db: Session, item: dict) -> Fixture | None:
-    """Match provider events to today's tracked fixture using stable key first."""
+    """Match provider events to a tracked fixture using stable key, then teams."""
     event_key = str(item.get("event_key") or "").strip()
+    candidates = _live_fixture_candidates(db)
     if event_key:
-        rows = db.query(Fixture).filter(Fixture.match_date == date.today()).all()
-        for fx in rows:
+        for fx in candidates:
             extra = fx.extra if isinstance(fx.extra, dict) else {}
             if str(extra.get("allsports_event_key") or extra.get("event_key") or "") == event_key:
                 return fx
@@ -52,11 +62,12 @@ def _match_fixture(db: Session, item: dict) -> Fixture | None:
     away = str(item.get("event_away_team") or "").strip()
     if not home or not away:
         return None
-    return db.query(Fixture).filter(
-        Fixture.match_date == date.today(),
-        Fixture.home_team == home,
-        Fixture.away_team == away,
-    ).first()
+    home_norm = " ".join(home.casefold().split())
+    away_norm = " ".join(away.casefold().split())
+    for fx in candidates:
+        if home_norm == " ".join(str(fx.home_team or "").casefold().split()) and away_norm == " ".join(str(fx.away_team or "").casefold().split()):
+            return fx
+    return None
 
 
 def _record_score_event(db: Session, fx: Fixture, minute: int | None) -> None:
