@@ -2,39 +2,44 @@
 @tailwind components;
 @tailwind utilities;
 
+:root { color-scheme: dark; }
+
+html { background: #060913; scroll-behavior: smooth; }
+
 body {
   min-height: 100vh;
   background:
-    radial-gradient(circle at top left, rgba(16, 185, 129, 0.16), transparent 30rem),
-    radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 28rem),
+    radial-gradient(circle at 12% -5%, rgba(16,185,129,.10), transparent 28rem),
+    radial-gradient(circle at 88% 5%, rgba(59,130,246,.07), transparent 25rem),
     #060913;
   color: #f8fafc;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-.card {
-  @apply rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-xl backdrop-blur;
+::selection { background: rgba(52,211,153,.22); color: #fff; }
+
+@layer components {
+  .card { @apply rounded-[1.35rem] border border-white/[0.07] bg-slate-900/55 p-5 shadow-[0_18px_60px_rgba(0,0,0,.18)] backdrop-blur; }
+  .badge { @apply rounded-full border border-emerald-400/15 bg-emerald-400/10 px-3 py-1 text-[10px] font-bold uppercase tracking-[.12em] text-emerald-300; }
+  .premium-card { @apply border-amber-400/30 bg-gradient-to-br from-slate-900 via-slate-900 to-amber-950/20; }
+  .premium-lock { @apply rounded-full border border-amber-300/30 bg-amber-400/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-amber-200; }
+  .responsible-note { @apply rounded-2xl border border-sky-400/15 bg-sky-400/[0.06] p-4 text-sm text-sky-100; }
+
+  .nav-link {
+    @apply inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold text-slate-400 transition hover:bg-white/[0.04] hover:text-white;
+  }
+  .nav-link-secondary { @apply rounded-lg px-2 py-2 text-[11px] font-semibold text-slate-500 transition hover:text-white; }
+  .mobile-live { @apply inline-flex items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-xs font-bold text-emerald-300; }
+  .live-dot { @apply h-1.5 w-1.5 rounded-full bg-emerald-400; }
+  .mobile-nav-link { @apply flex min-w-0 flex-col items-center gap-1 rounded-xl px-1 py-1.5 text-[9px] font-bold text-slate-500 transition; }
+  .mobile-nav-link:hover, .mobile-nav-link:focus { @apply bg-white/[0.04] text-emerald-300; }
+
+  .section-kicker { @apply text-[10px] font-bold uppercase tracking-[.16em] text-slate-600; }
+  .section-title { @apply mt-2 text-2xl font-black tracking-[-.03em] text-white sm:text-3xl; }
 }
 
-.badge {
-  @apply rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300;
-}
-
-.premium-card {
-  @apply border-amber-400/40 bg-gradient-to-br from-slate-900 via-slate-900 to-amber-950/30 shadow-amber-950/20;
-}
-
-.premium-lock {
-  @apply rounded-full border border-amber-300/30 bg-amber-400/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-amber-200;
-}
-
-.responsible-note {
-  @apply rounded-2xl border border-sky-400/20 bg-sky-400/10 p-4 text-sm text-sky-100;
-}
-
-.glass-nav-link {
-  @apply rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-slate-200 backdrop-blur transition hover:border-emerald-300/50 hover:text-emerald-200;
-}
-
-.mobile-safe-grid {
-  @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-3;
+@media (max-width: 767px) {
+  .card { @apply p-4; }
+  body { background: radial-gradient(circle at 50% -10%, rgba(16,185,129,.08), transparent 20rem), #060913; }
 }
