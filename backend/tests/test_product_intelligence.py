@@ -126,7 +126,7 @@ def test_post_match_loss_reports_failed_signals(db):
     analysis = post_match_analysis(db, p.id)
     assert analysis["result"] == "lost"
     assert analysis["section_title"] == "Why REEDS missed"
-    assert analysis["primary_error"] == "high_confidence_loss"
+    assert analysis["primary_error"] == "probability_overconfidence"
     assert any("Home form" in s for s in (analysis["failed_signals"] or []))
 
 

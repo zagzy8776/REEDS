@@ -44,7 +44,7 @@ def test_fixture_serialize_has_required_fields():
         "sport": "soccer",
         "league": "Test",
         "season": "2025",
-        "match_date": date(2026, 9, 10),
+        "match_date": date(2030, 6, 1),
         "home_team": "A",
         "away_team": "B",
         "home_score": None,

@@ -81,6 +81,8 @@ def _signals_from_factors(factors: list[dict], won: bool) -> list[str]:
 def record_feedback(db: Session, prediction: Prediction, fixture: Fixture, won: bool) -> ModelFeedback | None:
     """Create or refresh the feedback row for one settled prediction."""
     try:
+        from app.services.autopsy import build_autopsy
+
         meta = prediction.engine_meta if isinstance(prediction.engine_meta, dict) else {}
         prob = _clamped_probability(prediction.confidence)
         error = (1.0 - prob) if won else (0.0 - prob)
@@ -130,6 +132,7 @@ def record_feedback(db: Session, prediction: Prediction, fixture: Fixture, won: 
                 model_version_id=prediction.model_version_id,
             )
             db.add(row)
+            target = row
         else:
             existing.actual_result = "won" if won else "lost"
             existing.predicted_probability = round(prob, 4)
@@ -141,11 +144,26 @@ def record_feedback(db: Session, prediction: Prediction, fixture: Fixture, won: 
             existing.contributing_factors = state_factors or None
             existing.error_type = _error_type(prediction, won)
             existing.updated_at = datetime.utcnow()
-            return existing
-        return row
+            target = existing
+
+        refused = published_status_reason(meta)
+        autopsy = build_autopsy(db, prediction, fixture, won, disabled_reason=refused)
+        target.error_classifications = autopsy["error_classifications"]
+        target.signal_attribution = autopsy["signal_attribution"]
+        target.defense_strong = bool(autopsy["defense_strong"])
+        if autopsy["error_classifications"]:
+            target.error_type = autopsy["error_classifications"][0]["type"]
+        return target
     except Exception:
         log.exception("Could not record model feedback for prediction %s", prediction.id)
         return None
+
+
+def published_status_reason(meta: dict) -> str | None:
+    """Human reason a read is not part of the published/tracked record (if any)."""
+    quality = meta.get("publication_quality") if isinstance(meta.get("publication_quality"), dict) else {}
+    reasons = list(quality.get("reasons") or [])
+    return "; ".join(reasons) if reasons else None
 
 
 def post_match_analysis(db: Session, prediction_id: int) -> dict | None:
@@ -188,6 +206,9 @@ def post_match_analysis(db: Session, prediction_id: int) -> dict | None:
         "probability_error": row.probability_error,
         "brier_score": row.brier_score,
         "primary_error": None if won else row.error_type,
+        "error_classifications": row.error_classifications or [],
+        "signal_attribution": row.signal_attribution or {},
+        "defense_strong": bool(row.defense_strong),
         "successful_signals": row.successful_signals or [],
         "failed_signals": row.failed_signals or [],
         "contributing_factors": row.contributing_factors or [],

@@ -287,6 +287,51 @@ def records_map(db: Session, combos: set[tuple[str, str]]) -> dict[str, dict]:
     return out
 
 
+def _explain(p: Prediction, f: Fixture, metrics: dict, engine_meta: dict) -> dict:
+    """Three levels of self-explanation — all derived from stored data.
+
+    Level 1 is human language, Level 2 is cited evidence, Level 3 is the
+    technical stack behind the read. Nothing here is invented.
+    """
+    confidence = float(p.confidence or 0)
+    edge = float(p.edge_score or 0)
+    probabilities = engine_meta.get("probabilities") if isinstance(engine_meta.get("probabilities"), dict) else {}
+    factors = engine_meta.get("factors") if isinstance(engine_meta.get("factors"), list) else []
+    projection = engine_meta.get("projection") if isinstance(engine_meta.get("projection"), dict) else {}
+    learning = engine_meta.get("learning_feedback") if isinstance(engine_meta.get("learning_feedback"), dict) else {}
+
+    evidence: list[str] = []
+    for factor in factors[:4]:
+        label = str(factor.get("label", "")).strip()
+        value = factor.get("value")
+        if label:
+            evidence.append(f"{label}: {value}" if value not in (None, "") else label)
+    if metrics.get("available"):
+        evidence.append(f"Market prices {metrics['odds']:.2f} (implied {metrics['market_probability']:.1f}%) vs model {metrics['model_probability']:.1f}% — edge {metrics['edge_pp']:+.1f}pp")
+    if p.reasoning:
+        evidence.append(p.reasoning)
+
+    return {
+        "level_1": {
+            "summary": f"REEDS leans {p.pick} at {confidence:.0f}% confidence.",
+        },
+        "level_2": {"evidence_lines": evidence[:6]},
+        "level_3": {
+            "model_probability": round(confidence, 1),
+            "confidence_band": f"{int(confidence // 10 * 10)}-{int(confidence // 10 * 10 + 9)}",
+            "edge_score": round(edge, 1),
+            "market_probability": metrics.get("market_probability") if metrics.get("available") else None,
+            "edge_pp": metrics.get("edge_pp") if metrics.get("available") else None,
+            "model_version_id": p.model_version_id,
+            "features_used_count": len(factors),
+            "projection": projection or None,
+            "probabilities": probabilities or None,
+            "evaluation_sample": learning.get("segment_sample"),
+            "data_note": "Level 3 reflects the stored engine output for this read; freshness is shown on the Performance page.",
+        },
+    }
+
+
 def serialize_prediction(p: Prediction, f: Fixture, records: dict | None = None) -> dict:
     result = prediction_result(p, f)
     engine_meta = p.engine_meta or {}
@@ -312,6 +357,7 @@ def serialize_prediction(p: Prediction, f: Fixture, records: dict | None = None)
         "final_score": final_score,
         "verdict": _verdict(p, metrics),
         "market_metrics": metrics,
+        "explain": _explain(p, f, metrics, engine_meta),
         "records": records,
         "responsible_note": "Predictions are probabilistic, not guaranteed.",
     }
