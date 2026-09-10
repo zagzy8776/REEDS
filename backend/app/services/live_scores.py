@@ -199,12 +199,17 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
 
         if intelligence_changed and (score_changed or stats or not old_intelligence):
             intelligence_updates += 1
+            pressure = str(intelligence.get("pressure") or "").replace("_", " ")
+            evidence_count = int(intelligence.get("evidence_count") or 0)
+            drivers = intelligence.get("drivers") or []
             push_live_event(fx.id, {
                 "fixture_id": fx.id,
                 "event_type": "live_intelligence",
                 "minute": elapsed,
                 "home_score": fx.home_score,
                 "away_score": fx.away_score,
+                "player": f"{pressure} • {evidence_count} evidence point{'s' if evidence_count != 1 else ''}",
+                "detail": " • ".join(drivers) if drivers else "No provider statistics are available yet",
                 "intelligence": intelligence,
                 "timestamp": datetime.utcnow().isoformat(),
             })
