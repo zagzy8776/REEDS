@@ -6,7 +6,7 @@ from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Fixture
+from app.db.models import Fixture, MatchEvent
 from app.scraper.http_client import HttpClient
 from app.services.live_events import push_live_event
 
@@ -24,6 +24,7 @@ def _int_or_none(value):
 
 
 def _normalise_stats(raw) -> dict:
+    """Convert provider statistics into {metric: {home, away}}."""
     if not isinstance(raw, list):
         return {}
     stats: dict[str, dict[str, int | float | str | None]] = {}
@@ -37,6 +38,7 @@ def _normalise_stats(raw) -> dict:
 
 
 def _match_fixture(db: Session, item: dict) -> Fixture | None:
+    """Match provider events to today's tracked fixture using stable key first."""
     event_key = str(item.get("event_key") or "").strip()
     if event_key:
         rows = db.query(Fixture).filter(Fixture.match_date == date.today()).all()
@@ -44,15 +46,66 @@ def _match_fixture(db: Session, item: dict) -> Fixture | None:
             extra = fx.extra if isinstance(fx.extra, dict) else {}
             if str(extra.get("allsports_event_key") or extra.get("event_key") or "") == event_key:
                 return fx
+
     home = str(item.get("event_home_team") or "").strip()
     away = str(item.get("event_away_team") or "").strip()
     if not home or not away:
         return None
-    return db.query(Fixture).filter(Fixture.match_date == date.today(), Fixture.home_team == home, Fixture.away_team == away).first()
+    return db.query(Fixture).filter(
+        Fixture.match_date == date.today(),
+        Fixture.home_team == home,
+        Fixture.away_team == away,
+    ).first()
+
+
+def _record_score_event(db: Session, fx: Fixture, minute: int | None) -> None:
+    """Persist a score transition and publish it to the live stream."""
+    existing = db.query(MatchEvent).filter(
+        MatchEvent.fixture_id == fx.id,
+        MatchEvent.event_type == "score_update",
+        MatchEvent.minute == minute,
+        MatchEvent.team == "REEDS",
+        MatchEvent.player == "Score",
+        MatchEvent.detail == f"{fx.home_score} - {fx.away_score}",
+    ).first()
+    if not existing:
+        existing = MatchEvent(
+            fixture_id=fx.id,
+            event_type="score_update",
+            minute=minute,
+            team="REEDS",
+            player="Score",
+            detail=f"{fx.home_score} - {fx.away_score}",
+            home_score_at=fx.home_score,
+            away_score_at=fx.away_score,
+            extra={"source": "live_score_feed"},
+            created_at=datetime.utcnow(),
+        )
+        db.add(existing)
+        db.flush()
+
+    push_live_event(fx.id, {
+        "id": existing.id,
+        "fixture_id": fx.id,
+        "event_type": "score_update",
+        "minute": minute,
+        "detail": "Live score updated",
+        "home_score": fx.home_score,
+        "away_score": fx.away_score,
+        "home_team": fx.home_team,
+        "away_team": fx.away_team,
+        "league": fx.league,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
 
 
 def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football") -> dict:
-    """Synchronize the shared provider live feed in one request."""
+    """Synchronize the shared provider live feed in one request.
+
+    The scheduler calls this frequently only when AllSports is configured.
+    Every browser receives the resulting state through REEDS SSE; browsers
+    never call the provider directly.
+    """
     if not api_key:
         return {"provider": "allsportsapi", "checked": 0, "updated": 0, "score_changes": 0, "stats_updates": 0, "skipped": "not configured"}
 
@@ -99,6 +152,7 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
             fx.home_score = home_score
         if away_score is not None:
             fx.away_score = away_score
+
         extra = dict(fx.extra or {})
         extra.update({
             "allsports_event_key": item.get("event_key"),
@@ -117,11 +171,26 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
         score_changed = old_home != fx.home_score or old_away != fx.away_score
         if score_changed:
             score_changes += 1
-            push_live_event(fx.id, {"fixture_id": fx.id, "event_type": "score_update", "minute": elapsed, "detail": "Live score updated", "home_score": fx.home_score, "away_score": fx.away_score, "home_team": fx.home_team, "away_team": fx.away_team, "league": fx.league, "timestamp": datetime.utcnow().isoformat()})
+            _record_score_event(db, fx, elapsed)
+
         if stats:
-            push_live_event(fx.id, {"fixture_id": fx.id, "event_type": "stats_update", "minute": elapsed, "stats": stats, "home_score": fx.home_score, "away_score": fx.away_score, "timestamp": datetime.utcnow().isoformat()})
+            push_live_event(fx.id, {
+                "fixture_id": fx.id,
+                "event_type": "stats_update",
+                "minute": elapsed,
+                "stats": stats,
+                "home_score": fx.home_score,
+                "away_score": fx.away_score,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
         if score_changed or old_status != status or stats:
             updated += 1
 
     db.commit()
-    return {"provider": "allsportsapi", "checked": checked, "updated": updated, "score_changes": score_changes, "stats_updates": stats_updates}
+    return {
+        "provider": "allsportsapi",
+        "checked": checked,
+        "updated": updated,
+        "score_changes": score_changes,
+        "stats_updates": stats_updates,
+    }
