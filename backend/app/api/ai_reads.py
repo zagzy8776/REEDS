@@ -45,13 +45,29 @@ def _fixture_payload(fixture: Fixture) -> dict:
 def _supported_draft(prediction: Prediction) -> bool:
     """Only expose an early read when its stored quality gate accepted it.
 
-    A generated but default-driven row is useful for internal diagnostics, not
-    for a customer-facing intelligence page. The public tracked record remains
-    governed by ``is_published`` separately.
+    Cold-start / neutral-prior rows stay internal. The public tracked record
+    remains governed by ``is_published`` separately.
     """
     meta = prediction.engine_meta if isinstance(prediction.engine_meta, dict) else {}
+    if meta.get("cold_start") is True:
+        return False
+    if str(meta.get("data_depth") or "").lower() in {"none", "thin", "cold_start", "default"}:
+        if str(meta.get("data_depth") or "").lower() == "cold_start":
+            return False
     quality = meta.get("publication_quality") if isinstance(meta.get("publication_quality"), dict) else {}
-    return bool(quality.get("accepted"))
+    if quality.get("default_driven") is True:
+        return False
+    if quality.get("accepted") is not True:
+        return False
+    reasons = quality.get("reasons") if isinstance(quality.get("reasons"), list) else []
+    blocked_markers = (
+        "neutral/default priors",
+        "insufficient",
+        "correct-score market is disabled",
+    )
+    if any(any(marker in str(r).lower() for marker in blocked_markers) for r in reasons):
+        return False
+    return True
 
 
 def _response(db: Session, fixture: Fixture, rows: list[tuple[Prediction, Fixture]], status: str) -> dict:
@@ -128,6 +144,31 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
         response = _response(db, fixture, draft, "draft")
         response["message"] = "Early read — generated for this exact match, but it is not yet part of the public tracked record."
         return response
+
+    # Generated rows may exist but all are cold-start / rejected by quality gate.
+    any_internal = (
+        db.query(Prediction)
+        .filter(Prediction.fixture_id == fixture.id, Prediction.status == "active")
+        .count()
+    )
+    if any_internal:
+        return {
+            "status": "insufficient_data",
+            "fixture": _fixture_payload(fixture),
+            "predictions": [],
+            "intelligence": {
+                "revisions": [],
+                "market": {},
+                "timeline": [],
+            },
+            "generation_queued": False,
+            "message": (
+                "REEDS analysed this fixture but found insufficient team-specific history "
+                "(cold-start / neutral priors). No customer-facing read is shown until "
+                "real form and results for these clubs are available."
+            ),
+            "responsible_note": "AI Reads require match-specific evidence. Default priors are never published as recommendations.",
+        }
 
     return {
         "status": "preparing" if fixture.match_date >= date.today() else "unavailable",
