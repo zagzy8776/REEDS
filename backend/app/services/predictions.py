@@ -15,6 +15,8 @@ from app.services.prediction_learning import (
 )
 from app.services.prediction_quality import annotate_quality, evaluate_publication
 
+PREDICTION_HISTORY_DAYS = 730
+
 PUBLISH_THRESHOLDS = {
     "1X2": 55, "Moneyline": 55, "Goals": 55, "BTTS": 55, "Both Teams to Score": 55,
     "Double Chance": 58, "Over/Under 1.5": 58, "Over/Under 2.5": 55, "Over/Under 3.5": 58,
@@ -214,7 +216,7 @@ def generate_today_predictions(db: Session) -> int:
     fixtures = [fx for fx in priority_fixtures if fx.id not in seen_ids] + fixtures
     fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:60]
 
-    history = dataframe_from_db(db, max_age_days=90)
+    history = dataframe_from_db(db, max_age_days=PREDICTION_HISTORY_DAYS)
     soccer_engine = LoyalEdgeEngine(active_model_path(db, "soccer"))
     generic_engine = GenericSportEngine()
     count = 0
