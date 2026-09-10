@@ -234,9 +234,18 @@ def start_scheduler() -> BackgroundScheduler:
         db = SessionLocal()
         try:
             from app.services.live_scores import sync_allsports_live
-            result = sync_allsports_live(db, settings.allsportsapi_key, "football")
-            if result.get("updated") or result.get("score_changes"):
-                log.info("AllSports live pulse: %s", result)
+            football = sync_allsports_live(db, settings.allsportsapi_key, "football")
+            basketball = sync_allsports_live(db, settings.allsportsapi_key, "basketball")
+            combined = {
+                "football": football,
+                "basketball": basketball,
+                "checked": int(football.get("checked", 0)) + int(basketball.get("checked", 0)),
+                "updated": int(football.get("updated", 0)) + int(basketball.get("updated", 0)),
+                "score_changes": int(football.get("score_changes", 0)) + int(basketball.get("score_changes", 0)),
+                "stats_updates": int(football.get("stats_updates", 0)) + int(basketball.get("stats_updates", 0)),
+            }
+            if combined["updated"] or combined["score_changes"] or combined["stats_updates"]:
+                log.info("AllSports live pulse: %s", combined)
         except Exception:
             db.rollback(); log.exception("AllSports live pulse failed")
         finally:
@@ -244,6 +253,11 @@ def start_scheduler() -> BackgroundScheduler:
     scheduler.add_job(allsports_live_job, "interval", seconds=30, id="allsports_live_pulse", replace_existing=True, max_instances=1, coalesce=True)
 
     def live_event_job():
+        # AllSports is the fast live provider when configured. Do not spend
+        # API-Football quota polling the same live state every minute in that
+        # configuration; API-Football remains the fallback when AllSports is absent.
+        if settings.allsportsapi_key:
+            return
         from app.services.live_events import sync_live_events
         db = SessionLocal()
         try:
