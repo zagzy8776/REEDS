@@ -1,7 +1,7 @@
 """Live match event ingestion and notification dispatch.
 
-Pulls goals, cards, substitutions, and lineups from API-Football every
-60 seconds during live fixtures. Stores new events in match_events /
+Pulls goals, cards, substitutions, and lineups from API-Football when the
+shared live provider is not configured. Stores new events in match_events /
 match_lineups tables and queues SSE notifications to connected clients.
 """
 
@@ -20,20 +20,48 @@ _stream_sequence = 1_000_000_000
 
 
 def push_live_event(fixture_id: int, event: dict) -> None:
-    """Push a new event/state update into the in-memory SSE queue."""
+    """Push a live event into the in-memory SSE queue with a monotonic id.
+
+    Persisted MatchEvent ids are retained, while transient score/stat/state
+    updates receive a separate stream id so SSE clients cannot silently miss
+    them when using the ``since`` cursor.
+    """
     global _stream_sequence
     payload = dict(event)
-    if not payload.get("id"):
+    event_id = payload.get("id")
+    if not event_id:
         _stream_sequence += 1
-        payload["id"] = _stream_sequence
+        event_id = _stream_sequence
+        payload["id"] = event_id
+    else:
+        try:
+            event_id = int(event_id)
+        except (TypeError, ValueError):
+            _stream_sequence += 1
+            event_id = _stream_sequence
+            payload["id"] = event_id
+        else:
+            _stream_sequence = max(_stream_sequence, event_id)
+
+    # A persisted DB id can be lower than the transient stream cursor. That
+    # would make a later transient event invisible to a client. Give every
+    # queued event a strictly increasing stream sequence while preserving its
+    # database id separately when one exists.
+    if _event_queue.get(fixture_id):
+        last_id = int(_event_queue[fixture_id][-1].get("stream_id", _stream_sequence) or 0)
+        if event_id <= last_id:
+            _stream_sequence = max(_stream_sequence, last_id) + 1
+            payload["db_id"] = payload.get("id")
+            payload["id"] = _stream_sequence
+    payload["stream_id"] = int(payload["id"])
     _event_queue.setdefault(fixture_id, []).append(payload)
-    _event_queue[fixture_id] = _event_queue[fixture_id][-50:]
+    _event_queue[fixture_id] = _event_queue[fixture_id][-100:]
 
 
 def pop_events_since(fixture_id: int, since_id: int) -> list[dict]:
     """Return queued events that arrived after since_id."""
     events = _event_queue.get(fixture_id, [])
-    return [e for e in events if int(e.get("id", 0) or 0) > since_id]
+    return [e for e in events if int(e.get("stream_id", e.get("id", 0)) or 0) > since_id]
 
 
 _EVENT_TYPE_MAP = {"Goal": "goal", "Card": None, "subst": "substitution", "Var": "var", "Missed Penalty": "penalty_missed"}
