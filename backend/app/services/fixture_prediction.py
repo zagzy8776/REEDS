@@ -35,7 +35,10 @@ def generate_fixture_predictions(db: Session, fixture_id: int) -> int:
     if not fx:
         return 0
 
-    history = dataframe_from_db(db, max_age_days=180)
+    # Current-day fixtures can sit between seasons. Keep a bounded two-year
+    # history window so the engine does not silently fall back to league-average
+    # defaults just because the last 180 days contain no completed matches.
+    history = dataframe_from_db(db, max_age_days=730)
     if fx.sport == "soccer":
         engine = LoyalEdgeEngine(active_model_path(db, "soccer"))
         items = engine.predict_soccer(history, {
