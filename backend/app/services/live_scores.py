@@ -100,6 +100,13 @@ def _record_score_event(db: Session, fx: Fixture, minute: int | None) -> None:
     })
 
 
+def _intelligence_signature(value: dict | None) -> dict:
+    """Ignore generation time so the same live read is not rebroadcast every poll."""
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items() if k != "generated_at"}
+
+
 def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football") -> dict:
     """Synchronize the shared provider live feed in one request.
 
@@ -156,7 +163,7 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
             fx.away_score = away_score
 
         intelligence = build_live_intelligence(fx.home_score, fx.away_score, stats, elapsed)
-        intelligence_changed = old_intelligence != intelligence
+        intelligence_changed = _intelligence_signature(old_intelligence) != _intelligence_signature(intelligence)
 
         extra = dict(fx.extra or {})
         extra.update({
