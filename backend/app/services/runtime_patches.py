@@ -33,30 +33,28 @@ def apply_runtime_patches() -> None:
         from app.services.fixture_quality import save_rejected_fixture, validate_fixture
 
         original = loaders_mod.upsert_fixture
-        if getattr(original, "_reeds_quality_wrapped", False):
-            return
+        if not getattr(original, "_reeds_quality_wrapped", False):
+            def upsert_fixture_with_quality(db, fixture):
+                quality = validate_fixture(fixture.home_team, fixture.away_team, fixture.sport)
+                if not quality.get("valid"):
+                    save_rejected_fixture(
+                        db,
+                        provider=getattr(fixture, "source", None) or "unknown",
+                        raw_home=fixture.home_team,
+                        raw_away=fixture.away_team,
+                        reason=str(quality.get("reason") or "invalid_team_name"),
+                        sport=fixture.sport,
+                        league=fixture.league,
+                        match_date=fixture.match_date,
+                        raw_payload=fixture.extra if isinstance(getattr(fixture, "extra", None), dict) else None,
+                    )
+                    return None
+                fixture.home_team = quality["home"]
+                fixture.away_team = quality["away"]
+                return original(db, fixture)
 
-        def upsert_fixture_with_quality(db, fixture):
-            quality = validate_fixture(fixture.home_team, fixture.away_team, fixture.sport)
-            if not quality.get("valid"):
-                save_rejected_fixture(
-                    db,
-                    provider=getattr(fixture, "source", None) or "unknown",
-                    raw_home=fixture.home_team,
-                    raw_away=fixture.away_team,
-                    reason=str(quality.get("reason") or "invalid_team_name"),
-                    sport=fixture.sport,
-                    league=fixture.league,
-                    match_date=fixture.match_date,
-                    raw_payload=fixture.extra if isinstance(getattr(fixture, "extra", None), dict) else None,
-                )
-                return None
-            fixture.home_team = quality["home"]
-            fixture.away_team = quality["away"]
-            return original(db, fixture)
-
-        upsert_fixture_with_quality._reeds_quality_wrapped = True  # type: ignore[attr-defined]
-        loaders_mod.upsert_fixture = upsert_fixture_with_quality
-        log.info("wrapped loaders.upsert_fixture with fixture quality gate")
+            upsert_fixture_with_quality._reeds_quality_wrapped = True  # type: ignore[attr-defined]
+            loaders_mod.upsert_fixture = upsert_fixture_with_quality
+            log.info("wrapped loaders.upsert_fixture with fixture quality gate")
     except Exception:
         log.exception("failed to wrap upsert_fixture quality gate")
