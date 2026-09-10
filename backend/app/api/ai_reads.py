@@ -15,6 +15,9 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+_LIVE_STATUSES = {"1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT"}
+
+
 def _fixture_payload(fixture: Fixture) -> dict:
     extra = fixture.extra if isinstance(fixture.extra, dict) else {}
     return {
@@ -33,10 +36,22 @@ def _fixture_payload(fixture: Fixture) -> dict:
         "has_odds": any(v is not None for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds)),
         "status": extra.get("status"),
         "elapsed": extra.get("elapsed"),
-        "is_live": bool(extra.get("live")) or str(extra.get("status", "")).upper() in {"1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT"},
+        "is_live": bool(extra.get("live")) or str(extra.get("status", "")).upper() in _LIVE_STATUSES,
         "source": fixture.source,
         "provider_sources": extra.get("provider_sources", []) if isinstance(extra.get("provider_sources"), list) else [],
     }
+
+
+def _supported_draft(prediction: Prediction) -> bool:
+    """Only expose an early read when its stored quality gate accepted it.
+
+    A generated but default-driven row is useful for internal diagnostics, not
+    for a customer-facing intelligence page. The public tracked record remains
+    governed by ``is_published`` separately.
+    """
+    meta = prediction.engine_meta if isinstance(prediction.engine_meta, dict) else {}
+    quality = meta.get("publication_quality") if isinstance(meta.get("publication_quality"), dict) else {}
+    return bool(quality.get("accepted"))
 
 
 def _response(db: Session, fixture: Fixture, rows: list[tuple[Prediction, Fixture]], status: str) -> dict:
@@ -90,11 +105,11 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
             query = query.filter(Prediction.is_published == True)
         elif published_only is False:
             query = query.filter(Prediction.is_published == False)
-        return query.all()
+        rows = query.all()
+        if published_only is False:
+            rows = [row for row in rows if _supported_draft(row[0])]
+        return rows
 
-    # Exact Match Intelligence is an on-demand refresh boundary. Re-run the
-    # fixture with the expanded historical window before reading stored rows so
-    # stale 90/180-day default-driven drafts are not treated as authoritative.
     if fixture.match_date >= date.today():
         try:
             from app.services.fixture_prediction import generate_fixture_predictions
@@ -119,5 +134,6 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
         "fixture": _fixture_payload(fixture),
         "predictions": [],
         "generation_queued": False,
-        "message": "AI analysis is not published for this match yet.",
+        "message": "REEDS is withholding this read because the available evidence is not match-specific enough yet.",
+        "responsible_note": "No public read is shown until REEDS has sufficient match-specific evidence.",
     }
