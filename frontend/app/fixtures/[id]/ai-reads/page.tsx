@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getAIReads } from "../../../../lib/api";
 import { PredictionCard } from "../../../../components/PredictionCard";
+import { BackButton } from "../../../../components/BackButton";
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +37,6 @@ function Timeline({ intelligence }: { intelligence?: any }) {
           ))}
         </ol>
       </div>
-
       <div className="space-y-4">
         {revisions.length > 0 && <div className="card">
           <p className="section-kicker">Prediction history</p>
@@ -49,7 +49,6 @@ function Timeline({ intelligence }: { intelligence?: any }) {
             </div>)}
           </div>
         </div>}
-
         {market && <div className="card">
           <p className="section-kicker">Market context</p>
           <h2 className="section-title">How the price moved</h2>
@@ -66,16 +65,14 @@ function Timeline({ intelligence }: { intelligence?: any }) {
 export default async function FixtureAIReads({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const data = await getAIReads(id);
-  if (!data?.fixture) return <main className="mx-auto max-w-4xl px-4 py-10"><Link className="text-emerald-300" href="/fixtures">← Fixtures</Link><div className="card mt-6">This match isn't available right now.</div></main>;
-
+  if (!data?.fixture) return <main className="mx-auto max-w-4xl px-4 py-10"><BackButton fallback="/fixtures" /><div className="card mt-6">This match isn't available right now.</div></main>;
   const f = data.fixture;
   const picks = Array.isArray(data.predictions) ? data.predictions : [];
   const sources = Array.isArray(f.provider_sources) ? f.provider_sources : [];
 
   return (
     <main className="mx-auto max-w-7xl px-4 pb-12 pt-7 sm:px-6 sm:pt-10">
-      <div className="flex items-center gap-3 text-xs font-bold"><Link href={`/fixtures/${id}`} className="text-slate-500 hover:text-white">← Match</Link><span className="text-slate-700">/</span><span className="text-emerald-300">Intelligence</span></div>
-
+      <div className="flex items-center gap-3 text-xs font-bold"><BackButton fallback="/fixtures" /><span className="text-slate-700">/</span><span className="text-emerald-300">Intelligence</span></div>
       <section className="mt-5 overflow-hidden rounded-[1.5rem] border border-white/[0.07] bg-gradient-to-br from-slate-900 to-slate-950 p-5 sm:p-7">
         <div className="flex flex-wrap items-center gap-2"><span className="badge">{formatSport(f.sport)}</span><span className="text-xs text-slate-600">{f.league}</span>{sources.slice(0, 3).map((source: string) => <span key={source} className="text-[10px] text-slate-700">· {source}</span>)}</div>
         <div className="mt-6 grid gap-5 md:grid-cols-[1fr_auto_1fr] md:items-center">
@@ -84,7 +81,6 @@ export default async function FixtureAIReads({ params }: { params: Promise<{ id:
           <div className="text-left md:text-right"><p className="text-xl font-black text-white sm:text-3xl">{f.away_team}</p><p className="mt-1 text-xs text-slate-600">Away</p></div>
         </div>
       </section>
-
       {data.status === "preparing" ? <section className="card mt-6 border-amber-400/15"><p className="section-kicker">Almost ready</p><h2 className="section-title">REEDS is preparing this match.</h2><p className="mt-2 text-sm leading-6 text-slate-500">The fixture is known, but its analysis isn't ready yet. Check back shortly.</p></section> : <>
         <section className="mt-8">
           <div className="flex items-end justify-between gap-4"><div><p className="section-kicker">The read</p><h2 className="section-title">What REEDS sees</h2><p className="mt-2 text-sm text-slate-500">Start with the decision. Open a card only when you want the evidence.</p></div><span className="text-xs text-slate-600">{picks.length} read{picks.length === 1 ? "" : "s"}</span></div>
@@ -93,7 +89,6 @@ export default async function FixtureAIReads({ params }: { params: Promise<{ id:
         </section>
         <Timeline intelligence={data.intelligence} />
       </>}
-
       {data.responsible_note && <section className="responsible-note mt-8">{data.responsible_note}</section>}
     </main>
   );
