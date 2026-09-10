@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Fixture, MatchEvent
 from app.scraper.http_client import HttpClient
 from app.services.live_events import push_live_event
+from app.services.live_intelligence import build_live_intelligence
 
 log = logging.getLogger(__name__)
 _LIVE_STATUSES = {"1H", "2H", "HT", "ET", "BT", "P", "LIVE", "INT"}
@@ -123,7 +124,7 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
     if not isinstance(events, list):
         events = []
 
-    checked = updated = score_changes = stats_updates = 0
+    checked = updated = score_changes = stats_updates = intelligence_updates = 0
     for item in events:
         if not isinstance(item, dict):
             continue
@@ -133,6 +134,7 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
         checked += 1
         old_home, old_away = fx.home_score, fx.away_score
         old_status = str((fx.extra or {}).get("status") or "")
+        old_intelligence = (fx.extra or {}).get("live_intelligence") if isinstance(fx.extra, dict) else None
 
         home_score = _int_or_none(item.get("event_current_home_score"))
         away_score = _int_or_none(item.get("event_current_away_score"))
@@ -153,6 +155,9 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
         if away_score is not None:
             fx.away_score = away_score
 
+        intelligence = build_live_intelligence(fx.home_score, fx.away_score, stats, elapsed)
+        intelligence_changed = old_intelligence != intelligence
+
         extra = dict(fx.extra or {})
         extra.update({
             "allsports_event_key": item.get("event_key"),
@@ -161,6 +166,7 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
             "elapsed": elapsed if elapsed is not None else extra.get("elapsed"),
             "live_last_synced_at": datetime.utcnow().isoformat(),
             "live_provider": "allsportsapi",
+            "live_intelligence": intelligence,
         })
         if stats:
             extra["live_stats"] = stats
@@ -183,7 +189,20 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
                 "away_score": fx.away_score,
                 "timestamp": datetime.utcnow().isoformat(),
             })
-        if score_changed or old_status != status or stats:
+
+        if intelligence_changed and (score_changed or stats or not old_intelligence):
+            intelligence_updates += 1
+            push_live_event(fx.id, {
+                "fixture_id": fx.id,
+                "event_type": "live_intelligence",
+                "minute": elapsed,
+                "home_score": fx.home_score,
+                "away_score": fx.away_score,
+                "intelligence": intelligence,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+
+        if score_changed or old_status != status or stats or intelligence_changed:
             updated += 1
 
     db.commit()
@@ -193,4 +212,5 @@ def sync_allsports_live(db: Session, api_key: str | None, sport: str = "football
         "updated": updated,
         "score_changes": score_changes,
         "stats_updates": stats_updates,
+        "intelligence_updates": intelligence_updates,
     }
