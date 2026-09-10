@@ -16,6 +16,7 @@ const EVENT_TONE: Record<string, string> = {
   red_card: "text-rose-300 border-rose-400/30",
   yellow_card: "text-amber-300 border-amber-400/30",
   substitution: "text-sky-300 border-sky-400/30",
+  live_intelligence: "text-violet-300 border-violet-400/30",
 };
 
 const CLOCK_STATUSES = new Set(["1H", "2H", "ET", "LIVE"]);
@@ -33,6 +34,10 @@ function liveClock(match: any, now: number) {
 function statValue(value: any) {
   if (value === null || value === undefined || value === "") return "—";
   return String(value);
+}
+
+function pressureLabel(value: any) {
+  return String(value || "").replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[] }) {
@@ -77,6 +82,7 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
             if (event.away_score !== undefined) next.away_score = event.away_score;
             if (event.minute !== undefined && event.minute !== null) next.elapsed = event.minute;
             if (event.status) next.status = event.status;
+            if (event.intelligence) next.intelligence = event.intelligence;
             next.last_synced_at = new Date().toISOString();
             if (event.stats) next.stats = event.stats;
             if (event.event_type === "stats_update") next.stats_updated_at = new Date().toISOString();
@@ -105,6 +111,7 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
         status: data.status ?? m.status,
         elapsed: data.elapsed ?? m.elapsed,
         stats: data.stats ?? m.stats,
+        intelligence: data.intelligence ?? m.intelligence,
         last_synced_at: data.last_synced_at ?? m.last_synced_at,
         stats_updated_at: data.stats_updated_at ?? m.stats_updated_at,
       } : m));
@@ -129,7 +136,7 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
       {!live.length && (
         <div className="mt-4 rounded-2xl border border-dashed border-white/10 bg-white/5 p-6 text-center">
           <p className="font-bold text-slate-200">No matches are in play right now.</p>
-          <p className="mt-1 text-sm text-slate-400">The feed turns live automatically when a tracked fixture kicks off. Check the board for upcoming reads in the meantime.</p>
+          <p className="mt-1 text-sm text-slate-400">The live feed checks the provider state continuously. When a tracked fixture becomes live, its score, clock, statistics and live read will appear automatically.</p>
           <Link href="/predictions" className="mt-4 inline-flex rounded-xl bg-emerald-400 px-4 py-2 text-sm font-black text-slate-950">Today's reads</Link>
         </div>
       )}
@@ -137,6 +144,9 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
       <div className="mt-4 space-y-4">
         {live.map((m) => {
           const stats = m.stats && typeof m.stats === "object" ? Object.entries(m.stats).slice(0, 10) : [];
+          const intelligence = m.intelligence && typeof m.intelligence === "object" ? m.intelligence : {};
+          const drivers = Array.isArray(intelligence.drivers) ? intelligence.drivers : [];
+          const evidence = intelligence.evidence && typeof intelligence.evidence === "object" ? intelligence.evidence : {};
           return (
             <div key={m.id} className="card">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -157,6 +167,28 @@ export default function LiveHub({ initialMatchIds }: { initialMatchIds: number[]
                 <Link href={`/fixtures/${m.id}/ai-reads`} className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 font-bold text-sky-200">AI Reads</Link>
                 <button onClick={() => loadEvents(Number(m.id))} className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 font-bold text-slate-300 hover:bg-white/10">Refresh data</button>
               </div>
+
+              {(intelligence.pressure || drivers.length > 0 || Object.keys(evidence).length > 0) && (
+                <div className="mt-4 rounded-xl border border-violet-400/15 bg-violet-400/[0.04] p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-black uppercase tracking-wider text-violet-300">Live read</p>
+                    <span className="text-xs font-bold text-slate-300">{pressureLabel(intelligence.pressure) || "Insufficient live evidence"}</span>
+                  </div>
+                  {drivers.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {drivers.slice(0, 4).map((driver: any, i: number) => (
+                        <span key={i} className="rounded-full border border-white/10 bg-slate-950/60 px-2 py-1 text-xs text-slate-300">{driver}</span>
+                      ))}
+                    </div>
+                  )}
+                  {Object.keys(evidence).length > 0 && (
+                    <p className="mt-2 text-[11px] text-slate-500">
+                      Evidence: {Object.entries(evidence).filter(([, value]) => Boolean(value)).map(([key]) => key.replaceAll("_", " ")).join(" • ") || "provider stats pending"}
+                    </p>
+                  )}
+                  <p className="mt-2 text-[10px] text-slate-600">Provider statistics only. No invented live probability.</p>
+                </div>
+              )}
 
               {stats.length > 0 && (
                 <div className="mt-4 rounded-xl border border-white/10 bg-slate-950/50 p-3">
