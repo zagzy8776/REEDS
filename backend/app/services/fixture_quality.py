@@ -39,48 +39,31 @@ BAD_WORDS = [
 
 
 def clean_team_name(name: str | None) -> str | None:
-    """Return a cleaned team name, or None if it looks like provider garbage."""
     if not name:
         return None
-
     cleaned = str(name).strip()
     if not cleaned:
         return None
-
     cleaned = " ".join(cleaned.split())
-    if len(cleaned) > 60:
+    if len(cleaned) > 60 or len(cleaned) < 2:
         return None
-    if len(cleaned) < 2:
-        return None
-
     lowered = cleaned.lower()
     for word in BAD_WORDS:
         if word in lowered:
             return None
-
     alpha = sum(1 for ch in cleaned if ch.isalpha())
     if alpha < 2:
         return None
-
     return cleaned
 
 
 def validate_fixture(home: str | None, away: str | None, sport: str | None = None) -> dict:
-    """Validate a provider fixture before DB write.
-
-    Returns:
-      {"valid": True, "home": str, "away": str}
-      {"valid": False, "reason": str}
-    """
     home_clean = clean_team_name(home)
     away_clean = clean_team_name(away)
-
     if not home_clean or not away_clean:
         return {"valid": False, "reason": "invalid_team_name"}
-
     if home_clean.lower() == away_clean.lower():
         return {"valid": False, "reason": "same_team"}
-
     return {
         "valid": True,
         "home": home_clean,
@@ -101,8 +84,7 @@ def save_rejected_fixture(
     match_date=None,
     raw_payload: dict | None = None,
 ) -> None:
-    """Persist a quarantined provider row for audit (never silent-drop)."""
-    from app.db.models import RejectedFixture
+    from app.db.rejected_fixture import RejectedFixture
 
     row = RejectedFixture(
         provider=str(provider or "unknown")[:80],
@@ -121,19 +103,11 @@ def save_rejected_fixture(
     except Exception:
         log.exception(
             "Failed to quarantine rejected fixture provider=%s home=%s away=%s reason=%s",
-            provider,
-            raw_home,
-            raw_away,
-            reason,
+            provider, raw_home, raw_away, reason,
         )
 
 
 def prediction_readiness(db: Session, fixture) -> dict:
-    """Evidence checklist before AI Reads generation / publication.
-
-    Does not run the model — only reports whether the fixture has enough
-    match-specific evidence to justify analysis.
-    """
     from app.db.models import Fixture
 
     reasons: list[str] = []
@@ -144,23 +118,15 @@ def prediction_readiness(db: Session, fixture) -> dict:
         "odds_present": False,
         "history_present": False,
     }
-
     if fixture is None:
-        return {
-            "ready": False,
-            "reason": ["Fixture not found"],
-            "checks": checks,
-        }
+        return {"ready": False, "reason": ["Fixture not found"], "checks": checks}
 
     quality = validate_fixture(fixture.home_team, fixture.away_team, fixture.sport)
     checks["teams_valid"] = bool(quality.get("valid"))
     if not quality.get("valid"):
         reasons.append(f"Invalid fixture teams ({quality.get('reason', 'unknown')})")
 
-    has_odds = any(
-        v is not None
-        for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds)
-    )
+    has_odds = any(v is not None for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds))
     checks["odds_present"] = has_odds
     if not has_odds:
         reasons.append("No odds market")
