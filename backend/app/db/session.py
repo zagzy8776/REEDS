@@ -50,9 +50,6 @@ connect_args = {"check_same_thread": False} if is_sqlite else {
     "application_name": "loyal-edge-api",
 }
 if not is_sqlite:
-    # Render's network currently cannot route to the IPv6 address returned by
-    # some Neon endpoints. libpq/psycopg supports hostaddr separately from host:
-    # keep the hostname for TLS identity while forcing the TCP socket to IPv4.
     ipv4 = resolve_ipv4_host(database_url)
     if ipv4:
         connect_args["hostaddr"] = ipv4
@@ -63,14 +60,10 @@ engine_kwargs = {
     "connect_args": connect_args,
 }
 if not is_sqlite:
-    # Keep the free Render instance conservative: fewer idle DB connections
-    # means less memory and less chance of exhausting the external DB pool.
-    # pool_size + max_overflow must still cover background threads
-    # (scheduler, coverage, db-recovery) plus concurrent API requests.
-    engine_kwargs.update({"pool_size": 5, "max_overflow": 5, "pool_timeout": 30})
+    engine_kwargs.update({"pool_size": 5, "max_overflow": 10})
 
 engine = create_engine(database_url, **engine_kwargs)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 class Base(DeclarativeBase):
@@ -85,58 +78,42 @@ def get_db():
         db.close()
 
 
-def init_db() -> None:
-    from app.db import models  # noqa: F401
-    Base.metadata.create_all(bind=engine)
-    repair_runtime_schema()
-
-
-def _column_exists(table: str, column: str) -> bool:
+def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
     inspector = inspect(engine)
     if table not in inspector.get_table_names():
-        return False
-    return column in {col["name"] for col in inspector.get_columns(table)}
-
-
-def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
-    if _column_exists(table, column):
+        return
+    existing = {c["name"] for c in inspector.get_columns(table)}
+    if column in existing:
         return
     with engine.begin() as conn:
         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
 
-def repair_runtime_schema() -> None:
-    """Patch known additive schema drift at startup."""
+def ensure_schema() -> None:
     inspector = inspect(engine)
-    if "predictions" not in inspector.get_table_names():
-        return
-
-    if engine.dialect.name == "postgresql":
-        _add_column_if_missing("predictions", "model_version_id", "INTEGER")
-        _add_column_if_missing("predictions", "version", "INTEGER DEFAULT 1 NOT NULL")
-        _add_column_if_missing("predictions", "status", "VARCHAR(30) DEFAULT 'active' NOT NULL")
-        _add_column_if_missing("predictions", "engine_meta", "JSON")
-        _add_column_if_missing("predictions", "published_at", "TIMESTAMP")
-        _add_column_if_missing("predictions", "superseded_at", "TIMESTAMP")
-    else:
-        _add_column_if_missing("predictions", "model_version_id", "INTEGER")
-        _add_column_if_missing("predictions", "version", "INTEGER DEFAULT 1")
-        _add_column_if_missing("predictions", "status", "VARCHAR(30) DEFAULT 'active'")
-        _add_column_if_missing("predictions", "engine_meta", "JSON")
-        _add_column_if_missing("predictions", "published_at", "DATETIME")
-        _add_column_if_missing("predictions", "superseded_at", "DATETIME")
+    if "predictions" in inspector.get_table_names():
+        if engine.dialect.name == "postgresql":
+            _add_column_if_missing("predictions", "model_version_id", "INTEGER")
+            _add_column_if_missing("predictions", "version", "INTEGER DEFAULT 1 NOT NULL")
+            _add_column_if_missing("predictions", "status", "VARCHAR(30) DEFAULT 'active' NOT NULL")
+            _add_column_if_missing("predictions", "engine_meta", "JSON")
+            _add_column_if_missing("predictions", "published_at", "TIMESTAMP")
+            _add_column_if_missing("predictions", "superseded_at", "TIMESTAMP")
+        else:
+            _add_column_if_missing("predictions", "model_version_id", "INTEGER")
+            _add_column_if_missing("predictions", "version", "INTEGER DEFAULT 1")
+            _add_column_if_missing("predictions", "status", "VARCHAR(30) DEFAULT 'active'")
+            _add_column_if_missing("predictions", "engine_meta", "JSON")
+            _add_column_if_missing("predictions", "published_at", "DATETIME")
+            _add_column_if_missing("predictions", "superseded_at", "DATETIME")
 
     if "model_artifacts" in inspector.get_table_names():
         _add_column_if_missing("model_artifacts", "metadata_json", "JSON" if engine.dialect.name == "postgresql" else "JSON")
 
-    # MarketEvidence is created by Base.metadata.create_all; this is a safety
-    # net for deployments that skip the alembic migration.
     from app.db.models import HistoricalEvaluation, MarketEvidence  # noqa: F401
     Base.metadata.create_all(bind=engine, tables=[MarketEvidence.__table__])
     Base.metadata.create_all(bind=engine, tables=[HistoricalEvaluation.__table__])
 
-    # Health-evidence columns for MarketEvidence (safety net; alembic 0006 owns
-    # the migration, this keeps create_all-only deployments alive).
     for col, ddl in (
         ("historical_settled", "INTEGER DEFAULT 0 NOT NULL"),
         ("historical_wins", "INTEGER DEFAULT 0 NOT NULL"),
@@ -150,3 +127,11 @@ def repair_runtime_schema() -> None:
         ("bootstrap_updated_at", "TIMESTAMP"),
     ):
         _add_column_if_missing("market_evidence", col, ddl)
+
+
+# Apply production hotfixes (signature + league normalize)
+try:
+    from app.services.runtime_patches import apply_runtime_patches
+    apply_runtime_patches()
+except Exception:
+    pass
