@@ -23,10 +23,25 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def prediction_revisions(db: Session, fixture_id: int) -> list[dict[str, Any]]:
-    """Every stored version of a prediction for this fixture.
+def _meaningful_change(previous: dict | None, current: Prediction) -> bool:
+    """Return true only when a customer-visible prediction state changed."""
+    if previous is None:
+        return True
+    return (
+        previous.get("pick") != current.pick
+        or abs(float(previous.get("confidence", 0.0)) - float(current.confidence)) >= 1.0
+        or previous.get("risk_level") != current.risk_level
+        or previous.get("status") != current.status
+    )
 
-    Superseded rows are kept — 'REEDS changed its mind' is never hidden.
+
+def prediction_revisions(db: Session, fixture_id: int) -> list[dict[str, Any]]:
+    """Show meaningful prediction changes, not every scheduler refresh.
+
+    Superseded rows remain stored for auditability, but consecutive rows that
+    leave the customer-facing decision unchanged are collapsed. This prevents
+    a 30-second refresh loop from looking like REEDS repeatedly changed its
+    mind when the actual pick stayed identical.
     """
     rows = (
         db.query(Prediction)
@@ -36,7 +51,8 @@ def prediction_revisions(db: Session, fixture_id: int) -> list[dict[str, Any]]:
     )
     groups: dict[str, list[dict]] = {}
     for prediction in rows:
-        groups.setdefault(prediction.market, []).append({
+        versions = groups.setdefault(prediction.market, [])
+        payload = {
             "version": prediction.version,
             "pick": prediction.pick,
             "confidence": round(float(prediction.confidence), 1),
@@ -45,7 +61,24 @@ def prediction_revisions(db: Session, fixture_id: int) -> list[dict[str, Any]]:
             "published_at": _iso(prediction.published_at),
             "superseded_at": _iso(prediction.superseded_at),
             "created_at": _iso(prediction.created_at),
-        })
+        }
+        if not versions:
+            versions.append(payload)
+            continue
+        previous = versions[-1]
+        if (
+            previous.get("pick") == payload["pick"]
+            and abs(float(previous.get("confidence", 0.0)) - payload["confidence"]) < 1.0
+            and previous.get("risk_level") == payload["risk_level"]
+        ):
+            # Keep the latest timestamp/version for audit context without
+            # rendering another visually identical state.
+            previous["version"] = payload["version"]
+            previous["created_at"] = payload["created_at"]
+            previous["superseded_at"] = payload["superseded_at"]
+            previous["published_at"] = previous.get("published_at") or payload["published_at"]
+        else:
+            versions.append(payload)
     return [
         {"market": market, "versions": versions, "latest": len(versions) > 1}
         for market, versions in sorted(groups.items())
@@ -62,8 +95,7 @@ def market_overview(db: Session, fixture: Fixture) -> dict[str, Any]:
     )
 
     def _phase_rows(phase: str):
-        matches = [s for s in snapshots if (s.phase or "") == phase]
-        return matches
+        return [s for s in snapshots if (s.phase or "") == phase]
 
     opening = _phase_rows("opening")
     closing = _phase_rows("closing")
@@ -83,7 +115,6 @@ def market_overview(db: Session, fixture: Fixture) -> dict[str, Any]:
             "source": snapshot.source,
         }
 
-    # Pick-side market probability + model edge from the newest active read.
     active = (
         db.query(Prediction)
         .filter(Prediction.fixture_id == fixture.id, Prediction.status == "active")
@@ -118,20 +149,29 @@ def prediction_timeline(db: Session, fixture: Fixture) -> list[dict[str, Any]]:
     predictions = (
         db.query(Prediction)
         .filter(Prediction.fixture_id == fixture.id)
-        .order_by(Prediction.version.asc(), Prediction.id.asc())
+        .order_by(Prediction.market.asc(), Prediction.version.asc(), Prediction.id.asc())
         .all()
     )
-    for index, prediction in enumerate(predictions):
-        first_version = prediction.version == 1 or index == 0
+    last_by_market: dict[str, dict] = {}
+    for prediction in predictions:
+        previous = last_by_market.get(prediction.market)
+        if not _meaningful_change(previous, prediction):
+            continue
+        first_version = previous is None
         entries.append({
             "type": "model_analysis",
-            "title": "Initial analysis" if first_version else f"REEDS UPDATE — model re-read",
+            "title": "Initial analysis" if first_version else "REEDS UPDATE — model re-read",
             "detail": f"{prediction.market}: {prediction.pick} at {prediction.confidence:.0f}% confidence",
             "ts": _iso(prediction.created_at),
             "data": {"confidence": prediction.confidence, "version": prediction.version},
         })
+        last_by_market[prediction.market] = {
+            "pick": prediction.pick,
+            "confidence": float(prediction.confidence),
+            "risk_level": prediction.risk_level,
+            "status": prediction.status,
+        }
 
-    # Publication events.
     for prediction in predictions:
         if prediction.published_at:
             entries.append({
@@ -142,7 +182,6 @@ def prediction_timeline(db: Session, fixture: Fixture) -> list[dict[str, Any]]:
                 "data": {"prediction_id": prediction.id},
             })
 
-    # Odds movement snapshots (current vs previous).
     snapshots = (
         db.query(OddsSnapshot)
         .filter(OddsSnapshot.fixture_id == fixture.id)
@@ -168,7 +207,6 @@ def prediction_timeline(db: Session, fixture: Fixture) -> list[dict[str, Any]]:
             "data": {"phase": snap.phase, "home_odds": snap.home_odds, "draw_odds": snap.draw_odds, "away_odds": snap.away_odds},
         })
 
-    # Live events.
     event_rows = (
         db.query(MatchEvent)
         .filter(MatchEvent.fixture_id == fixture.id)
@@ -196,10 +234,8 @@ def prediction_timeline(db: Session, fixture: Fixture) -> list[dict[str, Any]]:
             "data": {"event_type": event.event_type, "minute": event.minute},
         })
 
-    # Match start.
     entries.append({"type": "kickoff", "title": "Kickoff", "detail": f"{fixture.home_team} vs {fixture.away_team}", "ts": _iso(fixture.match_date), "data": {}})
 
-    # Settlement from stored outcome metadata.
     for prediction in predictions:
         meta = prediction.engine_meta if isinstance(prediction.engine_meta, dict) else {}
         outcome = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
