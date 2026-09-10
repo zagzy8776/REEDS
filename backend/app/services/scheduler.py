@@ -62,11 +62,7 @@ def run_lightweight_refresh() -> dict:
     """Fan out across trusted fixture sources, then analyze the saved board."""
     db = SessionLocal()
     settings = get_settings()
-    report: dict = {
-        "ingested": {}, "predictions_generated": 0, "coverage_recovery": None,
-        "normalization": None, "purged_showcase": 0, "purged_malformed": 0,
-        "learning": None, "skipped": [],
-    }
+    report: dict = {"ingested": {}, "predictions_generated": 0, "coverage_recovery": None, "normalization": None, "purged_showcase": 0, "purged_malformed": 0, "learning": None, "skipped": []}
     try:
         dates = _date_window(settings.live_ingest_days)
         football_key = settings.api_football_key or settings.api_sports_key
@@ -118,66 +114,51 @@ def run_lightweight_refresh() -> dict:
         try:
             report["purged_malformed"] = _purge_malformed_web_fixtures(db)
         except Exception as exc:
-            db.rollback()
-            report["skipped"].append({"stage": "purge_malformed_web_fixtures", "reason": str(exc)[:300]})
-
+            db.rollback(); report["skipped"].append({"stage": "purge_malformed_web_fixtures", "reason": str(exc)[:300]})
         try:
             report["purged_showcase"] = purge_showcase_rows(db)
         except Exception as exc:
-            db.rollback()
-            report["skipped"].append({"stage": "purge_showcase", "reason": str(exc)[:300]})
+            db.rollback(); report["skipped"].append({"stage": "purge_showcase", "reason": str(exc)[:300]})
         try:
             report["normalization"] = normalize_fixture_sports(db)
         except Exception as exc:
-            db.rollback()
-            report["skipped"].append({"stage": "fixture_normalization", "reason": str(exc)[:300]})
+            db.rollback(); report["skipped"].append({"stage": "fixture_normalization", "reason": str(exc)[:300]})
         try:
             report["coverage_recovery"] = run_deep_coverage(db, min_coverage=300)
         except Exception as exc:
-            db.rollback()
-            report["skipped"].append({"stage": "deep_coverage", "reason": str(exc)[:300]})
-            log.exception("Deep coverage failed")
+            db.rollback(); report["skipped"].append({"stage": "deep_coverage", "reason": str(exc)[:300]}); log.exception("Deep coverage failed")
         try:
             post = normalize_fixture_sports(db)
-            if report["normalization"]:
-                report["normalization"]["post_coverage"] = post
-            else:
-                report["normalization"] = post
+            if report["normalization"]: report["normalization"]["post_coverage"] = post
+            else: report["normalization"] = post
         except Exception as exc:
-            db.rollback()
-            report["skipped"].append({"stage": "post_coverage_normalization", "reason": str(exc)[:300]})
+            db.rollback(); report["skipped"].append({"stage": "post_coverage_normalization", "reason": str(exc)[:300]})
         try:
             from app.services.community import settle_user_predictions
             settle_user_predictions(db)
         except Exception:
-            db.rollback()
-            log.exception("Community settlement failed")
+            db.rollback(); log.exception("Community settlement failed")
         try:
             report["learning"] = settle_prediction_outcomes(db, lookback_days=90)
         except Exception:
-            db.rollback()
-            log.exception("Prediction outcome settlement failed")
+            db.rollback(); log.exception("Prediction outcome settlement failed")
         try:
             report["predictions_generated"] = generate_today_predictions(db)
         except Exception as exc:
-            db.rollback()
-            report["skipped"].append({"stage": "predict", "reason": str(exc)[:300]})
+            db.rollback(); report["skipped"].append({"stage": "predict", "reason": str(exc)[:300]})
         try:
             from app.services.insider_signals import refresh_insider_signals
             refresh_insider_signals(db, odds_api_key=settings.the_odds_api_key)
         except Exception:
-            db.rollback()
-            log.exception("Insider signal refresh failed")
+            db.rollback(); log.exception("Insider signal refresh failed")
         try:
             from app.services.market_intelligence import refresh_line_efficiency
             refresh_line_efficiency(db, days_ahead=3)
         except Exception:
-            db.rollback()
-            log.exception("Line efficiency refresh failed")
+            db.rollback(); log.exception("Line efficiency refresh failed")
         return report
     finally:
-        db.close()
-        gc.collect()
+        db.close(); gc.collect()
 
 
 def run_daily_learning_pipeline() -> dict:
@@ -211,19 +192,32 @@ def start_scheduler() -> BackgroundScheduler:
     def score_sync_job():
         db = SessionLocal()
         try:
-            result = sync_live_scores(db, settings.api_football_key or settings.api_sports_key, settings.api_basketball_key or settings.api_sports_key)
             if settings.allsportsapi_key:
                 from app.services.live_scores import sync_allsports_live
-                result["allsports"] = sync_allsports_live(db, settings.allsportsapi_key, "football")
-            if settings.the_odds_api_key:
-                odds = refresh_odds_from_the_odds_api(db, settings.the_odds_api_key, settings.odds_api_sport_keys)
-                result["odds_refreshed"] = odds.get("updated", 0)
-            log.info("Score sync: %s", result)
+                football = sync_allsports_live(db, settings.allsportsapi_key, "football")
+                basketball = sync_allsports_live(db, settings.allsportsapi_key, "basketball")
+                result = {"allsports_football": football, "allsports_basketball": basketball}
+            else:
+                result = sync_live_scores(db, settings.api_football_key or settings.api_sports_key, settings.api_basketball_key or settings.api_sports_key)
+            log.info("Live score sync: %s", result)
         except Exception:
-            db.rollback(); log.exception("Score sync failed")
+            db.rollback(); log.exception("Live score sync failed")
         finally:
             db.close(); gc.collect()
     scheduler.add_job(score_sync_job, "interval", seconds=30, id="score_sync", replace_existing=True, max_instances=1, coalesce=True)
+
+    def odds_sync_job():
+        if not settings.the_odds_api_key:
+            return
+        db = SessionLocal()
+        try:
+            odds = refresh_odds_from_the_odds_api(db, settings.the_odds_api_key, settings.odds_api_sport_keys)
+            log.info("Odds refresh: %s", odds)
+        except Exception:
+            db.rollback(); log.exception("Odds refresh failed")
+        finally:
+            db.close(); gc.collect()
+    scheduler.add_job(odds_sync_job, "interval", minutes=15, id="odds_sync", replace_existing=True, max_instances=1, coalesce=True)
 
     def live_event_job():
         from app.services.live_events import sync_live_events
