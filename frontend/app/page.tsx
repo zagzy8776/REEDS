@@ -22,21 +22,22 @@ export default async function Home() {
   const hitRate = results.hit_rate || 0;
   const settled = results.settled_picks || 0;
   const highConfidenceCount = allPicks.filter((p: any) => Number(p.confidence || 0) >= 65).length;
+  const strongReads = allPicks.filter((p: any) => p.verdict?.key === "strong_read").length;
   const trackRecordLabel = settled > 0 ? String(settled) : "Building";
   const hitRateLabel = settled > 0 ? `${hitRate}%` : "Pending";
   return (
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
       {/* Hero */}
-      <section className="grid gap-8 md:grid-cols-2 md:items-center">
+      <section className="grid gap-8 md:grid-cols-2 md:items-start">
         <div>
-          <p className="badge inline-block">Transparent AI predictions</p>
-          <h1 className="mt-5 text-4xl font-black leading-tight sm:text-5xl">Sports predictions with proof, not promises.</h1>
-          <p className="mt-5 text-slate-300">Every pick shows confidence, risk, and the model’s reasoning. Track every result on the history page. No hidden track record.</p>
-          <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-            <Link className="rounded-xl bg-emerald-400 px-5 py-3 font-bold text-slate-950" href="/predictions">View AI Picks</Link>
-            <Link className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-5 py-3 font-bold text-amber-200" href="/predictions?min_confidence=65">High-confidence picks</Link>
-            <Link className="rounded-xl border border-slate-700 px-5 py-3 font-bold" href="/predictions/history">Track Record</Link>
-            <Link className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-5 py-3 font-bold text-emerald-200" href="/predictions/submit">+ Post Pick</Link>
+          <p className="badge inline-block">Today's intelligence, without the hype</p>
+          <h1 className="mt-5 text-4xl font-black leading-tight sm:text-5xl">Every read shows its verdict, its evidence, and its record.</h1>
+          <p className="mt-5 text-slate-300">REEDS labels each prediction honestly — STRONG READ, REEDS VALUE, ANALYZED (not enough evidence), or WATCHLIST — and the full track record stays public. No winner-only screenshots.</p>
+          <div className="mt-8 flex flex-wrap gap-3">
+            <Link className="rounded-xl bg-emerald-400 px-5 py-3 font-bold text-slate-950" href="/predictions">View today's reads</Link>
+            <Link className="rounded-xl border border-slate-700 px-5 py-3 font-bold" href="/history">Public track record</Link>
+            <Link className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-5 py-3 font-bold text-sky-200" href="/performance">Performance center</Link>
+            <Link className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-5 py-3 font-bold text-emerald-200" href="/how-it-works">How it works</Link>
           </div>
           {/* Live proof bar */}
           <div className="mt-8 grid gap-3 sm:grid-cols-3">
@@ -49,19 +50,26 @@ export default async function Home() {
               <p className="mt-1 text-2xl font-black text-emerald-300">{hitRateLabel}</p>
             </div>
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-xs uppercase tracking-wide text-slate-500">65%+ picks today</p>
-              <p className="mt-1 text-2xl font-black">{highConfidenceCount}</p>
+              <p className="text-xs uppercase tracking-wide text-slate-500">STRONG READs today</p>
+              <p className="mt-1 text-2xl font-black">{strongReads}</p>
             </div>
           </div>
+          {picks.length > 0 ? (
+            <div className="mt-4 flex flex-wrap gap-2 text-[11px] text-slate-500">
+              <span className="rounded-full border border-emerald-400/30 px-2 py-0.5 text-emerald-300">STRONG READ</span>
+              <span className="rounded-full border border-sky-400/30 px-2 py-0.5 text-sky-300">REEDS VALUE</span>
+              <span className="rounded-full border border-slate-600 px-2 py-0.5 text-slate-300">ANALYZED — not enough evidence yet</span>
+            </div>
+          ) : null}
           {settled === 0 ? (
             <p className="mt-3 text-xs text-slate-500">Track record is initializing from published picks only. We show pending/building states instead of fake proof.</p>
           ) : null}
         </div>
         <div className="card">
-          <h2 className="text-xl font-bold">Top picks right now</h2>
-          <p className="mt-1 text-sm text-slate-400">Highest-confidence AI reads for today.</p>
-          <div className="mt-4 space-y-3">{picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="rounded-2xl border border-dashed border-emerald-400/30 bg-emerald-400/5 p-5"><p className="font-bold text-emerald-200">AI picks are warming up.</p><p className="mt-2 text-sm text-slate-400">The live fixture feed is separate from the prediction board. Picks appear after the scheduler or admin refresh generates published model reads.</p><div className="mt-4 flex flex-wrap gap-2"><Link href="/fixtures" className="rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs font-bold text-sky-200">Check live fixtures</Link><Link href="/predictions?min_confidence=65" className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-bold text-amber-200">High-confidence board</Link></div></div>}</div>
-          {picks.length > 0 && <Link href="/predictions" className="mt-4 block text-center text-sm font-bold text-emerald-300">View all picks →</Link>}
+          <h2 className="text-xl font-bold">Today's Intelligence</h2>
+          <p className="mt-1 text-sm text-slate-400">Highest-confidence AI reads on the board, each with its honest verdict.</p>
+          <div className="mt-4 space-y-3">{picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="rounded-2xl border border-dashed border-emerald-400/30 bg-emerald-400/5 p-5"><p className="font-bold text-emerald-200">AI reads are warming up.</p><p className="mt-2 text-sm text-slate-400">Reads appear after the scheduler generates published model analysis for upcoming fixtures. Provisional drafts stay clearly labelled as draft — not part of the tracked record.</p><div className="mt-4 flex flex-wrap gap-2"><Link href="/fixtures" className="rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs font-bold text-sky-200">Check fixtures</Link><Link href="/how-it-works" className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-bold text-amber-200">How the record works</Link></div></div>}</div>
+          {picks.length > 0 && <Link href="/predictions" className="mt-4 block text-center text-sm font-bold text-emerald-300">View the full board →</Link>}
         </div>
       </section>
 
@@ -100,16 +108,16 @@ export default async function Home() {
       {/* Trust / transparency */}
       <section className="mt-12 grid gap-5 md:grid-cols-3">
         <div className="card">
-          <h3 className="font-bold text-emerald-300">Full model reasoning</h3>
-          <p className="mt-2 text-sm text-slate-300">Every pick shows the exact signals the model checked: form, goals, odds, streaks, H2H. No black boxes.</p>
+          <h3 className="font-bold text-emerald-300">Honest verdicts, not hype</h3>
+          <p className="mt-2 text-sm text-slate-300">Every read is labelled STRONG READ, REEDS VALUE, or ANALYZED — with the evidence or the reason it is not yet published. Watchlist states are shown instead of invented confidence.</p>
         </div>
         <div className="card">
           <h3 className="font-bold text-emerald-300">Track record stays public</h3>
-          <p className="mt-2 text-sm text-slate-300">History page shows every past prediction with its result. Wins, losses, and hit rate are visible to everyone.</p>
+          <p className="mt-2 text-sm text-slate-300">The track record page shows every past read with its result, filters by market and risk, and classifies LIVE RECORD vs backtest vs historical evaluation in plain sight.</p>
         </div>
         <div className="card">
-          <h3 className="font-bold text-emerald-300">Risk shown upfront</h3>
-          <p className="mt-2 text-sm text-slate-300">Confidence and risk level are on every card. We do not hide weak picks behind hype.</p>
+          <h3 className="font-bold text-emerald-300">Post-match accountability</h3>
+          <p className="mt-2 text-sm text-slate-300">After settlement REEDS explains what held and what failed, and repeated failure patterns are aggregated over many matches before any calibration change.</p>
         </div>
       </section>
 

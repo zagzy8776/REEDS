@@ -41,6 +41,40 @@ export async function getPredictionHistory(params: Record<string, string> = {}) 
   return safeFetchJson(`${API_URL}/api/predictions/history${qs ? `?${qs}` : "?days=7&limit=50"}`, []);
 }
 
+export async function getPredictionHistoryPaginated(params: Record<string, string> = {}) {
+  const withDefaults = { paginated: "true", days: "45", limit: "20", page: "1", ...params };
+  const qs = new URLSearchParams(Object.entries(withDefaults).filter(([, v]) => v)).toString();
+  return safeFetchJson(`${API_URL}/api/predictions/history?${qs}`, { items: [], total: 0, page: 1, page_size: 20, has_more: false });
+}
+
+export async function getPerformance() {
+  return safeFetchJson(`${API_URL}/api/stats/performance`, { label: "LIVE RECORD", segments: {}, by_sport: [], by_market: [], calibration: [], note: "" }, 60000);
+}
+
+export async function getDataStatus() {
+  return safeFetchJson(`${API_URL}/api/stats/data-status`, { as_of: "", fixtures: {}, odds: {}, predictions: {} }, 45000);
+}
+
+export async function getLatestAlerts() {
+  return safeFetchJson(`${API_URL}/api/stats/alerts/latest`, [], 45000);
+}
+
+export async function getModelFeedbackStats() {
+  return safeFetchJson(`${API_URL}/api/stats/model-feedback`, { segments: [], flagged_patterns: [], total_feedback_records: 0, note: "" }, 45000);
+}
+
+export async function getFixtureIntelligence(fixtureId: string | number) {
+  return safeFetchJson(`${API_URL}/api/fixtures/${encodeURIComponent(String(fixtureId))}/intelligence`, null, 45000);
+}
+
+export async function getLiveMatches() {
+  return safeFetchJson(`${API_URL}/api/live/matches`, [], 30000);
+}
+
+export async function getLiveEvents(fixtureId: string | number) {
+  return safeFetchJson(`${API_URL}/api/live/events/${encodeURIComponent(String(fixtureId))}`, { events: [] }, 30000);
+}
+
 export async function getPrediction(id: string) {
   return safeFetchJson(`${API_URL}/api/predictions/${id}`, null);
 }

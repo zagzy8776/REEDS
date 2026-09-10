@@ -102,6 +102,7 @@ def settle_prediction_outcomes(db: Session, lookback_days: int = 90) -> dict[str
         .all()
     )
     settled = won = lost = changed = 0
+    resolved_rows: list[tuple[Prediction, Fixture, bool]] = []
     for prediction, fixture in rows:
         result = prediction_result(prediction, fixture)
         if result is None:
@@ -133,14 +134,52 @@ def settle_prediction_outcomes(db: Session, lookback_days: int = 90) -> dict[str
             meta["outcome"] = outcome
             prediction.engine_meta = meta
             changed += 1
+        resolved_rows.append((prediction, fixture, result))
     if changed:
         db.flush()
+    try:
+        _ensure_feedback_for_settled(db, resolved_rows)
+    except Exception:
+        log.exception("Model feedback sync failed during settlement")
     try:
         from app.services.market_gate import compute_market_evidence
         compute_market_evidence(db)
     except Exception:
         log.exception("Market evidence refresh failed during settlement")
     return {"settled": settled, "won": won, "lost": lost, "updated": changed}
+
+
+def _ensure_feedback_for_settled(db: Session, rows: list[tuple[Prediction, Fixture, bool]]) -> None:
+    """Create/refresh structured post-match feedback for settled predictions.
+
+    Only new outcomes or previously-missing rows are written, so steady-state
+    settlement does not churn the database. One existence query per run.
+    """
+    if not rows:
+        return
+    from app.db.models import ModelFeedback
+    ids = [p.id for p, _fixture, _result in rows]
+    existing: set[int] = set()
+    try:
+        existing = {fid for (fid,) in db.query(ModelFeedback.prediction_id).filter(ModelFeedback.prediction_id.in_(ids)).all()}
+    except Exception:
+        log.exception("Could not read existing feedback ids")
+    from app.services.feedback import record_feedback
+    written = 0
+    for prediction, fixture, result in rows:
+        if prediction.id in existing and outcome_result(prediction) == ("won" if result else "lost"):
+            continue
+        record_feedback(db, prediction, fixture, result)
+        written += 1
+    if written:
+        db.flush()
+        log.info("Model feedback: %s records for %s settled predictions", written, len(rows))
+
+
+def outcome_result(prediction: Prediction) -> str | None:
+    meta = prediction.engine_meta if isinstance(prediction.engine_meta, dict) else {}
+    old = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
+    return old.get("result")
 
 
 def _latest_public_rows(db: Session, days: int = RECENT_WINDOW) -> list[tuple[Prediction, Fixture, bool]]:
