@@ -4,6 +4,10 @@ import { getFixtureStatus, getFixtures, getTodayPredictions, getStats } from "..
 
 export const dynamic = "force-dynamic";
 
+function Stat({ label, value, note }: { label: string; value: string | number; note: string }) {
+  return <div className="rounded-2xl border border-white/[0.06] bg-slate-900/45 p-4"><p className="section-kicker">{label}</p><p className="mt-2 text-2xl font-black tracking-tight text-white">{value}</p><p className="mt-1 text-[11px] text-slate-600">{note}</p></div>;
+}
+
 export default async function Home() {
   const [allPicks, status, fixtures, stats] = await Promise.all([
     getTodayPredictions(),
@@ -11,131 +15,49 @@ export default async function Home() {
     getFixtures({ scope: "all", limit: "24" }),
     getStats(),
   ]);
-  const picks = allPicks.slice(0, 3);
+  const picks = allPicks.slice(0, 6);
   const sports = Array.from(new Set(fixtures.map((f: any) => f.sport))).filter(Boolean);
-  const sportCounts = fixtures.reduce((acc: Record<string, number>, f: any) => {
-    acc[f.sport] = (acc[f.sport] || 0) + 1;
-    return acc;
-  }, {});
-  const showcase = fixtures.slice(0, 6);
+  const sportCounts = fixtures.reduce((acc: Record<string, number>, f: any) => { acc[f.sport] = (acc[f.sport] || 0) + 1; return acc; }, {});
   const results = stats.results || {};
-  const hitRate = results.hit_rate || 0;
-  const settled = results.settled_picks || 0;
-  const highConfidenceCount = allPicks.filter((p: any) => Number(p.confidence || 0) >= 65).length;
+  const settled = Number(results.settled_picks || 0);
+  const hitRate = Number(results.hit_rate || 0);
   const strongReads = allPicks.filter((p: any) => p.verdict?.key === "strong_read").length;
-  const trackRecordLabel = settled > 0 ? String(settled) : "Building";
-  const hitRateLabel = settled > 0 ? `${hitRate}%` : "Pending";
+
   return (
-    <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
-      {/* Hero */}
-      <section className="grid gap-8 md:grid-cols-2 md:items-start">
+    <main className="mx-auto max-w-7xl px-4 pb-12 pt-7 sm:px-6 sm:pt-10">
+      <section className="grid gap-6 lg:grid-cols-[1.1fr_.9fr] lg:items-end">
         <div>
-          <p className="badge inline-block">Today's intelligence, without the hype</p>
-          <h1 className="mt-5 text-4xl font-black leading-tight sm:text-5xl">Every read shows its verdict, its evidence, and its record.</h1>
-          <p className="mt-5 text-slate-300">REEDS labels each prediction honestly — STRONG READ, REEDS VALUE, ANALYZED (not enough evidence), or WATCHLIST — and the full track record stays public. No winner-only screenshots.</p>
-          <div className="mt-8 flex flex-wrap gap-3">
-            <Link className="rounded-xl bg-emerald-400 px-5 py-3 font-bold text-slate-950" href="/predictions">View today's reads</Link>
-            <Link className="rounded-xl border border-slate-700 px-5 py-3 font-bold" href="/history">Public track record</Link>
-            <Link className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-5 py-3 font-bold text-sky-200" href="/performance">Performance center</Link>
-            <Link className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-5 py-3 font-bold text-emerald-200" href="/how-it-works">How it works</Link>
-          </div>
-          {/* Live proof bar */}
-          <div className="mt-8 grid gap-3 sm:grid-cols-3">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-xs uppercase tracking-wide text-slate-500">Settled picks</p>
-              <p className="mt-1 text-2xl font-black">{trackRecordLabel}</p>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-xs uppercase tracking-wide text-slate-500">AI hit rate</p>
-              <p className="mt-1 text-2xl font-black text-emerald-300">{hitRateLabel}</p>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-xs uppercase tracking-wide text-slate-500">STRONG READs today</p>
-              <p className="mt-1 text-2xl font-black">{strongReads}</p>
-            </div>
-          </div>
-          {picks.length > 0 ? (
-            <div className="mt-4 flex flex-wrap gap-2 text-[11px] text-slate-500">
-              <span className="rounded-full border border-emerald-400/30 px-2 py-0.5 text-emerald-300">STRONG READ</span>
-              <span className="rounded-full border border-sky-400/30 px-2 py-0.5 text-sky-300">REEDS VALUE</span>
-              <span className="rounded-full border border-slate-600 px-2 py-0.5 text-slate-300">ANALYZED — not enough evidence yet</span>
-            </div>
-          ) : null}
-          {settled === 0 ? (
-            <p className="mt-3 text-xs text-slate-500">Track record is initializing from published picks only. We show pending/building states instead of fake proof.</p>
-          ) : null}
+          <p className="badge inline-flex">Today's intelligence</p>
+          <h1 className="mt-4 max-w-3xl text-4xl font-black leading-[1.03] tracking-[-.045em] text-white sm:text-6xl">Know what REEDS sees before the match starts.</h1>
+          <p className="mt-5 max-w-2xl text-base leading-7 text-slate-400 sm:text-lg">Clear predictions, the reasons behind them, and a record you can check. No hype. No winner-only history.</p>
+          <div className="mt-7 flex flex-wrap gap-2"><Link href="/predictions" className="rounded-xl bg-emerald-400 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-emerald-300">Explore today's reads</Link><Link href="/history" className="rounded-xl border border-white/10 bg-white/[0.03] px-5 py-3 text-sm font-bold text-slate-200 transition hover:bg-white/[0.06]">See the record</Link></div>
         </div>
-        <div className="card">
-          <h2 className="text-xl font-bold">Today's Intelligence</h2>
-          <p className="mt-1 text-sm text-slate-400">Highest-confidence AI reads on the board, each with its honest verdict.</p>
-          <div className="mt-4 space-y-3">{picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="rounded-2xl border border-dashed border-emerald-400/30 bg-emerald-400/5 p-5"><p className="font-bold text-emerald-200">AI reads are warming up.</p><p className="mt-2 text-sm text-slate-400">Reads appear after the scheduler generates published model analysis for upcoming fixtures. Provisional drafts stay clearly labelled as draft — not part of the tracked record.</p><div className="mt-4 flex flex-wrap gap-2"><Link href="/fixtures" className="rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs font-bold text-sky-200">Check fixtures</Link><Link href="/how-it-works" className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-bold text-amber-200">How the record works</Link></div></div>}</div>
-          {picks.length > 0 && <Link href="/predictions" className="mt-4 block text-center text-sm font-bold text-emerald-300">View the full board →</Link>}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-2">
+          <Stat label="Strong reads" value={strongReads} note="today" />
+          <Stat label="Settled" value={settled || "—"} note={settled ? "published picks" : "record building"} />
+          <Stat label="Hit rate" value={settled ? `${hitRate}%` : "—"} note={settled ? "live record" : "no settled sample yet"} />
+          <Stat label="Fixtures" value={fixtures.length} note="on the board" />
         </div>
       </section>
 
-      {/* Sports coverage */}
-      <section className="mt-12 card">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <p className="badge inline-block">Live coverage</p>
-            <h2 className="mt-4 text-3xl font-black">Sports on the board</h2>
-            <p className="mt-2 text-slate-400">Multi-sport coverage from free and paid feeds, blended so the board never goes dark.</p>
-          </div>
-          <Link href="/fixtures" className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-2 text-sm font-black text-emerald-200">Open match center</Link>
-        </div>
-        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {(sports.length ? sports : status?.sports || ["soccer", "basketball", "cricket"]).map((sport: string) => (
-            <Link key={sport} href={`/fixtures?sport=${encodeURIComponent(sport)}`} className="rounded-2xl border border-white/10 bg-slate-950/70 p-4 hover:border-emerald-400/30">
-              <p className="text-xs uppercase tracking-wide text-slate-500">Sport</p>
-              <h3 className="mt-1 text-xl font-black capitalize">{sport.replaceAll("_", " ")}</h3>
-              <p className="mt-1 text-sm text-emerald-300">{sportCounts[sport] || 0} upcoming</p>
-            </Link>
-          ))}
-        </div>
-        {showcase.length > 0 && (
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            {showcase.map((f: any) => (
-              <Link key={f.id} href={`/fixtures/${f.id}`} className="rounded-2xl border border-slate-800 bg-slate-950 p-4 hover:border-sky-400/30">
-                <p className="text-xs uppercase tracking-wide text-slate-500">{f.sport} • {f.league}</p>
-                <p className="mt-1 font-black">{f.home_team} vs {f.away_team}</p>
-                <p className="mt-1 text-xs text-slate-500">{f.match_date} • {f.source}</p>
-              </Link>
-            ))}
-          </div>
-        )}
+      <section className="mt-10">
+        <div className="flex items-end justify-between gap-4"><div><p className="section-kicker">The board</p><h2 className="section-title">Reads worth your attention</h2><p className="mt-2 max-w-xl text-sm text-slate-500">The headline is simple: what does REEDS lean toward, how confident is it, and why?</p></div><Link href="/predictions" className="hidden text-xs font-bold text-emerald-300 sm:block">View all reads →</Link></div>
+        {picks.length ? <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">{picks.map((p: any) => <PredictionCard key={p.id} p={p} />)}</div> : <div className="mt-5 rounded-2xl border border-dashed border-white/10 bg-slate-900/40 p-8 text-center"><p className="font-bold text-slate-200">No published reads yet.</p><p className="mt-2 text-sm text-slate-500">REEDS will show a read when the available evidence meets its publishing rules.</p><Link href="/fixtures" className="mt-5 inline-flex rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2.5 text-xs font-bold text-emerald-300">Browse fixtures</Link></div>}
       </section>
 
-      {/* Trust / transparency */}
-      <section className="mt-12 grid gap-5 md:grid-cols-3">
+      <section className="mt-12 grid gap-4 lg:grid-cols-[1.4fr_.6fr]">
         <div className="card">
-          <h3 className="font-bold text-emerald-300">Honest verdicts, not hype</h3>
-          <p className="mt-2 text-sm text-slate-300">Every read is labelled STRONG READ, REEDS VALUE, or ANALYZED — with the evidence or the reason it is not yet published. Watchlist states are shown instead of invented confidence.</p>
+          <div className="flex items-end justify-between gap-4"><div><p className="section-kicker">Coverage</p><h2 className="section-title">What's happening today</h2></div><Link href="/fixtures" className="text-xs font-bold text-slate-400 hover:text-white">All fixtures →</Link></div>
+          <div className="mt-5 grid gap-2 sm:grid-cols-2">{fixtures.slice(0, 8).map((f: any) => <Link key={f.id} href={`/fixtures/${f.id}`} className="rounded-xl border border-white/[0.06] bg-slate-950/50 p-3 transition hover:border-emerald-400/20"><div className="flex items-center justify-between gap-2"><span className="text-[10px] uppercase tracking-wide text-slate-600">{f.sport}</span><span className="text-[10px] text-slate-600">{f.match_date}</span></div><p className="mt-2 truncate text-sm font-bold text-slate-200">{f.home_team} <span className="font-normal text-slate-600">vs</span> {f.away_team}</p><p className="mt-1 truncate text-[11px] text-slate-600">{f.league}</p></Link>)}</div>
         </div>
         <div className="card">
-          <h3 className="font-bold text-emerald-300">Track record stays public</h3>
-          <p className="mt-2 text-sm text-slate-300">The track record page shows every past read with its result, filters by market and risk, and classifies LIVE RECORD vs backtest vs historical evaluation in plain sight.</p>
-        </div>
-        <div className="card">
-          <h3 className="font-bold text-emerald-300">Post-match accountability</h3>
-          <p className="mt-2 text-sm text-slate-300">After settlement REEDS explains what held and what failed, and repeated failure patterns are aggregated over many matches before any calibration change.</p>
+          <p className="section-kicker">Built for trust</p><h2 className="section-title">A prediction should survive scrutiny.</h2>
+          <div className="mt-5 space-y-4 text-sm text-slate-400"><div><p className="font-bold text-slate-200">Before the match</p><p className="mt-1">See the read, confidence, evidence and market context.</p></div><div><p className="font-bold text-slate-200">After the match</p><p className="mt-1">Wins and losses stay visible, with an explanation of what held up.</p></div><div><p className="font-bold text-slate-200">Over time</p><p className="mt-1">Calibration and performance are measured separately from backtests.</p></div></div>
+          <Link href="/how-it-works" className="mt-6 inline-flex text-xs font-bold text-emerald-300">How REEDS works →</Link>
         </div>
       </section>
 
-      {/* CTA */}
-      <section className="mt-12 card">
-        <div className="grid gap-6 md:grid-cols-2 md:items-center">
-          <div>
-            <p className="badge inline-block">Community</p>
-            <h2 className="mt-4 text-3xl font-black">Follow tipsters, copy wins.</h2>
-            <p className="mt-3 text-slate-300">See which community users are hot, follow them, and copy their verified picks. Post your own and build a public track record.</p>
-          </div>
-          <div className="flex flex-col gap-3">
-            <Link href="/community-leaderboard" className="rounded-xl bg-emerald-400 px-5 py-3 font-bold text-slate-950 text-center">Tipster Leaderboard</Link>
-            <Link href="/community/win-wall" className="rounded-xl border border-slate-700 px-5 py-3 font-bold text-center">Win Wall</Link>
-            <Link href="/predictions/submit" className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-5 py-3 font-bold text-emerald-200 text-center">+ Post your pick</Link>
-          </div>
-        </div>
-      </section>
+      <section className="mt-12"><div className="flex items-end justify-between"><div><p className="section-kicker">Sports</p><h2 className="section-title">Coverage on the board</h2></div></div><div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{(sports.length ? sports : status?.sports || []).map((sport: string) => <Link key={sport} href={`/fixtures?sport=${encodeURIComponent(sport)}`} className="rounded-2xl border border-white/[0.06] bg-slate-900/40 p-4 transition hover:border-emerald-400/20"><p className="text-xs font-bold capitalize text-slate-300">{sport.replaceAll("_", " ")}</p><p className="mt-1 text-[11px] text-slate-600">{sportCounts[sport] || 0} upcoming fixtures</p></Link>)}</div></section>
     </main>
   );
 }
