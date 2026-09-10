@@ -212,6 +212,9 @@ def start_scheduler() -> BackgroundScheduler:
         db = SessionLocal()
         try:
             result = sync_live_scores(db, settings.api_football_key or settings.api_sports_key, settings.api_basketball_key or settings.api_sports_key)
+            if settings.allsportsapi_key:
+                from app.services.live_scores import sync_allsports_live
+                result["allsports"] = sync_allsports_live(db, settings.allsportsapi_key, "football")
             if settings.the_odds_api_key:
                 odds = refresh_odds_from_the_odds_api(db, settings.the_odds_api_key, settings.odds_api_sport_keys)
                 result["odds_refreshed"] = odds.get("updated", 0)
@@ -220,7 +223,7 @@ def start_scheduler() -> BackgroundScheduler:
             db.rollback(); log.exception("Score sync failed")
         finally:
             db.close(); gc.collect()
-    scheduler.add_job(score_sync_job, "interval", minutes=15, id="score_sync", replace_existing=True, max_instances=1, coalesce=True)
+    scheduler.add_job(score_sync_job, "interval", seconds=30, id="score_sync", replace_existing=True, max_instances=1, coalesce=True)
 
     def live_event_job():
         from app.services.live_events import sync_live_events
