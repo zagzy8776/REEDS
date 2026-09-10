@@ -54,6 +54,8 @@ export default async function Performance() {
   const calibration = Array.isArray(perf.calibration) ? perf.calibration : [];
   const proof = stats.market_proof || {};
   const dataQuality = stats.data_quality || {};
+  const backtests = Array.isArray(stats.backtests) ? stats.backtests : [];
+  const models = Array.isArray(stats.models) ? stats.models : [];
   const statusOf = (b: any) => b?.status || "unavailable";
   const labels: Record<string, string> = {
     available: "Live", stale: "Stale", empty: "Empty", unavailable: "No data",
@@ -79,6 +81,49 @@ export default async function Performance() {
       <section className="mt-8">
         <h2 className="text-xl font-bold">Live tracked record</h2>
         <div className="mt-3"><SegmentCards segments={segments} note="Accuracy vs best league-average baseline; ROI/CLV from tracked odds only." /></div>
+      </section>
+
+      <section className="mt-8 rounded-2xl border border-sky-400/15 bg-sky-400/[0.04] p-5">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="text-xs font-black uppercase tracking-wider text-sky-300">Model evidence</p>
+            <h2 className="mt-1 text-xl font-bold">Backtests and model versions</h2>
+            <p className="mt-1 text-sm text-slate-400">These are validation artifacts, not proof of the live betting record. They stay deliberately separated from the live cards above.</p>
+          </div>
+          <span className="rounded-full border border-sky-400/20 px-3 py-1 text-xs font-bold text-sky-200">{backtests.length} backtest{backtests.length === 1 ? "" : "s"}</span>
+        </div>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <div className="rounded-xl border border-white/10 bg-slate-950/60 p-4">
+            <p className="text-xs font-black uppercase tracking-wider text-slate-500">Latest walk-forward evidence</p>
+            {backtests.length ? (
+              <div className="mt-3 space-y-2">
+                {backtests.slice(0, 6).map((b: any) => (
+                  <div key={b.id} className="rounded-lg border border-white/5 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <b className="text-slate-200">{b.sport} • {b.model_type}</b>
+                      <span className="text-sm font-bold text-sky-300">{digits(Number(b.accuracy || 0) * 100, 1)}%</span>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">{b.sample_size || 0} samples • {b.split_strategy || "walk-forward"}</p>
+                    <p className="mt-1 text-[11px] text-slate-600">Brier {digits(b.brier_score, 3)} • Log loss {digits(b.log_loss, 3)}</p>
+                  </div>
+                ))}
+              </div>
+            ) : <p className="mt-3 text-sm text-slate-500">No stored walk-forward backtests are available yet.</p>}
+          </div>
+          <div className="rounded-xl border border-white/10 bg-slate-950/60 p-4">
+            <p className="text-xs font-black uppercase tracking-wider text-slate-500">Registered model versions</p>
+            {models.length ? (
+              <div className="mt-3 space-y-2">
+                {models.slice(0, 8).map((m: any) => (
+                  <div key={m.id} className="flex items-center justify-between gap-3 rounded-lg border border-white/5 p-3 text-sm">
+                    <div><b className="text-slate-200">{m.sport}</b><p className="text-xs text-slate-500">{m.type} • {m.sample_size || 0} samples</p></div>
+                    <span className={m.active ? "text-emerald-300" : "text-slate-500"}>{m.active ? "Active" : "Inactive"}</span>
+                  </div>
+                ))}
+              </div>
+            ) : <p className="mt-3 text-sm text-slate-500">No registered production model versions are active.</p>}
+          </div>
+        </div>
       </section>
 
       <section className="mt-8 grid gap-5 md:grid-cols-4">
