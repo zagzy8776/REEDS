@@ -63,6 +63,27 @@ def alerts_latest(limit: int = 20, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Alerts unavailable") from exc
 
 
+@router.get("/stats/learning")
+def learning(min_sample: int = 12, gap: float = 12.0, db: Session = Depends(get_db)):
+    """Prediction Autopsy pattern engine: conditional overconfidence candidates.
+
+    Buckets thousands of stored autopsies (league, market, side, confidence,
+    defensive context) and proposes calibration adjustments. Proposals are
+    review candidates only — never automatically applied to the live model.
+    """
+    from app.services.autopsy import aggregate_patterns
+    from app.services.redis_cache import cache_get_or_set
+
+    def _build():
+        return aggregate_patterns(db, min_sample=max(5, int(min_sample)), gap_threshold=float(gap))
+
+    try:
+        return cache_get_or_set(f"stats:learning:v1:{int(min_sample)}:{float(gap):g}", 180, _build)
+    except Exception as exc:
+        log.exception("Learning pattern engine failed")
+        raise HTTPException(status_code=503, detail="Learning patterns unavailable") from exc
+
+
 @router.get("/stats/post-match/{prediction_id}")
 def post_match(prediction_id: int, db: Session = Depends(get_db)):
     from app.services.feedback import post_match_analysis

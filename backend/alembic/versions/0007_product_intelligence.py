@@ -30,6 +30,9 @@ def upgrade() -> None:
         sa.Column("final_score", sa.String(length=30), nullable=True),
         sa.Column("outcome_text", sa.String(length=160), nullable=True),
         sa.Column("error_type", sa.String(length=60), nullable=True),
+        sa.Column("error_classifications", sa.JSON(), nullable=True),
+        sa.Column("signal_attribution", sa.JSON(), nullable=True),
+        sa.Column("defense_strong", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("feature_snapshot", sa.JSON(), nullable=True),
         sa.Column("successful_signals", sa.JSON(), nullable=True),
         sa.Column("failed_signals", sa.JSON(), nullable=True),
@@ -48,6 +51,8 @@ def upgrade() -> None:
     op.create_index("ix_model_feedback_sport", "model_feedback", ["sport"])
     op.create_index("ix_model_feedback_market", "model_feedback", ["market"])
     op.create_index("ix_model_feedback_actual_result", "model_feedback", ["actual_result"])
+    op.create_index("ix_model_feedback_error_type", "model_feedback", ["error_type"])
+    op.create_index("ix_model_feedback_defense_strong", "model_feedback", ["defense_strong"])
     op.create_index("ix_model_feedback_feedback_status", "model_feedback", ["feedback_status"])
     op.create_index("ix_model_feedback_created_at", "model_feedback", ["created_at"])
     op.create_index("ix_model_feedback_updated_at", "model_feedback", ["updated_at"])
