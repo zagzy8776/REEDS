@@ -65,7 +65,31 @@ assert "DATABASE_URL" not in " ".join(sys.argv)
 
 def run(cmd: list[str], cwd: Path | None = None) -> None:
     print("$", " ".join(cmd), flush=True)
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+    proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None,
+                          capture_output=True, text=True)
+    if proc.stdout:
+        print(proc.stdout, end="", flush=True)
+    if proc.returncode != 0:
+        if proc.stderr:
+            print(proc.stderr, end="", flush=True)
+        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}")
+
+
+def pip_install(pkgs: list[str], cwd: Path | None) -> None:
+    attempts: list[list[str]] = [
+        [sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check"],
+        [sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+         "--break-system-packages"],  # PEP 668 externally-managed images (Debian/Ubuntu)
+    ]
+    last: Exception | None = None
+    for base in attempts:
+        try:
+            run(base + pkgs, cwd)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            print(f"pip attempt failed (will retry with --break-system-packages): {exc}", flush=True)
+    raise RuntimeError(f"pip install failed for {pkgs}") from last
 
 
 print("=== VERIFY CHECKOUT (no Git mutation) ===", flush=True)
@@ -88,9 +112,11 @@ print(f"Working on commit {current_commit.stdout.strip()} (taken as-is, Git stat
 BACKEND = WORKDIR / "backend"
 
 print("=== DEPENDENCIES (P0-only: no sklearn/joblib) ===", flush=True)
-run([sys.executable, "-m", "pip", "install", "-q",
-     "pandas", "SQLAlchemy==2.0.36", "psycopg[binary]==3.2.3",
-     "pydantic-settings==2.7.1", "python-dotenv", "requests"], BACKEND)
+pip_install(
+    ["pandas", "SQLAlchemy==2.0.36", "psycopg[binary]==3.2.3",
+     "pydantic-settings==2.7.1", "python-dotenv", "requests"],
+    BACKEND,
+)
 
 sys.path.insert(0, str(BACKEND))
 
@@ -143,12 +169,9 @@ before = snapshot("BEFORE P0")
 
 print("\n=== P0: RUN FDCO BACKFILL (download + load) ===", flush=True)
 try:
-    subprocess.run(
-        [sys.executable, "scripts/backfill_fcdo.py"],
-        cwd=str(BACKEND), check=True,
-    )
-except subprocess.CalledProcessError as exc:
-    print(f"backfill_fcdo exited {exc.returncode}; continuing with whatever loaded", flush=True)
+    run([sys.executable, "scripts/backfill_fcdo.py"], BACKEND)
+except RuntimeError:
+    print("backfill_fcdo failed; continuing with whatever loaded", flush=True)
 
 after = snapshot("AFTER P0")
 
@@ -240,7 +263,7 @@ run([sys.executable, "-m", "compileall", "-q", "backend"], WORKDIR)
 
 # Tests that are runnable with only pydantic-settings+sqlalchemy+pandas deps
 # (fastapi/sklearn/joblib tests are excluded — environment cannot install them).
-run([sys.executable, "-m", "pip", "install", "-q", "pytest"], WORKDIR)
+pip_install(["pytest"], WORKDIR)
 try:
     subprocess.run(
         [sys.executable, "-m", "pytest", "-q",
