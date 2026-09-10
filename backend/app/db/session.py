@@ -89,6 +89,22 @@ def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
 
+def init_db() -> None:
+    """Create tables and apply additive schema repairs at startup."""
+    from app.db import models  # noqa: F401
+    try:
+        from app.db.rejected_fixture import RejectedFixture  # noqa: F401
+    except Exception:
+        RejectedFixture = None  # type: ignore
+    Base.metadata.create_all(bind=engine)
+    if RejectedFixture is not None:
+        try:
+            Base.metadata.create_all(bind=engine, tables=[RejectedFixture.__table__])
+        except Exception:
+            pass
+    ensure_schema()
+
+
 def ensure_schema() -> None:
     inspector = inspect(engine)
     if "predictions" in inspector.get_table_names():
