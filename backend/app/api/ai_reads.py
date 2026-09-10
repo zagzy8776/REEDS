@@ -64,9 +64,7 @@ def _response(db: Session, fixture: Fixture, rows: list[tuple[Prediction, Fixtur
         "predictions": predictions,
         "intelligence": intelligence,
         "generation_queued": False,
-        "message": (
-            "AI Reads are probabilistic analysis, not guaranteed outcomes."
-        ),
+        "message": "AI Reads are probabilistic analysis, not guaranteed outcomes.",
         "responsible_note": "AI Reads are probabilistic analysis, not guaranteed outcomes.",
     }
 
@@ -85,10 +83,7 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
         query = (
             db.query(Prediction, Fixture)
             .join(Fixture, Prediction.fixture_id == Fixture.id)
-            .filter(
-                Prediction.fixture_id == fixture.id,
-                Prediction.status == "active",
-            )
+            .filter(Prediction.fixture_id == fixture.id, Prediction.status == "active")
             .order_by(Prediction.confidence.desc(), Prediction.market.asc())
         )
         if published_only is True:
@@ -97,6 +92,18 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
             query = query.filter(Prediction.is_published == False)
         return query.all()
 
+    # Exact Match Intelligence is an on-demand refresh boundary. Re-run the
+    # fixture with the expanded historical window before reading stored rows so
+    # stale 90/180-day default-driven drafts are not treated as authoritative.
+    if fixture.match_date >= date.today():
+        try:
+            from app.services.fixture_prediction import generate_fixture_predictions
+            generated = generate_fixture_predictions(db, fixture.id)
+            log.info("Exact AI Reads refresh: fixture=%s generated=%s", fixture.id, generated)
+        except Exception:
+            db.rollback()
+            log.exception("Exact AI Reads refresh failed for fixture %s", fixture.id)
+
     published = _rows(published_only=True)
     if published:
         return _response(db, fixture, published, "ready")
@@ -104,37 +111,8 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
     draft = _rows(published_only=False)
     if draft:
         response = _response(db, fixture, draft, "draft")
-        response["message"] = (
-            "Draft analysis — generated for this exact match but not yet part "
-            "of the public tracked record. These reads are provisional until "
-            "empirical evidence unlocks publication."
-        )
+        response["message"] = "Early read — generated for this exact match, but it is not yet part of the public tracked record."
         return response
-
-    if fixture.match_date >= date.today():
-        # Generate this one fixture directly rather than depending on the
-        # global 50-fixture prediction cap. A single Match Hub/AI Reads click
-        # should always have an exact on-demand path.
-        try:
-            from app.services.fixture_prediction import generate_fixture_predictions
-            generated = generate_fixture_predictions(db, fixture.id)
-            log.info("Exact AI Reads generation: fixture=%s generated=%s", fixture.id, generated)
-        except Exception:
-            db.rollback()
-            log.exception("Exact AI Reads generation failed for fixture %s", fixture.id)
-
-        published = _rows(published_only=True)
-        if published:
-            return _response(db, fixture, published, "ready")
-        draft = _rows(published_only=False)
-        if draft:
-            response = _response(db, fixture, draft, "draft")
-            response["message"] = (
-                "Draft analysis — generated for this exact match but not yet part "
-                "of the public tracked record. These reads are provisional until "
-                "empirical evidence unlocks publication."
-            )
-            return response
 
     return {
         "status": "preparing" if fixture.match_date >= date.today() else "unavailable",
