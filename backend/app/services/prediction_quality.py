@@ -29,9 +29,6 @@ MARKET_MIN_CONFIDENCE = {
     "Correct Score": 101.0,
 }
 
-# Edge is represented by the engines as percentage points in several places
-# (for example, 6.5 means 6.5%). Accept fractional 0..1 payloads too, but
-# normalize them before applying the publication threshold.
 MIN_EDGE_PERCENT = 2.5
 HIGH_CONFIDENCE = 72.0
 MIN_HIGH_CONFIDENCE_SAMPLE = 200
@@ -47,7 +44,6 @@ def _finite(value: object, default: float = 0.0) -> float:
 
 def _edge_percent(value: object) -> float:
     edge = abs(_finite(value))
-    # Treat a small 0..1 value as a probability-style fraction.
     return edge * 100.0 if 0.0 < edge <= 1.0 else edge
 
 
@@ -61,6 +57,43 @@ def _sample_size(item: dict) -> int:
             except (TypeError, ValueError):
                 pass
     return 0
+
+
+def _default_driven(item: dict) -> bool:
+    """Detect the known soccer cold-start output instead of presenting it as analysis.
+
+    The soccer engine has explicit neutral priors when neither side has usable
+    historical evidence. Those priors are intentionally conservative, but they
+    are not match-specific signals and must not become customer-facing picks.
+    """
+    meta = item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else {}
+    summary = str(meta.get("summary") or "").lower()
+    if "no completed" in summary and "history" in summary:
+        return True
+
+    factors = meta.get("factors") if isinstance(meta.get("factors"), list) else []
+    values = {
+        str(f.get("label")): f.get("value")
+        for f in factors
+        if isinstance(f, dict) and f.get("label")
+    }
+    try:
+        home_form = float(values.get("Home form points"))
+        away_form = float(values.get("Away form points"))
+        elo_gap = float(values.get("Elo gap"))
+        projected = float(values.get("Projected goals"))
+        # These are the exact neutral priors currently used by the soccer
+        # feature builder when team history is absent.
+        if (
+            abs(home_form - 1.2) < 0.001
+            and abs(away_form - 1.2) < 0.001
+            and abs(elo_gap) < 0.1
+            and abs(projected - 2.45) < 0.02
+        ):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
 
 
 def evaluate_publication(item: dict) -> tuple[bool, list[str]]:
@@ -80,11 +113,12 @@ def evaluate_publication(item: dict) -> tuple[bool, list[str]]:
         reasons.append("high-risk classification")
     if edge_percent < MIN_EDGE_PERCENT:
         reasons.append(f"model edge is below {MIN_EDGE_PERCENT:.1f}%")
+    if _default_driven(item):
+        reasons.append("team-specific historical evidence is insufficient; neutral/default priors were used")
 
     if confidence >= HIGH_CONFIDENCE and _sample_size(item) < MIN_HIGH_CONFIDENCE_SAMPLE:
         reasons.append("high confidence requires deeper supporting data")
 
-    # Reject impossible probability payloads if the engine exposes them.
     meta = item.get("engine_meta") if isinstance(item.get("engine_meta"), dict) else {}
     probabilities = meta.get("probabilities")
     if isinstance(probabilities, dict) and probabilities:
