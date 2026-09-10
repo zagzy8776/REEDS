@@ -81,14 +81,35 @@ export default async function FixtureAIReads({ params }: { params: Promise<{ id:
           <div className="text-left md:text-right"><p className="text-xl font-black text-white sm:text-3xl">{f.away_team}</p><p className="mt-1 text-xs text-slate-600">Away</p></div>
         </div>
       </section>
-      {data.status === "preparing" ? <section className="card mt-6 border-amber-400/15"><p className="section-kicker">Almost ready</p><h2 className="section-title">REEDS is preparing this match.</h2><p className="mt-2 text-sm leading-6 text-slate-500">The fixture is known, but its analysis isn't ready yet. Check back shortly.</p></section> : <>
-        <section className="mt-8">
-          <div className="flex items-end justify-between gap-4"><div><p className="section-kicker">The read</p><h2 className="section-title">What REEDS sees</h2><p className="mt-2 text-sm text-slate-500">Start with the decision. Open a card only when you want the evidence.</p></div><span className="text-xs text-slate-600">{picks.length} read{picks.length === 1 ? "" : "s"}</span></div>
-          {data.status === "draft" && <div className="mt-4 rounded-2xl border border-amber-400/15 bg-amber-400/[0.05] p-4 text-sm text-slate-400"><span className="font-bold text-amber-300">Early read.</span> REEDS has generated this analysis, but the evidence is not strong enough to treat it as a published recommendation.</div>}
-          <div className="mt-5 grid gap-5 md:grid-cols-2">{picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="card text-sm text-slate-500">No public reads for this match yet.</div>}</div>
+      {data.status === "preparing" || data.status === "insufficient_data" ? (
+        <section className="card mt-6 border-amber-400/15">
+          <p className="section-kicker">REEDS intelligence check</p>
+          <h2 className="section-title">This match is detected.</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-400">Analysis unavailable until evidence reaches the required threshold.</p>
+          <ul className="mt-5 space-y-2 text-sm">
+            <li className="flex items-center gap-2 text-emerald-300"><span aria-hidden>✓</span> Fixture found</li>
+            <li className={`flex items-center gap-2 ${data.evidence_checklist?.league_identified !== false ? "text-emerald-300" : "text-rose-300"}`}>
+              <span aria-hidden>{data.evidence_checklist?.league_identified !== false ? "✓" : "✕"}</span> League identified
+            </li>
+            <li className={`flex items-center gap-2 ${data.evidence_checklist?.odds_present ? "text-emerald-300" : "text-rose-300"}`}>
+              <span aria-hidden>{data.evidence_checklist?.odds_present ? "✓" : "✕"}</span> Odds market
+            </li>
+            <li className={`flex items-center gap-2 ${data.evidence_checklist?.history_present ? "text-emerald-300" : "text-rose-300"}`}>
+              <span aria-hidden>{data.evidence_checklist?.history_present ? "✓" : "✕"}</span> Historical team data
+            </li>
+          </ul>
+          <p className="mt-4 text-xs text-slate-500">REEDS will publish when evidence reaches the required threshold.</p>
         </section>
-        <Timeline intelligence={data.intelligence} />
-      </>}
+      ) : (
+        <>
+          <section className="mt-8">
+            <div className="flex items-end justify-between gap-4"><div><p className="section-kicker">The read</p><h2 className="section-title">What REEDS sees</h2><p className="mt-2 text-sm text-slate-500">Start with the decision. Open a card only when you want the evidence.</p></div><span className="text-xs text-slate-600">{picks.length} read{picks.length === 1 ? "" : "s"}</span></div>
+            {data.status === "draft" && <div className="mt-4 rounded-2xl border border-amber-400/15 bg-amber-400/[0.05] p-4 text-sm text-slate-400"><span className="font-bold text-amber-300">Early read.</span> REEDS has generated this analysis, but the evidence is not strong enough to treat it as a published recommendation.</div>}
+            <div className="mt-5 grid gap-5 md:grid-cols-2">{picks.length ? picks.map((p: any) => <PredictionCard key={p.id} p={p} />) : <div className="card text-sm text-slate-500">No public reads for this match yet.</div>}</div>
+          </section>
+          <Timeline intelligence={data.intelligence} />
+        </>
+      )}
       {data.responsible_note && <section className="responsible-note mt-8">{data.responsible_note}</section>}
     </main>
   );
