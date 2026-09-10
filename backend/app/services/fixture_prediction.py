@@ -37,6 +37,24 @@ def generate_fixture_predictions(db: Session, fixture_id: int) -> int:
     if not fx:
         return 0
 
+    from app.services.fixture_quality import prediction_readiness
+
+    readiness = prediction_readiness(db, fx)
+    if not readiness.get("ready"):
+        log.info(
+            "Skipping prediction for fixture %s — not ready: %s",
+            fixture_id,
+            readiness.get("reason"),
+        )
+        extra = dict(fx.extra or {}) if isinstance(fx.extra, dict) else {}
+        extra["prediction_readiness"] = readiness
+        fx.extra = extra
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        return 0
+
     # Current-day fixtures can sit between seasons. Keep a bounded two-year
     # history window so the engine does not silently fall back to league-average
     # defaults just because the last 180 days contain no completed matches.
