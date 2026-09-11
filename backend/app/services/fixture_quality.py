@@ -35,6 +35,19 @@ BAD_WORDS = [
     "login",
     "gdpr",
     "consent",
+    "user id",
+    "legitima",
+    "object to",
+    "view illustrations",
+    "livescore",
+    "webpage",
+    "identifier",
+    "precise location",
+    "non vs",
+    "advertising content",
+    "intended audience",
+    "floating icon",
+    "this is very helpful",
 ]
 
 
@@ -53,6 +66,10 @@ def clean_team_name(name: str | None) -> str | None:
             return None
     alpha = sum(1 for ch in cleaned if ch.isalpha())
     if alpha < 2:
+        return None
+    if any(tok in cleaned for tok in ("**", "#####", "http://", "https://", "www.", "[", "]")):
+        return None
+    if cleaned.count(" ") >= 6:
         return None
     return cleaned
 
@@ -159,6 +176,7 @@ def prediction_readiness(db: Session, fixture) -> dict:
     if history_count <= 0:
         reasons.append("Insufficient team form / no completed history")
 
+    # Future booking allowed when teams are real and we have either odds OR history
     ready = checks["teams_valid"] and checks["league_identified"] and (
         checks["odds_present"] or checks["history_present"]
     )
