@@ -32,7 +32,10 @@ def _fixture_payload(fixture: Fixture) -> dict:
         "home_odds": fixture.home_odds,
         "draw_odds": fixture.draw_odds,
         "away_odds": fixture.away_odds,
-        "has_odds": any(v is not None for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds)),
+        "has_odds": (
+            (extra.get("odds_source") != "model_implied")
+            and any(v is not None for v in (fixture.home_odds, fixture.draw_odds, fixture.away_odds))
+        ),
         "status": extra.get("status"),
         "elapsed": extra.get("elapsed"),
         "is_live": bool(extra.get("live")) or str(extra.get("status", "")).upper() in _LIVE_STATUSES,
@@ -115,14 +118,22 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
             rows = [row for row in rows if _supported_draft(row[0])]
         return rows
 
-    if fixture.match_date >= date.today():
+    # Only generate when this fixture has zero active predictions.
+    # Regenerating on every page view caused hangs and version spam (v12→v13…).
+    existing_active = (
+        db.query(Prediction.id)
+        .filter(Prediction.fixture_id == fixture.id, Prediction.status == "active")
+        .limit(1)
+        .first()
+    )
+    if fixture.match_date >= date.today() and existing_active is None:
         try:
             from app.services.fixture_prediction import generate_fixture_predictions
             generated = generate_fixture_predictions(db, fixture.id)
-            log.info("Exact AI Reads refresh: fixture=%s generated=%s", fixture.id, generated)
+            log.info("Exact AI Reads first-time generate: fixture=%s generated=%s", fixture.id, generated)
         except Exception:
             db.rollback()
-            log.exception("Exact AI Reads refresh failed for fixture %s", fixture.id)
+            log.exception("Exact AI Reads generate failed for fixture %s", fixture.id)
 
     published = _rows(published_only=True)
     if published:
