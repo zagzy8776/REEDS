@@ -1,5 +1,8 @@
 """REEDS Kaggle training worker.
 
+Legacy/fallback training worker — the primary path is the EC2 worker
+(backend/scripts/ec2_train_worker.py). Kept intact for fallback use.
+
 Kaggle provides compute; Render remains the production API and model registry.
 Secrets are read from Kaggle User Secrets and are never printed.
 """
