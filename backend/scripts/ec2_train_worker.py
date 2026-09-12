@@ -1,16 +1,21 @@
 """REEDS EC2 training worker (first AWS milestone).
 
 Primary training path: EC2 -> full OOF ensemble (train_oof.py) -> artifacts ->
-Render upload endpoints -> Render model registry -> Render predictions.
+unique GitHub 'models-v*' release -> Render sync-models-safe (streamed GitHub ->
+Render disk, never materialized in Render RAM) -> Render model registry.
+Legacy direct upload (EC2_UPLOAD_STRATEGY=direct) posts straight to the Render
+upload endpoints and is kept only as an explicit opt-in fallback.
 Kaggle remains the legacy/fallback worker and is untouched.
 
 Commands:
   validate    Config + connectivity dry-run. Nothing is trained or uploaded.
   train       Train ONE sport in this process with the production OOF ensemble,
-              write the bundle + sidecar JSON, then upload to Render unless
+              write the bundle + sidecar JSON, then publish + sync Render unless
               --skip-upload is given.
-  upload      Upload an EXISTING artifact + matching sidecar to Render. No training.
-              --verify deserializes and structurally checks the bundle locally first.
+  upload      Publish an EXISTING artifact + matching sidecar to a GitHub
+              'models-v*' release and sync Render (no training). Set
+              EC2_UPLOAD_STRATEGY=direct for the legacy direct-upload path.
+              --verify deserializes and structurally checks the bundle first.
   run-all     Train every sport sequentially, each in its own child process so
               the OS reclaims memory completely between sports. Never concurrent.
 
@@ -93,6 +98,19 @@ def _peak_rss_sampler(stop: threading.Event) -> None:
 def _missing(vars_ref) -> list[str]:
     names = list(vars_ref)
     return [name for name in names if not os.environ.get(name, "").strip()]
+
+
+def _require_upload_env() -> list[str]:
+    """Env NAMES required to ship an artifact, by strategy (returned, never values).
+
+    github (default): GITHUB_TOKEN is needed to publish the release plus the
+    Render pair for /api/admin/sync-models-safe. direct (legacy): Render only.
+    """
+    strategy = os.environ.get("EC2_UPLOAD_STRATEGY", "github").strip().lower()
+    required = ["RENDER_URL", "ADMIN_API_KEY"]
+    if strategy != "direct":
+        required.insert(0, "GITHUB_TOKEN")
+    return [name for name in required if not os.environ.get(name, "").strip()]
 
 
 def _redact(text) -> str:
@@ -195,15 +213,131 @@ def _read_sidecar(artifact: Path) -> dict:
     return payload
 
 
+def _github_headers() -> dict:
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError(
+            "GITHUB_TOKEN is not set; required for GitHub-release publishing. "
+            "Add GITHUB_TOKEN to /etc/reeds.env (Contents: Read & write on the REEDS repo)."
+        )
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+
+
+def _publish_github_release(artifact: Path, sidecar: Path, sport: str) -> str:
+    """Publish the artifact (.joblib) + sidecar (.json) to a unique GitHub release.
+
+    Tag format 'models-v<UTC-timestamp>-<sport>' is unique per publish, which is
+    what sync-models-safe / bootstrap expect ('models-v*'). The release is
+    created first and deleted again if either asset upload fails so a broken
+    release never becomes 'releases[0]' for /api/admin/sync-models-safe. Raises
+    RuntimeError on any failure so a failed publish can never be mistaken for a
+    successful Render sync. The token is only ever sent as a header; it is never
+    logged.
+    """
+    import requests
+    repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS").strip() or "zagzy8776/REEDS"
+    headers = _github_headers()
+    tag = f"models-v{time.strftime('%Y%m%d%H%M%S')}-{sport}"
+    creation = requests.post(
+        f"https://api.github.com/repos/{repo}/releases",
+        headers=headers,
+        json={
+            "tag_name": tag,
+            "name": f"REEDS model: {sport}",
+            "body": f"Full OOF ensemble artifact for {sport}",
+            "draft": False,
+            "prerelease": False,
+        },
+        timeout=30,
+    )
+    if not creation.ok:
+        raise RuntimeError(f"GitHub release creation failed: HTTP {creation.status_code}")
+    release = creation.json()
+    release_id = release.get("id")
+    upload_url = str(release.get("upload_url", "")).replace("{?name,label}", "")
+
+    def _upload_asset(path: Path, content_type: str) -> None:
+        with path.open("rb") as handle:
+            uploaded = requests.post(
+                f"{upload_url}?name={path.name}",
+                headers={**headers, "Content-Type": content_type},
+                data=handle,
+                timeout=300,
+            )
+        if not uploaded.ok:
+            raise RuntimeError(f"GitHub asset upload failed for {path.name}: HTTP {uploaded.status_code}")
+
+    try:
+        _upload_asset(artifact, "application/octet-stream")
+        if sidecar.is_file():
+            _upload_asset(sidecar, "application/json")
+    except Exception:
+        if release_id:
+            try:
+                requests.delete(
+                    f"https://api.github.com/repos/{repo}/releases/{release_id}",
+                    headers=headers,
+                    timeout=30,
+                )
+            except Exception:
+                pass
+        raise
+    return tag
+
+
+def _upload_direct(artifact: Path, sport: str, model_type: str, accuracy: float, sample_size: int) -> None:
+    """Legacy opt-in strategy (EC2_UPLOAD_STRATEGY=direct): stream to Render's endpoints."""
+    _wait_for_render_ready()
+
+    with artifact.open("rb") as handle:
+        response = _post(
+            "/api/admin/upload-model",
+            timeout=300,
+            retries=12,
+            files={"model": (artifact.name, handle, "application/octet-stream")},
+            data={
+                "sport": sport,
+                "model_type": model_type,
+                "accuracy": str(accuracy),
+                "sample_size": str(sample_size),
+            },
+        )
+    print(f"[upload] upload-model: {response.json()}", flush=True)
+
+    sidecar = artifact.with_suffix(".json")
+    if not sidecar.is_file():
+        return
+    metadata_payload = dict(_read_sidecar(artifact))
+    metadata_payload["sport"] = sport
+    metadata_payload["filename"] = artifact.name
+    import io
+    with io.BytesIO(json.dumps(metadata_payload).encode("utf-8")) as buffer:
+        payload = _post(
+            "/api/admin/upload-model-metadata",
+            timeout=60,
+            retries=3,
+            files={"metadata": (artifact.name.replace(".joblib", ".json"), buffer, "application/json")},
+            data={"sport": sport},
+        )
+    print(f"[upload] upload-model-metadata: {payload.json()}", flush=True)
+
+
 def _upload_artifact(artifact: Path, sport: str | None) -> None:
-    """Upload one artifact + sidecar through the existing Render endpoints."""
+    """Ship one artifact + sidecar to production.
+
+    Default (EC2_UPLOAD_STRATEGY=github): publish the artifact + sidecar to a
+    unique GitHub 'models-v*' release, then ask Render to sync-models-safe. The
+    53 MiB payload is streamed GitHub -> Render disk and is never materialized
+    in Render RAM. Legacy (EC2_UPLOAD_STRATEGY=direct) streams straight to the
+    Render upload endpoints.
+    """
     artifact = artifact.resolve()
     if not artifact.is_file() or artifact.stat().st_size <= 0:
         raise RuntimeError(f"Artifact missing or empty: {artifact}")
     size_mb = artifact.stat().st_size / (1024 * 1024)
     print(f"[upload] artifact={artifact.name} size={size_mb:.1f} MiB", flush=True)
     if size_mb > 90:
-        print("[upload] WARNING: artifact is near the 100 MiB Render upload cap; may be rejected", flush=True)
+        print("[upload] WARNING: artifact is near the 100 MiB upload cap; prefer EC2_UPLOAD_STRATEGY=github", flush=True)
 
     meta = _read_sidecar(artifact)
     target_sport = str(sport or meta.get("sport") or "").strip().lower()
@@ -217,38 +351,23 @@ def _upload_artifact(artifact: Path, sport: str | None) -> None:
     if sample_size <= 0:
         raise RuntimeError(f"Invalid sample_size in sidecar: {sample_size}")
 
-    _wait_for_render_ready()
-
-    with artifact.open("rb") as handle:
-        response = _post(
-            "/api/admin/upload-model",
-            timeout=300,
-            retries=12,
-            files={"model": (artifact.name, handle, "application/octet-stream")},
-            data={
-                "sport": target_sport,
-                "model_type": model_type,
-                "accuracy": str(accuracy),
-                "sample_size": str(sample_size),
-            },
-        )
-    print(f"[upload] upload-model: {response.json()}", flush=True)
+    strategy = os.environ.get("EC2_UPLOAD_STRATEGY", "github").strip().lower()
+    if strategy == "direct":
+        _upload_direct(artifact, target_sport, model_type, accuracy, sample_size)
+        return
+    if strategy != "github":
+        raise RuntimeError(f"Unknown EC2_UPLOAD_STRATEGY={strategy!r}; use 'github' (default) or 'direct'")
 
     sidecar = artifact.with_suffix(".json")
-    if sidecar.is_file():
-        metadata_payload = dict(meta)
-        metadata_payload["sport"] = target_sport
-        metadata_payload["filename"] = artifact.name
-        import io
-        with io.BytesIO(json.dumps(metadata_payload).encode("utf-8")) as buffer:
-            payload = _post(
-                "/api/admin/upload-model-metadata",
-                timeout=60,
-                retries=3,
-                files={"metadata": (artifact.name.replace(".joblib", ".json"), buffer, "application/json")},
-                data={"sport": target_sport},
-            )
-        print(f"[upload] upload-model-metadata: {payload.json()}", flush=True)
+    tag = _publish_github_release(artifact, sidecar, target_sport)
+    print(f"[upload] published GitHub release {tag}", flush=True)
+
+    _wait_for_render_ready()
+    sync = _post("/api/admin/sync-models-safe", timeout=600, retries=12)
+    sync_body = sync.json()
+    if str(sync_body.get("status")) != "success":
+        raise RuntimeError(f"Render sync-models-safe did not succeed: status={sync_body.get('status')!r}")
+    print(f"[upload] sync-models-safe OK (release {tag}): {sync_body}", flush=True)
 
 
 def _write_sidecar(result: dict, artifact: Path) -> None:
@@ -322,6 +441,7 @@ def _cmd_validate(_args) -> int:
     _setup_app_env()
     print("== REEDS EC2 worker validation (dry-run; no training, no upload) ==")
     print(f"MODEL_DIR={Path(os.environ['MODEL_DIR'])}")
+    print(f"upload strategy: EC2_UPLOAD_STRATEGY={os.environ.get('EC2_UPLOAD_STRATEGY', 'github')}")
 
     try:
         import sklearn
@@ -400,7 +520,7 @@ def _cmd_train(args) -> int:
         return EXIT_CONFIG
 
     if not args.skip_upload:
-        missing = _missing(("RENDER_URL", "ADMIN_API_KEY"))
+        missing = _require_upload_env()
         if missing:
             print(f"Missing required environment variable(s) for upload: {', '.join(missing)}", file=sys.stderr)
             print("Set them before training, or pass --skip-upload to train locally only.", file=sys.stderr)
@@ -529,6 +649,10 @@ def _cmd_upload(args) -> int:
     if sport not in SPORTS:
         print(f"Unknown sport: {sport}. Valid: {', '.join(SPORTS)}", file=sys.stderr)
         return EXIT_CONFIG
+    missing = _require_upload_env()
+    if missing:
+        print(f"Missing required environment variable(s) for upload: {', '.join(missing)}", file=sys.stderr)
+        return EXIT_CONFIG
     if not artifact.is_file() or artifact.stat().st_size <= 0:
         print(f"Artifact missing or empty: {artifact}", file=sys.stderr)
         return EXIT_CONFIG
@@ -605,7 +729,7 @@ def _main(argv=None) -> int:
     p_train.add_argument("--skip-upload", action="store_true", help="Train and write artifacts only; do not contact Render")
     p_train.set_defaults(func=_cmd_train)
 
-    p_upload = sub.add_parser("upload", help="Upload an existing artifact + sidecar to Render (no training)")
+    p_upload = sub.add_parser("upload", help="Publish an existing artifact + sidecar to GitHub and sync Render (no training)")
     p_upload.add_argument("--sport", required=True)
     p_upload.add_argument("--artifact", required=True)
     p_upload.add_argument("--verify", action="store_true",

@@ -117,7 +117,6 @@ async def upload_model(
     fd, temp_name = tempfile.mkstemp(prefix="reeds-upload-", suffix=".joblib", dir=str(model_dir))
     os.close(fd)
     temp_path = Path(temp_name)
-    payload = None
     try:
         total = 0
         max_bytes = 100 * 1024 * 1024
@@ -148,16 +147,20 @@ async def upload_model(
         if final_sample_size <= 0:
             raise HTTPException(status_code=400, detail="Invalid model sample size")
 
-        payload = temp_path.read_bytes()
         destination = model_dir / filename
         os.replace(temp_path, destination)
 
+        # The full artifact bytes stay on Render disk only; Neon stores a
+        # metadata row with an empty payload. _restore_from_neon skips empty
+        # blobs and the GitHub release fallback re-materializes the file, so a
+        # full container rebuild never loses the model and no 53 MiB blob is
+        # ever materialized in the request process on this 512 MiB instance.
         existing = db.query(ModelArtifact).filter_by(sport=final_sport, filename=filename).first()
         if existing:
             existing.model_type = final_type
             existing.accuracy = final_accuracy
             existing.sample_size = final_sample_size
-            existing.data = payload
+            existing.data = b""
         else:
             db.add(ModelArtifact(
                 sport=final_sport,
@@ -165,7 +168,7 @@ async def upload_model(
                 model_type=final_type,
                 accuracy=final_accuracy,
                 sample_size=final_sample_size,
-                data=payload,
+                data=b"",
             ))
         db.flush()
         mv = register_model(
@@ -196,7 +199,6 @@ async def upload_model(
         raise HTTPException(status_code=400, detail=f"Model upload failed: {str(exc)[:300]}") from exc
     finally:
         temp_path.unlink(missing_ok=True)
-        payload = None
         gc.collect()
 
 
@@ -312,13 +314,13 @@ def sync_models_safe(db: Session = Depends(get_db)):
                 os.replace(source, destination)
                 installed.append({"file": destination.name, **metadata})
                 db.query(ModelArtifact).filter_by(sport=metadata["sport"], filename=destination.name).delete()
-                payload = destination.read_bytes()
+                # Neon row is metadata-only; the file is already on Render disk
+                # (streamed from GitHub) and _restore_from_neon skips empty blobs.
                 db.add(ModelArtifact(
                     sport=metadata["sport"], filename=destination.name,
                     model_type=metadata["model_type"], accuracy=metadata["accuracy"],
-                    sample_size=metadata["sample_size"], data=payload,
+                    sample_size=metadata["sample_size"], data=b"",
                 ))
-                del payload
             for item in installed:
                 path = str(model_dir / item["file"])
                 mv = register_model(db, item["sport"], item["model_type"], path, item["accuracy"], item["sample_size"])
