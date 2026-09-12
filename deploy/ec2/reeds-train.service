@@ -1,0 +1,23 @@
+# REEDS EC2 training worker — systemd unit (installed but NOT enabled/started).
+#
+# Manual test before enabling:
+#   sudo systemctl daemon-reload
+#   sudo systemctl start reeds-train       # run once, watch: journalctl -u reeds-train -f
+#   sudo systemctl disable reeds-train     # if you only wanted a one-off run
+[Unit]
+Description=REEDS EC2 full OOF training worker (run-all)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/REEDS/backend
+EnvironmentFile=/etc/reeds.env
+ExecStart=/home/ubuntu/reeds-venv/bin/python /home/ubuntu/REEDS/backend/scripts/ec2_train_worker.py run-all
+StandardOutput=append:/home/ubuntu/REEDS/deploy/ec2/logs/run-all.out
+StandardError=append:/home/ubuntu/REEDS/deploy/ec2/logs/run-all.err
+
+# Oneshot units are never started automatically just by existing.
+[Install]
+WantedBy=multi-user.target
