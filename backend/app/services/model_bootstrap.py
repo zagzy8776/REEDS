@@ -69,6 +69,8 @@ def _restore_from_neon(db: Session, model_dir: Path) -> list[dict]:
         if artifact is None or not artifact.data:
             continue
         destination = model_dir / Path(artifact.filename).name
+        if destination.is_file() and destination.stat().st_size > 0:
+            continue
         temp_path = destination.with_suffix(destination.suffix + ".tmp")
         payload = artifact.data
         try:
