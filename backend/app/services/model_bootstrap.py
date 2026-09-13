@@ -35,6 +35,21 @@ SPORTS = ("american_football", "basketball", "baseball", "soccer", "tennis", "ho
 # generous safety ceiling while still rejecting obviously runaway uploads.
 MAX_ARTIFACT_BYTES = 250 * 1024 * 1024
 
+# Public fallback for the existing soccer ensemble release. The normal path is
+# the GitHub Releases API; this direct asset keeps production model restore alive
+# when an unauthenticated GitHub API request is rate-limited or unavailable.
+STATIC_RELEASE_ASSETS = [
+    {
+        "sport": "soccer",
+        "name": "soccer_ensemble_random_forest.gradient_boosting.xgboost.lightgbm.neural_net_20260622140036_slim.joblib",
+        "download_url": "https://github.com/zagzy8776/REEDS/releases/download/models-v20260622160300/soccer_ensemble_random_forest.gradient_boosting.xgboost.lightgbm.neural_net_20260622140036_slim.joblib",
+        "release": "models-v20260622160300",
+        "model_type": "ensemble",
+        "accuracy": 0.495,
+        "sample_size": 24019,
+    },
+]
+
 
 def install_quality_training() -> None:
     return None
@@ -83,7 +98,7 @@ def _verify_sha256(artifact: Path, metadata: dict) -> None:
     actual = _sha256_file(artifact)
     if actual != expected:
         raise RuntimeError(
-            f"SHA-256 mismatch for {artifact.name}: expected {expected[:16]}..., got {actual[:16]}..."
+            f"SHA-256 mismatch for {artifact}: expected {expected[:16]}..., got {actual[:16]}..."
         )
 
 
@@ -99,11 +114,13 @@ def _github_releases(settings, token: str) -> list[dict]:
             timeout=20,
         )
         response.raise_for_status()
+        releases = [r for r in response.json() if str(r.get("tag_name", "")).startswith("models-v")]
+        releases.sort(key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
+        if releases:
+            return releases
     except Exception:
-        return []
-    releases = [r for r in response.json() if str(r.get("tag_name", "")).startswith("models-v")]
-    releases.sort(key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
-    return releases
+        pass
+    return []
 
 
 def _latest_assets_per_sport(releases: list[dict]) -> dict[str, dict]:
@@ -129,6 +146,9 @@ def _latest_assets_per_sport(releases: list[dict]) -> dict[str, dict]:
                 "download_url": asset.get("browser_download_url"),
                 "sidecar": sidecar.get("browser_download_url") if sidecar else None,
                 "release": release.get("tag_name"),
+                "model_type": release.get("model_type"),
+                "accuracy": release.get("accuracy"),
+                "sample_size": release.get("sample_size"),
             }
     return by_sport
 
@@ -163,9 +183,12 @@ def _restore_from_github(db: Session, model_dir: Path) -> list[dict]:
         headers["Authorization"] = f"Bearer {token}"
 
     releases = _github_releases(settings, token)
-    if not releases:
-        return []
-    assets = _latest_assets_per_sport(releases)
+    assets = _latest_assets_per_sport(releases) if releases else {}
+    if not assets:
+        assets = {
+            item["sport"]: item
+            for item in STATIC_RELEASE_ASSETS
+        }
     if not assets:
         return []
 
@@ -185,7 +208,6 @@ def _restore_from_github(db: Session, model_dir: Path) -> list[dict]:
         try:
             _download_streamed(asset["download_url"], headers, temp_path)
 
-            # Size sanity (no deserialization).
             if not temp_path.is_file() or temp_path.stat().st_size <= 0:
                 raise RuntimeError("artifact file is missing or empty after download")
 
@@ -198,6 +220,13 @@ def _restore_from_github(db: Session, model_dir: Path) -> list[dict]:
                         metadata = json.loads(side.content.decode("utf-8"))
                 except Exception:
                     metadata = {}
+
+            if not metadata and asset.get("model_type"):
+                metadata = {
+                    "model_type": asset.get("model_type"),
+                    "accuracy": asset.get("accuracy", 0.0),
+                    "sample_size": asset.get("sample_size", 0),
+                }
 
             _verify_sha256(temp_path, metadata)
 
