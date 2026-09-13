@@ -260,3 +260,93 @@ def test_lock_directory_failure_returns_false(tmp_path):
     with mock.patch.object(worker, "TRAINING_LOCK_FILE", lock_file):
         result = worker._acquire_training_lock()
         assert result is False
+
+
+# ── run-all must NOT hold the parent lock while children acquire it ─────────
+
+def test_run_all_does_not_hold_parent_lock(tmp_path, monkeypatch):
+    """run-all must not acquire the training lock itself; only each child does.
+
+    Regression: previously _cmd_run_all acquired the lock, then every child
+    process tried to acquire the same lock and immediately exited with
+    'Training lock is held by another process'.
+    """
+    lock_file = tmp_path / "runall-training.lock"
+    if lock_file.exists():
+        lock_file.unlink()
+
+    acquired_during_run_all = {"value": False}
+
+    real_acquire = worker._acquire_training_lock
+
+    def spy_acquire():
+        # If run-all itself calls _acquire_training_lock, record it.
+        acquired_during_run_all["value"] = True
+        return real_acquire()
+
+    monkeypatch.setattr(worker, "_acquire_training_lock", spy_acquire)
+    monkeypatch.setattr(worker, "_release_training_lock", lambda: None)
+    monkeypatch.setattr(worker, "_run_all_sports", lambda args: worker.EXIT_OK)
+
+    args = mock.Mock()
+    args.sports = "soccer"
+    args.skip_upload = True
+    code = worker._cmd_run_all(args)
+    assert code == worker.EXIT_OK
+    assert acquired_during_run_all["value"] is False, (
+        "run-all must NOT acquire the training lock; each child acquires it instead"
+    )
+
+
+def test_child_train_acquires_lock_independently(tmp_path, monkeypatch):
+    """Each sport child must acquire the lock itself, even when the parent
+    run-all process does not hold it."""
+    lock_file = tmp_path / "child-training.lock"
+    if lock_file.exists():
+        lock_file.unlink()
+
+    # Parent run-all must not hold the lock.
+    monkeypatch.setattr(worker, "_acquire_training_lock", lambda: False)
+    monkeypatch.setattr(worker, "_release_training_lock", lambda: None)
+    monkeypatch.setattr(worker, "_run_all_sports", lambda args: worker.EXIT_OK)
+
+    args = mock.Mock()
+    args.sports = "soccer"
+    args.skip_upload = True
+    code = worker._cmd_run_all(args)
+    assert code == worker.EXIT_OK
+
+
+def test_direct_train_still_acquires_and_releases_lock(tmp_path):
+    """A direct `train --sport X` must still acquire and release the lock."""
+    lock_file = tmp_path / "direct-training.lock"
+    if lock_file.exists():
+        lock_file.unlink()
+    with mock.patch.object(worker, "TRAINING_LOCK_FILE", lock_file):
+        assert worker._acquire_training_lock() is True
+        assert lock_file.is_file()
+        worker._release_training_lock()
+        assert not lock_file.exists()
+
+
+def test_run_all_continues_after_child_failure(tmp_path, monkeypatch):
+    """If one sport fails, the next sport still runs."""
+    calls = {"count": 0}
+
+    def fake_run(cmd, env=None, check=False, capture_output=False, text=False):
+        calls["count"] += 1
+        # Simulate a child process result.
+        class _Proc:
+            returncode = 1 if calls["count"] == 1 else 0
+            stdout = ""
+            stderr = ""
+        return _Proc()
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    args = mock.Mock()
+    args.sports = "soccer,basketball"
+    args.skip_upload = True
+    code = worker._run_all_sports(args)
+    assert calls["count"] == 2
+    assert code == worker.EXIT_DATA  # one sport failed

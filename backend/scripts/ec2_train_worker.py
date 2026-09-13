@@ -870,22 +870,18 @@ def _cmd_upload(args) -> int:
 
 
 def _cmd_run_all(args) -> int:
-    # ── Training lock: prevent overlapping runs ──────────────────────────
-    if not getattr(args, "force", False):
-        if not _acquire_training_lock():
-            print(
-                "Training lock is held by another process. "
-                "Use --force to override (NOT recommended).",
-                file=sys.stderr,
-            )
-            return EXIT_CONFIG
-    else:
-        _acquire_training_lock()
+    """Train every sport sequentially in isolated child processes.
 
-    try:
-        return _run_all_sports(args)
-    finally:
-        _release_training_lock()
+    The parent does NOT hold the training lock. Each child process acquires
+    the lock itself (via _cmd_train) before training and releases it on
+    completion, so:
+      - overlapping runs are still prevented (the lock is held during each
+        sport's training + upload),
+      - a killed parent can never leave a stale lock, and
+      - the lock is never held across the whole multi-sport run, which would
+        make every child immediately exit with "lock held".
+    """
+    return _run_all_sports(args)
 
 
 def _run_all_sports(args) -> int:
