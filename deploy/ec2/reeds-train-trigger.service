@@ -1,0 +1,42 @@
+# REEDS EC2 training trigger — systemd service.
+#
+# Replaces the GitHub Actions self-hosted runner as the training executor.
+# The trigger polls a request file on a timer and runs the heavy training
+# directly on this EC2 instance using /home/ubuntu/reeds-venv.
+#
+# Install (manual, once):
+#   sudo cp deploy/ec2/reeds-train-trigger.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now reeds-train-trigger
+#
+# Request training remotely (no AWS credentials needed):
+#   echo '{"sports":["soccer","basketball"],"requested_by":"kaggle"}' \
+#     > /home/ubuntu/REEDS/deploy/ec2/training-request.json
+#
+# Watch progress:
+#   journalctl -u reeds-train-trigger -f
+#   tail -f /home/ubuntu/REEDS/deploy/ec2/logs/run-all.out
+
+[Unit]
+Description=REEDS EC2 training trigger (direct on-instance, no GitHub Actions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/REEDS/backend
+EnvironmentFile=/etc/reeds.env
+ExecStart=/home/ubuntu/reeds-venv/bin/python /home/ubuntu/REEDS/backend/scripts/ec2_training_trigger.py serve --poll-seconds 300
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/ubuntu/REEDS/deploy/ec2/logs/trigger.out
+StandardError=append:/home/ubuntu/REEDS/deploy/ec2/logs/trigger.err
+
+# Hard limits — this instance is 2 vCPU / 8 GiB. Never let the trigger
+# itself consume meaningful RAM; the heavy work runs in child processes.
+MemoryMax=200M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

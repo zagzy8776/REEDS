@@ -1,7 +1,14 @@
-# REEDS EC2 worker cron line (commented out — enable manually after CI validation).
+# REEDS EC2 worker cron line (direct on-instance, no GitHub Actions).
 #
 # Runs the full sequential OOF training every day at 05:00 UTC, appending to a
 # log. Each sport runs in its own child process. Requires /etc/reeds.env to be
-# sourced, e.g. via a wrapper script or `env $(grep -v '^#' /etc/reeds.env | xargs)`.
+# sourced.
+#
+# Enable manually after CI validation:
+#   sudo crontab -u ubuntu - 2>&1
+# Then add the line below.
 #
 # 0 5 * * * /home/ubuntu/reeds-venv/bin/python /home/ubuntu/REEDS/backend/scripts/ec2_train_worker.py run-all >> /home/ubuntu/REEDS/deploy/ec2/logs/run-all.cron.log 2>&1
+#
+# On-demand trigger (no credentials, no network exposure):
+#   echo '{"sports":["soccer"],"requested_by":"cron"}' > /home/ubuntu/REEDS/deploy/ec2/training-request.json

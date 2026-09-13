@@ -1163,3 +1163,130 @@ def create_odds_snapshot(payload: dict, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(snapshot)
     return {"id": snapshot.id, "fixture_id": snapshot.fixture_id, "prediction_id": snapshot.prediction_id, "phase": snapshot.phase, "market": snapshot.market}
+
+
+# ---------------------------------------------------------------------------
+# EC2 training request proxy — direct on-instance training, no GitHub Actions.
+#
+# Kaggle/CI POSTs a non-secret request here. Render stages it in the repo on a
+# dedicated branch so it never touches main. The EC2 trigger service fetches
+# the branch on a timer and processes the file locally.
+# ---------------------------------------------------------------------------
+
+import base64
+import json
+import os
+
+EC2_REQUEST_BRANCH = os.environ.get("EC2_REQUEST_BRANCH", "training-requests")
+EC2_REQUEST_PATH = "deploy/ec2/requests/training-request.json"
+
+
+@router.post("/ec2-training-request", dependencies=[Depends(require_admin)])
+def ec2_training_request(payload: dict):
+    """Accept a non-secret EC2 training request and stage it in the repo."""
+    import requests as _requests
+
+    sports = [str(s).strip().lower() for s in (payload.get("sports") or []) if str(s).strip()]
+    requested_by = str(payload.get("requested_by") or "unknown")
+    if not sports:
+        raise HTTPException(status_code=400, detail="sports list is required")
+
+    github_token = os.environ.get("GITHUB_TOKEN", "").strip()
+    github_repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS").strip()
+    if not github_token:
+        raise HTTPException(status_code=500, detail="GITHUB_TOKEN not configured on Render")
+
+    request_body = {
+        "sports": sports,
+        "requested_by": requested_by,
+        "triggered_at": payload.get("triggered_at"),
+        "source": "render-proxy",
+    }
+    content = json.dumps(request_body, indent=2) + "\n"
+
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    repo_url = f"https://api.github.com/repos/{github_repo}"
+
+    # 1. Resolve default branch tip.
+    default_branch = "main"
+    try:
+        r = _requests.get(f"{repo_url}", headers=headers, timeout=30)
+        if r.ok:
+            default_branch = r.json().get("default_branch", "main")
+    except Exception:
+        pass
+
+    # 2. Create or update the request branch.
+    branch_url = f"{repo_url}/git/refs/heads/{EC2_REQUEST_BRANCH}"
+    r = _requests.get(branch_url, headers=headers, timeout=30)
+    if r.status_code == 404:
+        r_sha = _requests.get(f"{repo_url}/git/refs/heads/{default_branch}", headers=headers, timeout=30)
+        if not r_sha.ok:
+            raise HTTPException(status_code=502, detail="Could not resolve default branch SHA")
+        sha = r_sha.json()["object"]["sha"]
+        r = _requests.post(branch_url, headers=headers, json={"ref": f"refs/heads/{EC2_REQUEST_BRANCH}", "sha": sha}, timeout=30)
+        if not r.ok:
+            raise HTTPException(status_code=502, detail=f"Branch create failed: {r.text[:300]}")
+    elif not r.ok:
+        raise HTTPException(status_code=502, detail=f"Branch lookup failed: {r.text[:300]}")
+
+    # 3. Write the request file.
+    file_url = f"{repo_url}/contents/{EC2_REQUEST_PATH}?ref={EC2_REQUEST_BRANCH}"
+    r = _requests.get(file_url, headers=headers, timeout=30)
+    file_sha = r.json().get("sha") if r.ok else None
+
+    put_body = {
+        "message": f"EC2 training request: {requested_by} sports={sports}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "branch": EC2_REQUEST_BRANCH,
+    }
+    if file_sha:
+        put_body["sha"] = file_sha
+
+    r = _requests.put(file_url, headers=headers, json=put_body, timeout=30)
+    if not r.ok:
+        raise HTTPException(status_code=502, detail=f"File write failed: {r.text[:300]}")
+
+    return {
+        "status": "accepted",
+        "sports": sports,
+        "requested_by": requested_by,
+        "branch": EC2_REQUEST_BRANCH,
+        "path": EC2_REQUEST_PATH,
+        "message": "EC2 trigger service will pick this up on its next git-fetch cycle.",
+    }
+
+
+@router.get("/ec2-training-result", dependencies=[Depends(require_admin)])
+def ec2_training_result():
+    """Read the latest training result staged by EC2."""
+    import requests as _requests
+
+    github_token = os.environ.get("GITHUB_TOKEN", "").strip()
+    github_repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS").strip()
+    if not github_token:
+        raise HTTPException(status_code=500, detail="GITHUB_TOKEN not configured on Render")
+
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json",
+    }
+    repo_url = f"https://api.github.com/repos/{github_repo}"
+    result_path = "deploy/ec2/requests/training-result.json"
+    file_url = f"{repo_url}/contents/{result_path}?ref={EC2_REQUEST_BRANCH}"
+
+    r = _requests.get(file_url, headers=headers, timeout=30)
+    if r.status_code == 404:
+        return {"status": "no_result_yet", "message": "No training result has been written yet."}
+    if not r.ok:
+        raise HTTPException(status_code=502, detail=f"Result read failed: {r.text[:300]}")
+
+    content = base64.b64decode(r.json()["content"]).decode("utf-8")
+    try:
+        return json.loads(content)
+    except Exception:
+        return {"status": "unknown", "raw": content[:500]}

@@ -1,12 +1,23 @@
-# REEDS EC2 training worker — systemd unit (installed but NOT enabled/started).
+# REEDS EC2 training worker — systemd unit (direct on-instance, no GitHub Actions).
 #
-# Manual test before enabling:
+# This unit runs the HEAVY training directly on the EC2 instance.
+# GitHub Actions is NOT used as the training executor.
+#
+# Install (manual, once):
+#   sudo cp deploy/ec2/reeds-train.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl start reeds-train       # run once, watch: journalctl -u reeds-train -f
-#   sudo systemctl disable reeds-train     # if you only wanted a one-off run
+#   sudo systemctl enable --now reeds-train
+#
+# Run once manually (same command the service uses):
+#   /home/ubuntu/reeds-venv/bin/python /home/ubuntu/REEDS/backend/scripts/ec2_train_worker.py run-all
+#
+# Watch progress:
+#   journalctl -u reeds-train -f
+#   tail -f /home/ubuntu/REEDS/deploy/ec2/logs/run-all.out
+
 [Unit]
-Description=REEDS EC2 full OOF training worker (run-all)
-After=network-online.target
+Description=REEDS EC2 full OOF training worker (direct on-instance)
+After=network-online.target reeds-train-trigger.service
 Wants=network-online.target
 
 [Service]
@@ -14,7 +25,8 @@ Type=oneshot
 User=ubuntu
 WorkingDirectory=/home/ubuntu/REEDS/backend
 EnvironmentFile=/etc/reeds.env
-ExecStart=/home/ubuntu/reeds-venv/bin/python /home/ubuntu/REEDS/backend/scripts/ec2_train_worker.py run-all
+# Triggered by reeds-train-trigger.service via the request file, or manually.
+ExecStart=/home/ubuntu/reeds-venv/bin/python /home/ubuntu/REEDS/backend/scripts/ec2_train_worker.py run-all --sports ${TRAINING_SPORTS:-soccer,basketball,tennis,american_football,hockey,cricket,rugby,baseball}
 StandardOutput=append:/home/ubuntu/REEDS/deploy/ec2/logs/run-all.out
 StandardError=append:/home/ubuntu/REEDS/deploy/ec2/logs/run-all.err
 

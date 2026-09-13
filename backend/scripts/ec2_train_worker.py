@@ -865,22 +865,45 @@ def _run_all_sports(args) -> int:
     print(f"== RUN-ALL: {', '.join(sports)} (sequential, isolated child process per sport) ==", flush=True)
     # Parent process stays light: heavy app/ML modules are imported only inside
     # each child 'train' process, giving a clean OS memory boundary between sports.
+    # Individual sport failures do NOT abort the run — each sport is independent.
     for sport in sports:
         cmd = [sys.executable, script, "train", "--sport", sport]
         if args.skip_upload:
             cmd.append("--skip-upload")
         print(f"\n=== CHILD PROCESS: {sport} (pid spawned 2 vCPU/8 GiB) — {cmd[0]} ===", flush=True)
-        proc = subprocess.run(cmd, env=os.environ.copy(), check=False)
-        results.append((sport, proc.returncode))
+        proc = subprocess.run(cmd, env=os.environ.copy(), check=False, capture_output=True, text=True)
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        if stdout:
+            print(stdout, flush=True)
+        if stderr:
+            print(stderr, file=sys.stderr, flush=True)
+        results.append((sport, proc.returncode, stdout, stderr))
         print(f"=== {sport} CHILD EXIT CODE: {proc.returncode} ===", flush=True)
 
     print("\n== RUN-ALL SUMMARY ==", flush=True)
     failed = 0
-    for sport, code in results:
+    for sport, code, stdout, _stderr in results:
         status = "OK" if code == EXIT_OK else f"FAILED (exit {code})"
         print(f"  {sport:<22} {status}", flush=True)
         if code != EXIT_OK:
             failed += 1
+            continue
+        # Extract the TRAIN OK line for the structured report.
+        for line in stdout.splitlines():
+            if line.startswith(f"TRAIN {sport} OK:"):
+                print(f"    {line.strip()}", flush=True)
+                break
+        # Extract artifact line.
+        for line in stdout.splitlines():
+            if line.startswith("[artifact]"):
+                print(f"    {line.strip()}", flush=True)
+                break
+        # Extract upload line.
+        for line in stdout.splitlines():
+            if "published GitHub release" in line or "sync-models-safe OK" in line:
+                print(f"    {line.strip()}", flush=True)
+                break
     print(f"runner exit code: {EXIT_DATA if failed else EXIT_OK}", flush=True)
     return EXIT_DATA if failed else EXIT_OK
 
