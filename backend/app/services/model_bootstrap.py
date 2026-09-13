@@ -31,8 +31,9 @@ from app.services.model_registry import register_model
 
 SPORTS = ("american_football", "basketball", "baseball", "soccer", "tennis", "hockey", "cricket", "rugby")
 
-# 100 MiB sanity cap for any single artifact (full OOF ensembles stay well below).
-MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
+# Full OOF ensemble artifacts can be larger than the old 100 MiB cap. Keep a
+# generous safety ceiling while still rejecting obviously runaway uploads.
+MAX_ARTIFACT_BYTES = 250 * 1024 * 1024
 
 
 def install_quality_training() -> None:
