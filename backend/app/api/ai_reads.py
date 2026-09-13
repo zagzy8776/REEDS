@@ -45,20 +45,33 @@ def _fixture_payload(fixture: Fixture) -> dict:
 
 
 def _supported_draft(prediction: Prediction) -> bool:
+    """Allow an evidence-backed exact-match read even when its market is not yet publishable.
+
+    Market-level gates protect the tracked/public record. They should not erase a
+    useful match-specific analysis once the fixture itself has sufficient team
+    history. Cold-start, default-driven, high-risk, and invalid-probability reads
+    remain blocked from the draft surface.
+    """
     meta = prediction.engine_meta if isinstance(prediction.engine_meta, dict) else {}
     if meta.get("cold_start") is True:
         return False
-    if str(meta.get("data_depth") or "").lower() == "cold_start":
+    if str(meta.get("data_depth") or "").lower() in {"none", "thin", "cold_start", "default"}:
         return False
     quality = meta.get("publication_quality") if isinstance(meta.get("publication_quality"), dict) else {}
     if quality.get("default_driven") is True:
         return False
-    if quality.get("accepted") is not True:
-        return False
     reasons = quality.get("reasons") if isinstance(quality.get("reasons"), list) else []
-    blocked_markers = ("neutral/default priors", "insufficient", "correct-score market is disabled")
-    if any(any(marker in str(r).lower() for marker in blocked_markers) for r in reasons):
+    lowered = " ".join(str(r).lower() for r in reasons)
+    if "correct-score market is disabled" in lowered:
         return False
+    if "high-risk classification" in lowered:
+        return False
+    if "invalid model probability payload" in lowered:
+        return False
+    if "team-specific historical evidence is insufficient" in lowered:
+        return False
+    # Confidence/edge gates may remain visible as an early read; the customer
+    # record is protected separately by is_published and market evidence gates.
     return True
 
 
@@ -142,7 +155,7 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
     draft = _rows(published_only=False)
     if draft:
         response = _response(db, fixture, draft, "draft")
-        response["message"] = "Early read — generated for this exact match, but it is not yet part of the public tracked record."
+        response["message"] = "Evidence-backed early read — generated for this exact match. It is not yet part of the public tracked record."
         return response
 
     any_internal = (
