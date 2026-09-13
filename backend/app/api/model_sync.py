@@ -104,7 +104,7 @@ async def upload_model(
     Kaggle is the trusted training/validation worker. Render's free instance has
     only 512 MiB RAM, so loading a multi-estimator joblib merely to validate its
     structure can OOM the production process. The artifact is streamed to disk,
-    then copied to Neon as bytes; inference deserializes it only when required.
+    then copied to the Aiven metadata table as an empty payload; inference deserializes it only when required.
     """
     settings = get_settings()
     model_dir = Path(settings.model_dir)
@@ -150,10 +150,10 @@ async def upload_model(
         destination = model_dir / filename
         os.replace(temp_path, destination)
 
-        # The full artifact bytes stay on Render disk only; Neon stores a
-        # metadata row with an empty payload. _restore_from_neon skips empty
-        # blobs and the GitHub release fallback re-materializes the file, so a
-        # full container rebuild never loses the model and no 53 MiB blob is
+        # The full artifact bytes stay on Render disk only; Aiven stores a
+        # metadata row with an empty payload. The model bootstrap restores
+        # artifacts from GitHub Releases and skips empty blobs, so a full
+        # container rebuild never loses the model and no 53 MiB blob is
         # ever materialized in the request process on this 512 MiB instance.
         existing = db.query(ModelArtifact).filter_by(sport=final_sport, filename=filename).first()
         if existing:
@@ -245,9 +245,29 @@ async def upload_model_metadata(
     return {"status": "no_matching_artifact", "sport": target_sport, "filename": filename}
 
 
+def _sha256_file(path: Path) -> str:
+    """Streaming SHA-256 of a file in 1 MiB chunks (constant memory)."""
+    import hashlib
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 @router.post("/api/admin/sync-models-safe", dependencies=[Depends(_admin_key)])
 def sync_models_safe(db: Session = Depends(get_db)):
-    """Atomically synchronize the latest GitHub model release into production."""
+    """Atomically synchronize the latest GitHub model release into production.
+
+    Every artifact is streamed from the GitHub release to a staging directory,
+    checked for size + SHA-256 (against the sidecar the training worker
+    published), and only then swapped into the live model directory. On any
+    failure the previous working files are preserved/restored, so a corrupt or
+    incomplete download can never replace the production model.
+    """
     settings = get_settings()
     github_repo = settings.github_repo
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -292,13 +312,29 @@ def sync_models_safe(db: Session = Depends(get_db)):
                             handle.write(chunk)
             base_name = name.rsplit(".", 1)[0]
             sidecar_url = sidecar_by_name.get(base_name)
+            sidecar_metadata: dict = {}
             if sidecar_url:
                 try:
                     with requests.get(sidecar_url, headers=headers, timeout=60) as side:
                         if side.ok:
                             destination.with_suffix(".json").write_bytes(side.content)
+                            import json
+                            sidecar_metadata = json.loads(side.content.decode("utf-8"))
                 except Exception:
                     log.exception("Could not download sidecar metadata for %s", name)
+                    sidecar_metadata = {}
+
+            # SHA-256: never activate an artifact whose checksum does not match.
+            expected_sha = str(sidecar_metadata.get("sha256") or "").strip().lower()
+            if expected_sha:
+                actual_sha = _sha256_file(destination)
+                if actual_sha != expected_sha:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"SHA-256 mismatch for {name}: expected {expected_sha[:16]}..., got {actual_sha[:16]}...",
+                    )
+                log.info("SHA-256 verified for %s", name)
+
             metadata = _validate_bundle(destination)
             staged.append((destination, model_dir / name, metadata))
         if not staged:
@@ -314,8 +350,8 @@ def sync_models_safe(db: Session = Depends(get_db)):
                 os.replace(source, destination)
                 installed.append({"file": destination.name, **metadata})
                 db.query(ModelArtifact).filter_by(sport=metadata["sport"], filename=destination.name).delete()
-                # Neon row is metadata-only; the file is already on Render disk
-                # (streamed from GitHub) and _restore_from_neon skips empty blobs.
+                # Aiven row is metadata-only; the file is already on Render disk
+                # (streamed from GitHub). Model restore reads releases, never blobs.
                 db.add(ModelArtifact(
                     sport=metadata["sport"], filename=destination.name,
                     model_type=metadata["model_type"], accuracy=metadata["accuracy"],

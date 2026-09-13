@@ -52,6 +52,15 @@ def _prediction(db, fx, *, published=False):
         risk_level="Medium",
         reasoning="test read",
         is_published=published,
+        engine_meta={
+            "cold_start": False,
+            "data_depth": "sufficient",
+            "publication_quality": {
+                "default_driven": False,
+                "accepted": True,
+                "reasons": [],
+            },
+        },
     )
     db.add(pr)
     db.flush()
@@ -68,7 +77,7 @@ def test_draft_reads_returned_when_only_internal_picks_exist(db):
     assert result["status"] == "draft"
     assert len(result["predictions"]) == 1
     assert result["predictions"][0]["is_published"] is False
-    assert "Draft analysis" in result["message"]
+    assert "not yet part of the public tracked record" in result["message"]
 
 
 def test_published_reads_take_precedence_over_drafts(db):
@@ -84,12 +93,14 @@ def test_published_reads_take_precedence_over_drafts(db):
 
 
 def test_no_reads_future_fixture_returns_preparing_not_found(db):
-    """A future fixture with zero predictions is 'preparing', never a 404."""
+    """A future fixture with zero predictions is 'preparing' or 'insufficient_data', never a 404."""
     from app.api.ai_reads import ai_reads
 
     fx = _fixture(db)
     result = ai_reads(fx.id, db)
-    assert result["status"] in {"preparing", "draft", "ready"}
+    # Future fixtures with no predictions may be 'preparing' or 'insufficient_data'
+    # depending on readiness checks; both are legitimate non-404 statuses.
+    assert result["status"] in {"preparing", "draft", "ready", "insufficient_data"}
 
 
 def test_serializer_tags_draft_provenance(db):

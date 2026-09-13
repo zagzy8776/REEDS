@@ -62,8 +62,8 @@ FTAG=1, B365H/A/D`) flows:
 `Prediction`** rows (active, fixture completed, `match_date` within 90-day cutoff)
 — both published and internal (`is_published=False`) picks, by design (internal
 picks exist to build evidence pre-publication). Historical backtest rows are never
-`Prediction` rows -> structurally excluded. With only 6 completed fixtures in Neon,
-soccer 1X2 shows **settled=1**.
+`Prediction` rows -> structurally excluded. With only 6 completed fixtures in
+Aiven, soccer 1X2 shows **settled=1**.
 
 Required change: a parallel, audited evidence source (section 6) computed by the
 same math (`prediction_result`, `selected_decimal_odds`, Brier as in
@@ -253,7 +253,7 @@ Already set, verify in Environment > Secrets & Files:
 
 | Key | Value |
 |---|---|
-| `DATABASE_URL` | Neon pooler URL |
+| `DATABASE_URL` | Aiven pooler URL (AIVEN_DATABASE_URL preferred) |
 | `ADMIN_API_KEY` | the admin key used with `/api/admin/*` |
 | `ENABLE_SCHEDULER` | `true` |
 | `APP_ENV` | `production` |

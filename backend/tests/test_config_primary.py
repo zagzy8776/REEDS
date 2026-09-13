@@ -3,7 +3,14 @@
 Locks in config.primary_database_url precedence (AIVEN_DATABASE_URL first,
 legacy DATABASE_URL as the transition fallback) and the production guard that
 validates the resolved primary URL instead of the legacy URL alone.
+
+NOTE: Settings loads from .env via pydantic-settings, so tests bypass file
+loading by passing _env_file=None and supply env values via constructor kwargs.
+os.environ is set for any code paths that read os.getenv directly.
 """
+
+
+import os
 
 import pytest
 
@@ -18,9 +25,11 @@ def _clean_env(monkeypatch):
 def _settings(monkeypatch, **env):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
+        os.environ[k] = v
     from app.core.config import Settings
 
-    return Settings()
+    # Bypass .env file loading so tests use constructor kwargs, not real env.
+    return Settings(_env_file=None, **env)
 
 
 def test_aiven_url_is_primary_when_configured(monkeypatch):
@@ -48,9 +57,11 @@ def test_primary_falls_back_to_sqlite_when_nothing_set(monkeypatch):
 
 def test_production_guard_accepts_aiven_postgres_without_legacy_url(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
+    os.environ["APP_ENV"] = "production"
     monkeypatch.setenv(
         "AIVEN_DATABASE_URL", "postgresql://u:p@aiven.example/db"
     )
+    os.environ["AIVEN_DATABASE_URL"] = "postgresql://u:p@aiven.example/db"
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from app.core.config import get_settings
 
@@ -64,7 +75,9 @@ def test_production_guard_accepts_aiven_postgres_without_legacy_url(monkeypatch)
 
 def test_production_guard_rejects_sqlite_aiven(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
+    os.environ["APP_ENV"] = "production"
     monkeypatch.setenv("AIVEN_DATABASE_URL", "sqlite:///./local.db")
+    os.environ["AIVEN_DATABASE_URL"] = "sqlite:///./local.db"
     from app.core.config import get_settings
 
     get_settings.cache_clear()
@@ -77,7 +90,9 @@ def test_production_guard_rejects_sqlite_aiven(monkeypatch):
 
 def test_production_guard_rejects_sqlite_legacy_when_aiven_absent(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
+    os.environ["APP_ENV"] = "production"
     monkeypatch.setenv("DATABASE_URL", "sqlite:///./local.db")
+    os.environ["DATABASE_URL"] = "sqlite:///./local.db"
     from app.core.config import get_settings
 
     get_settings.cache_clear()

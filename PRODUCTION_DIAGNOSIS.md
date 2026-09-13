@@ -20,8 +20,8 @@ Backend (Fly, DEAD): `https://reeds.fly.dev` — NXDOMAIN, unreachable from mult
 - **Could not read Render env values directly** (no Render dashboard/API credentials). Secret-ness
   was honored — nothing secret is reproduced here.
 - **Action required by owner**: confirm in the Render dashboard that `DATABASE_URL` points at the
-  NEW Neon production database (the running service does use a live PostgreSQL; only the exact
-  target is unverifiable without dashboard access).
+  Aiven production PostgreSQL database (the running service does use a live PostgreSQL; only the
+  exact target is unverifiable without dashboard access).
 
 ## B. Scheduler & jobs
 
@@ -117,7 +117,7 @@ Fixes applied in this change set:
 Steps to go live:
 1. Render → REEDS service → **Manual Deploy / Deploy latest commit** (picks up the new code,
    incl. `/api/stats/summary` and community POST endpoints).
-2. Verify Render env (`DATABASE_URL` = new Neon, `CORS_ORIGINS` contains
+2. Verify Render env (`DATABASE_URL`/`AIVEN_DATABASE_URL` = Aiven, `CORS_ORIGINS` contains
    `https://reeds-phi.vercel.app`).
 3. Vercel reeds-phi: optionally set `NEXT_PUBLIC_API_URL=https://reeds-phj1.onrender.com` in
    project env, then redeploy (the code default now also targets Render, so a plain redeploy

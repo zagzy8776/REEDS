@@ -8,14 +8,14 @@ LOYAL EDGE is a production-style sports analytics website for soccer and basketb
 
 - Backend: Python 3.10+, FastAPI, SQLAlchemy, pandas, scikit-learn, XGBoost
 - Frontend: Next.js + TypeScript + Tailwind CSS
-- Database: Neon PostgreSQL via `DATABASE_URL`
-- Deploy: Render backend + Vercel frontend
+- Database: Aiven PostgreSQL via `AIVEN_DATABASE_URL` (alias `DATABASE_URL`) for live data; CockroachDB for historical/analytical; Turso for cache/lease
+- Deploy: Render backend + Vercel frontend; training via AWS EC2 worker, orchestrated from Kaggle through GitHub Actions
 
 ## Local setup
 
 ```bash
 cp .env.example .env
-# Put your rotated Neon DATABASE_URL in .env. Do not commit secrets.
+# Put your rotated Aiven DATABASE_URL in .env (or AIVEN_DATABASE_URL). Do not commit secrets.
 pip install -r backend/requirements.txt
 python backend/scripts/seed_sample_data.py
 python backend/scripts/train_models.py

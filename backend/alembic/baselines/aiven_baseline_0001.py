@@ -2,9 +2,9 @@
 
 Generated from Base.metadata (models.py + rejected_fixture.py) so column
 types, nullability, uniques, and index names match what create_all produced
-on the legacy Neon database. Fixtures columns match the ORM Fixture model;
-the hot/cold 730-day split is a row-level concern handled by the migration
-script, not a schema difference.
+on the legacy single-database deployment. Fixtures columns match the ORM
+Fixture model; the hot/cold 730-day split is a row-level concern handled by
+the migration script, not a schema difference.
 
 Revision ID: aiven_baseline_0001
 Revises:

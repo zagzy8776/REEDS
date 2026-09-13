@@ -40,10 +40,10 @@ def sync_provider_history(
     _: None = Depends(_require_admin),
     db: Session = Depends(get_db),
 ):
-    """Pull recent completed provider data into Neon for ML training.
+    """Pull recent completed provider data into Aiven for ML training.
 
     Render owns provider credentials and network access. The trainer asks Render
-    to run this sync, then trains from the resulting Neon dataset. Providers are
+    to run this sync, then trains from the resulting Aiven dataset. Providers are
     isolated so one failed quota/key does not prevent the others from loading.
     """
     settings = get_settings()

@@ -20,7 +20,7 @@ Add the following **Repository Secrets** in your Space Settings → Repository s
 
 | Secret | Value |
 |---|---|
-| `DATABASE_URL` | Your Neon Postgres connection string |
+| `DATABASE_URL` | Your Aiven Postgres connection string (production DB) |
 | `ADMIN_API_KEY` | Your Render admin key |
 | `RENDER_URL` | `https://reeds-phj1.onrender.com` |
 | `CRON_SECRET` | Secret used to authenticate Render wake requests |

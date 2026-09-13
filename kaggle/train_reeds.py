@@ -169,7 +169,7 @@ print(f"API-sourced completed rows: {api_rows:,}")
 print("Training policy: hybrid historical DB + freshly synced API history; source provenance is reported before every run.")
 
 if data.empty:
-    raise RuntimeError("Neon returned no training data")
+    raise RuntimeError("Aiven returned no training data")
 if "sport" not in data.columns:
     raise RuntimeError("Training data has no sport column")
 if "id" in data.columns and coverage_seed_ids:

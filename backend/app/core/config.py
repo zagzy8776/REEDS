@@ -7,8 +7,9 @@ class Settings(BaseSettings):
     # Explicit local-development fallback only. Production validation below
     # rejects SQLite so Render cannot silently create a split-brain database.
     # Legacy single-URL (kept as fallback during the three-database migration;
-    # Neon is no longer the production database — Aiven is). See the
-    # primary_database_url property below and app/db/roles.py.
+    # the legacy single-database deployment is no longer the production
+    # database — Aiven is). See the primary_database_url property below and
+    # app/db/roles.py.
     database_url: str = "sqlite:///./data/local.db"
     # Role-specific URLs (Phase 1). AIVEN_DATABASE_URL is the production
     # primary; the other roles default to empty and fall back per roles.py.

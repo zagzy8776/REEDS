@@ -175,8 +175,14 @@ def _fit_oof_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_spl
 
 
 def _factories(binary: bool):
-    wanted = {"random_forest", "xgboost", "lightgbm", "catboost"}
-    return [(name, factory) for name, factory in _build_model_factories(binary=binary, slim=False) if name in wanted]
+    """Every model type configured in _build_model_factories (full ensemble).
+
+    RF + XGBoost + GradientBoosting + LightGBM + CatBoost + MLP are all included;
+    models are NOT dropped to save memory here. EC2 isolates each sport in its own
+    child process so the OS reclaims memory between sports, which is what allows
+    the full ensemble to train reliably on the ~8 GiB worker.
+    """
+    return _build_model_factories(binary=binary, slim=False)
 
 
 def _save_bundle(result, features, labels, sport, sample_size, calibrator_path=None):

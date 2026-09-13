@@ -116,7 +116,7 @@ def copy_table(src_conn, dst_conn, table: str) -> int:
 
     Streams raw binary blocks byte-for-byte (``write()``, not
     ``write_row()``). Parsing the COPY stream into rows (``rows()``) breaks
-    behind PgBouncer-style poolers (Neon) with ``DataError: bad copy data``,
+    behind PgBouncer-style poolers with ``DataError: bad copy data``,
     and re-serializing rows is slower; the raw byte stream is valid because
     source and target share the identical schema and column order.
     """

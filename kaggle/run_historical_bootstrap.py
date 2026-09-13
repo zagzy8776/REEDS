@@ -1,12 +1,12 @@
 """REEDS historical bootstrap worker (run on Kaggle, not Render).
 
 P0 + P1 combined: downloads FDCO CSVs (football-data.co.uk), loads them into
-Neon, runs walk-forward historical evidence, pivots into MarketEvidence, and
+Aiven, runs walk-forward historical evidence, pivots into MarketEvidence, and
 recomputes the market gate. Safe to re-run (upserts keyed by
 (fixture_id, market, fold_index); pivot + gate are idempotent).
 
 Secrets (Kaggle Add-ons -> Secrets, or env vars):
-  DATABASE_URL   (Neon/PostgreSQL connection string)
+  DATABASE_URL   (Aiven PostgreSQL connection string)
   ADMIN_API_KEY  (Render admin key, only used for optional verify)
   RENDER_URL     (optional, e.g. https://reeds-phj1.onrender.com)
 
@@ -78,7 +78,7 @@ def wait_for_render_ready(max_seconds: int = 600) -> None:
         except requests.RequestException:
             pass
         time.sleep(min(5 + attempt, 20))
-    print("Render readiness not confirmed; continuing against Neon directly", flush=True)
+    print("Render readiness not confirmed; continuing against Aiven directly", flush=True)
 
 
 print("=== GIT ===", flush=True)
@@ -113,7 +113,7 @@ from app.db.session import SessionLocal, init_db  # noqa: E402
 init_db()
 db = SessionLocal()
 
-print("=== P0: FDCO BACKFILL (download + load into Neon) ===", flush=True)
+print("=== P0: FDCO BACKFILL (download + load into Aiven) ===", flush=True)
 try:
     subprocess.run(
         [sys.executable, "scripts/backfill_fcdo.py"],
@@ -125,7 +125,7 @@ except subprocess.CalledProcessError as exc:
 from app.db.models import Fixture  # noqa: E402
 
 soccer_rows = db.query(Fixture).filter(Fixture.sport == "soccer").count()
-print(f"soccer fixtures now in Neon: {soccer_rows:,}", flush=True)
+print(f"soccer fixtures now in Aiven: {soccer_rows:,}", flush=True)
 if soccer_rows < 2000:
     print("WARNING: too few soccer fixtures for meaningful evidence; backfill may have failed", flush=True)
 

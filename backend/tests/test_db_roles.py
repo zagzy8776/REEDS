@@ -31,8 +31,8 @@ def test_aiven_role_resolves_from_own_var():
 def test_aiven_falls_back_to_legacy_database_url():
     from app.db import roles
 
-    env = {"DATABASE_URL": "postgresql://u:p@neon-host/db"}
-    assert roles.resolve_role_url(roles.AIVEN, env) == "postgresql://u:p@neon-host/db"
+    env = {"DATABASE_URL": "postgresql://u:p@aiven-host/db"}
+    assert roles.resolve_role_url(roles.AIVEN, env) == "postgresql://u:p@aiven-host/db"
     # Missing legacy var leaves the role unconfigured (no crash, no invented URL).
     assert roles.resolve_role_urls({}) == {
         roles.AIVEN: None,

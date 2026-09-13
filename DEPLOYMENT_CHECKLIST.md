@@ -3,7 +3,7 @@
 ## Pre-Deployment
 
 ### Environment Setup
-- [ ] Set `DATABASE_URL` in Render (Neon PostgreSQL)
+- [ ] Set `DATABASE_URL` in Render (Aiven PostgreSQL production database)
 - [ ] Set `ADMIN_API_KEY` in Render using the secret manager (never commit it)
 - [ ] Set `CRON_SECRET` in Render and the Hugging Face Space; keep both values identical when possible
 - [ ] Set `AUDIT_MODE=true` for initial 7-day testing period

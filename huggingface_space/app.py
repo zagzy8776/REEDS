@@ -1,8 +1,8 @@
 """LOYAL EDGE — Hugging Face training worker.
 
-The Space is the ML worker. Render serves the public API; Neon is the source of
-truth. The worker refreshes recent provider history through Render, trains the
-available sport models from completed Neon data, publishes artifacts to Render,
+The Space is the ML worker. Render serves the public API; Aiven PostgreSQL is the
+source of truth. The worker refreshes recent provider history through Render, trains
+the available sport models from completed Aiven data, publishes artifacts to Render,
 and polls Render for retraining signals.
 """
 
@@ -226,8 +226,8 @@ def action_check_db():
         db = _get_db()
         data = _load_data(db)
         if data.empty:
-            return "📁 Neon is reachable but has no fixture rows", _get_log()
-        lines = [f"✅ Neon connected | {len(data):,} total rows"]
+            return "📁 Aiven is reachable but has no fixture rows", _get_log()
+        lines = [f"✅ Aiven connected | {len(data):,} total rows"]
         for sport, group in data.groupby("sport"):
             completed = int((group["home_score"].notna() & group["away_score"].notna()).sum())
             lines.append(f"  {sport:<20} {completed:>7,} completed / {len(group):>7,} total")
@@ -243,7 +243,7 @@ def action_sync_provider_history():
     if not DATABASE_URL or not ADMIN_KEY:
         return "❌ Add DATABASE_URL and ADMIN_API_KEY to Space Settings first.", _get_log()
     ok, detail = _sync_provider_history()
-    message = "✅ Provider history synchronized into Neon" if ok else f"❌ {detail}"
+    message = "✅ Provider history synchronized into Aiven" if ok else f"❌ {detail}"
     return message, _get_log()
 
 
@@ -388,16 +388,16 @@ def _train_all_sports() -> None:
 
         ok, detail = _sync_provider_history()
         if not ok:
-            _log(f"⚠️ Continuing with existing Neon history: {detail}")
+            _log(f"⚠️ Continuing with existing Aiven history: {detail}")
 
         db = _get_db()
         try:
             data = _load_data(db)
             if data.empty:
-                raise RuntimeError("Neon has no training data")
+                raise RuntimeError("Aiven has no training data")
             completed_mask = data["home_score"].notna() & data["away_score"].notna()
             data = data[completed_mask].copy()
-            _log(f"⚡ ML training snapshot: {len(data):,} completed rows across Neon")
+            _log(f"⚡ ML training snapshot: {len(data):,} completed rows across Aiven")
             sport_counts = data.groupby("sport").size().to_dict()
             _log("📊 Completed rows by sport: " + ", ".join(f"{k}={v:,}" for k, v in sorted(sport_counts.items())))
         finally:
@@ -613,7 +613,7 @@ def action_toggle_poll():
 with gr.Blocks(title="LOYAL EDGE Trainer", theme=gr.themes.Soft()) as demo:
     gr.Markdown(
         """# 🏆 LOYAL EDGE — AI Engine
-Trains production models from completed Neon history, including recent history synchronized from the real API providers through Render, and publishes them to Render.
+Trains production models from completed Aiven history, including recent history synchronized from the real API providers through Render, and publishes them to Render.
 
 **Required Space secrets:** `DATABASE_URL` · `ADMIN_API_KEY` · `RENDER_URL` · `CRON_SECRET` · optional `GITHUB_TOKEN`.
 """

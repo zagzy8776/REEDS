@@ -1,8 +1,13 @@
 # Neon → Aiven / Cockroach database migration (Phase 2)
 
-Status: **tooling complete, NOT executed.** Neon remains the authoritative
-production database until the migration is run (Phase 3) and every
-verification check passes. This document is the operator runbook.
+Status: **tooling complete. Live migration was attempted but Neon is currently
+quota-blocked and unreadable, so nothing was claimed as migrated.** Production
+has been cut over to run on Aiven PostgreSQL (primary) + CockroachDB
+(historical/analytical) + Turso (lease/cache) and does NOT depend on Neon for
+runtime. This document is the operator runbook for completing the historical
+data import whenever Neon becomes readable/exportable again: it is strictly a
+READ-ONLY source during migration and the app continues to run on Aiven with or
+without the import.
 
 No secret values appear in this file. Credentials are referenced by
 environment-variable name only (see also `docs/credential-rotation.md`).
@@ -174,23 +179,23 @@ non-zero when any mismatch exists. Exit 0 = migration is verified complete.
   explicit (TRUNCATE the affected destination tables), never automatic. The
   migration script itself never deletes.
 
-## 9. Neon stays authoritative until verification succeeds
+## 9. Neon stays read-only until verification succeeds
 
-Neon continues serving all application traffic (Phase 1 kept every consumer
-on the legacy engine). Aiven/Cockroach receive backfilled copies only. The
-cutover to reading Aiven is a Phase 3 change and happens only after
-`verify_migration.py` exits 0. Until then Neon is the single source of truth.
+Production already runs on Aiven (primary) + Cockroach + Turso — Neon is not in
+the runtime path. The migration imports from Neon only as long as it remains
+readable; `verify_migration.py` proves the imported copy is complete and
+consistent. If Neon is never readable again, the application simply continues
+on Aiven/Cockroach/Turso and the historical import stays incomplete until
+another export path (CSV/fixtures on disk) is provided.
 
-## 10. Later: production cutover (Phase 3 preview)
+## 10. Production cutover (completed — historical import optional)
 
-1. Freeze writes (maintenance window) or run a final delta pass of
-   `migrate_neon_split.py` (idempotent).
-2. Re-run `verify_migration.py` — must exit 0.
-3. Switch Render's `DATABASE_URL` to the Aiven URL (single env change; the
-   app code is role-aware from Phase 1 but still defaults to the legacy
-   engine).
-4. Point the historical/backtest readers at Cockroach (Phase 3 wiring).
-5. Keep Neon read-only as the rollback snapshot for an agreed window; only
+1. Render's `DATABASE_URL` / `AIVEN_DATABASE_URL` = Aiven URL; the app is
+   role-aware and defaults to Aiven.
+2. Historical/backtest readers point at Cockroach (`COCKROACH_DATABASE_URL`).
+3. When Neon becomes readable: run a final `migrate_neon_split.py` pass
+   (idempotent), then `verify_migration.py` — must exit 0.
+4. Keep Neon read-only as the rollback snapshot for an agreed window; only
    then rotate/delete it per `docs/credential-rotation.md`.
 
 ## 11. Tests

@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Fixture
 from app.scraper.api_clients import AllSportsApiClient, ApiBasketballClient, ApiFootballClient, ApiFootballComClient, FootballDataOrgClient, SportMonksFootballClient, TheOddsApiClient, TheSportsDbClient
-from app.services.data_quality import resolve_team_name
+from app.services.data_quality import resolve_team_name, alias_key
 from app.utils.team_names import normalize_team_name
 
 
@@ -615,31 +615,178 @@ def ingest_thesportsdb_events(db: Session, api_key: str | None, target_dates: li
     return count
 
 
+def _parse_match_date(series: pd.Series) -> pd.Series:
+    """Parse fixture dates robustly across 2-digit and 4-digit year formats.
+
+    football-data.co.uk switched from ``%d/%m/%y`` (e.g. 19/08/00) to
+    ``%d/%m/%Y`` (e.g. 05/08/2022) between seasons.  Pandas' automatic format
+    inference fails when a single column mixes the two, so we try the explicit
+    formats first and fall back to per-element parsing only when needed.
+    """
+    formats = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y", "%d-%m-%y")
+    for fmt in formats:
+        try:
+            parsed = pd.to_datetime(series, format=fmt, errors="raise")
+            if parsed.notna().any():
+                return parsed
+        except (ValueError, TypeError):
+            continue
+    return pd.to_datetime(series, dayfirst=True, errors="coerce")
+
+
+def _series_or_empty(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return the column as a Series, or an empty Series when absent."""
+    if col in df.columns:
+        return df[col]
+    return pd.Series([None] * len(df), index=df.index)
+
+
+def _bulk_resolve_team_names(db: Session, names: list[str], sport: str, source: str) -> dict[str, str]:
+    """Resolve a batch of raw team names to canonical names in ~3 queries."""
+    from app.db.models import Team, TeamAlias
+    from app.services.data_quality import alias_key
+
+    cache: dict[str, str] = {}
+    pending: list[str] = []
+    for raw in names:
+        key = alias_key(raw)
+        if key in cache:
+            continue
+        cache[key] = None  # placeholder; resolved below
+        pending.append(raw)
+
+    if not pending:
+        return cache
+
+    keys = [alias_key(n) for n in pending]
+    existing = (
+        db.query(TeamAlias)
+        .filter(TeamAlias.sport == sport, TeamAlias.alias_key.in_(keys))
+        .all()
+    )
+    team_ids = {a.team_id for a in existing}
+    teams = (
+        db.query(Team).filter(Team.sport == sport, Team.id.in_(team_ids)).all()
+        if team_ids else []
+    )
+    team_by_id = {t.id: t.canonical_name for t in teams}
+
+    existing_keys = set()
+    for alias_row in existing:
+        cache[alias_key(alias_row.alias)] = team_by_id.get(alias_row.team_id)
+        existing_keys.add(alias_row.alias_key)
+
+    # Track alias keys we are about to insert so we never emit a duplicate.
+    new_alias_keys: set[str] = set()
+
+    for raw in pending:
+        key = alias_key(raw)
+        if cache.get(key):
+            continue
+        canonical = normalize_team_name(raw, sport)
+        team = db.query(Team).filter(Team.sport == sport, Team.canonical_name == canonical).first()
+        if not team:
+            team = Team(sport=sport, canonical_name=canonical)
+            db.add(team)
+            db.flush()
+        cache[key] = canonical
+        if key not in existing_keys and key not in new_alias_keys:
+            db.add(TeamAlias(team_id=team.id, sport=sport, alias=str(raw).strip(), alias_key=key, source=source))
+            new_alias_keys.add(key)
+        canonical_key = alias_key(canonical)
+        if canonical_key != key and cache.get(canonical_key) is None:
+            cache[canonical_key] = canonical
+        if canonical_key != key and canonical_key not in existing_keys and canonical_key not in new_alias_keys:
+            db.add(TeamAlias(team_id=team.id, sport=sport, alias=canonical, alias_key=canonical_key, source="canonical"))
+            new_alias_keys.add(canonical_key)
+    db.flush()
+    return cache
+
+
+def _bulk_upsert_fixtures(db: Session, rows: list[dict], batch_size: int = 500) -> int:
+    """Insert/update a batch of fixture dicts, honoring the natural-key unique constraint."""
+    from app.db.models import Fixture
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    count = 0
+    for start in range(0, len(rows), batch_size):
+        chunk = rows[start:start + batch_size]
+        try:
+            stmt = pg_insert(Fixture.__table__).values(chunk)
+            natural_key = (
+                stmt.excluded.sport, stmt.excluded.league, stmt.excluded.match_date,
+                stmt.excluded.home_team, stmt.excluded.away_team,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["sport", "league", "match_date", "home_team", "away_team"],
+                set_={
+                    "season": stmt.excluded.season,
+                    "home_score": stmt.excluded.home_score,
+                    "away_score": stmt.excluded.away_score,
+                    "home_odds": stmt.excluded.home_odds,
+                    "draw_odds": stmt.excluded.draw_odds,
+                    "away_odds": stmt.excluded.away_odds,
+                    "source": stmt.excluded.source,
+                    "extra": stmt.excluded.extra,
+                },
+            )
+            db.execute(stmt)
+            db.commit()
+            count += len(chunk)
+        except Exception:
+            db.rollback()
+            # Fall back to per-row upsert for this chunk on dialect mismatch.
+            for payload in chunk:
+                try:
+                    upsert_fixture(db, Fixture(**payload))
+                    count += 1
+                except Exception:
+                    db.rollback()
+    return count
+
+
 def load_football_csv(db: Session, path: str, league: str = "Unknown", season: str = "Unknown") -> int:
     header = read_csv_flexible(path, nrows=0).columns
     df = read_csv_flexible(path).rename(columns={k: v for k, v in FOOTBALL_DATA_MAP.items() if k in header})
-    count = 0
-    for _, r in df.iterrows():
-        if not {"match_date", "home_team", "away_team"}.issubset(df.columns):
-            continue
-        parsed_date = pd.to_datetime(r["match_date"], dayfirst=True, errors="coerce")
-        if pd.isna(parsed_date):
-            continue
-        fx = Fixture(
-            sport="soccer", league=league, season=season, match_date=parsed_date.date(),
-            home_team=resolve_team_name(db, str(r["home_team"]), "soccer", Path(path).name),
-            away_team=resolve_team_name(db, str(r["away_team"]), "soccer", Path(path).name),
-            home_score=None if pd.isna(r.get("home_score")) else int(r.get("home_score")),
-            away_score=None if pd.isna(r.get("away_score")) else int(r.get("away_score")),
-            home_odds=None if pd.isna(r.get("home_odds")) else float(r.get("home_odds")),
-            draw_odds=None if pd.isna(r.get("draw_odds")) else float(r.get("draw_odds")),
-            away_odds=None if pd.isna(r.get("away_odds")) else float(r.get("away_odds")),
-            source=Path(path).name,
+    if not {"match_date", "home_team", "away_team"}.issubset(df.columns):
+        return 0
+
+    df = df.dropna(subset=["match_date", "home_team", "away_team"]).copy()
+    df["match_date"] = _parse_match_date(df["match_date"])
+    df = df.dropna(subset=["match_date"])
+    if df.empty:
+        return 0
+
+    name = Path(path).name
+    team_cache = _bulk_resolve_team_names(
+        db, df["home_team"].astype(str).tolist() + df["away_team"].astype(str).tolist(), "soccer", name
+    )
+    df["home_team"] = df["home_team"].astype(str).map(lambda n: team_cache.get(alias_key(n), normalize_team_name(n, "soccer")))
+    df["away_team"] = df["away_team"].astype(str).map(lambda n: team_cache.get(alias_key(n), normalize_team_name(n, "soccer")))
+
+    rows = [
+        {
+            "sport": "soccer",
+            "league": league,
+            "season": season,
+            "match_date": d.date(),
+            "home_team": h,
+            "away_team": a,
+            "home_score": _to_int_or_none(v),
+            "away_score": _to_int_or_none(v2),
+            "home_odds": _to_float_or_none(v3),
+            "draw_odds": _to_float_or_none(v4),
+            "away_odds": _to_float_or_none(v5),
+            "source": name,
+            "extra": None,
+        }
+        for d, h, a, v, v2, v3, v4, v5 in zip(
+            df["match_date"], df["home_team"], df["away_team"],
+            _series_or_empty(df, "home_score"), _series_or_empty(df, "away_score"),
+            _series_or_empty(df, "home_odds"), _series_or_empty(df, "draw_odds"), _series_or_empty(df, "away_odds"),
         )
-        upsert_fixture(db, fx)
-        count += 1
-    db.commit()
-    return count
+    ]
+    return _bulk_upsert_fixtures(db, rows)
 
 
 def load_basketball_csv(db: Session, path: str, league: str = "NBA", season: str = "Unknown") -> int:
@@ -665,25 +812,41 @@ def load_basketball_csv(db: Session, path: str, league: str = "NBA", season: str
                 continue
             rows.append({"match_date": home.get("match_date"), "home_team": home.get(team_col), "away_team": away.get(team_col), "home_score": home.get(points_col), "away_score": away.get(points_col)})
         df = pd.DataFrame(rows)
-    count = 0
-    for _, r in df.iterrows():
-        if not {"match_date", "home_team", "away_team"}.issubset(df.columns):
-            continue
-        parsed_date = pd.to_datetime(r["match_date"], errors="coerce")
-        if pd.isna(parsed_date):
-            continue
-        fx = Fixture(
-            sport="basketball", league=league, season=season, match_date=parsed_date.date(),
-            home_team=resolve_team_name(db, str(r["home_team"]), "basketball", Path(path).name),
-            away_team=resolve_team_name(db, str(r["away_team"]), "basketball", Path(path).name),
-            home_score=None if pd.isna(r.get("home_score")) else int(r.get("home_score")),
-            away_score=None if pd.isna(r.get("away_score")) else int(r.get("away_score")),
-            source=Path(path).name,
+    if not {"match_date", "home_team", "away_team"}.issubset(df.columns):
+        return 0
+
+    df = df.dropna(subset=["match_date", "home_team", "away_team"]).copy()
+    df["match_date"] = _parse_match_date(df["match_date"])
+    df = df.dropna(subset=["match_date"])
+    if df.empty:
+        return 0
+
+    name = Path(path).name
+    team_cache = _bulk_resolve_team_names(
+        db, df["home_team"].astype(str).tolist() + df["away_team"].astype(str).tolist(), "basketball", name
+    )
+    df["home_team"] = df["home_team"].astype(str).map(lambda n: team_cache.get(alias_key(n), normalize_team_name(n, "basketball")))
+    df["away_team"] = df["away_team"].astype(str).map(lambda n: team_cache.get(alias_key(n), normalize_team_name(n, "basketball")))
+
+    rows = [
+        {
+            "sport": "basketball",
+            "league": league,
+            "season": season,
+            "match_date": d.date(),
+            "home_team": h,
+            "away_team": a,
+            "home_score": _to_int_or_none(v),
+            "away_score": _to_int_or_none(v2),
+            "source": name,
+            "extra": None,
+        }
+        for d, h, a, v, v2 in zip(
+            df["match_date"], df["home_team"], df["away_team"],
+            df.get("home_score"), df.get("away_score"),
         )
-        upsert_fixture(db, fx)
-        count += 1
-    db.commit()
-    return count
+    ]
+    return _bulk_upsert_fixtures(db, rows)
 
 
 def sync_live_scores(db: Session, football_key: str | None, basketball_key: str | None) -> dict:

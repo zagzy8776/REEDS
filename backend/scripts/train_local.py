@@ -8,7 +8,7 @@ Usage:
     python scripts/train_local.py
 
 What it does:
-  1. Connects to your Neon DB (reads DATABASE_URL from .env)
+  1. Connects to your Aiven PostgreSQL DB (reads DATABASE_URL/AIVEN_DATABASE_URL from .env)
   2. Downloads free historical data if not enough rows (football-data.co.uk etc.)
   3. Trains all sport models using your FULL local RAM (no 512MB limit)
   4. Saves .joblib files to data/models/

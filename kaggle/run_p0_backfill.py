@@ -1,7 +1,7 @@
 """REEDS P0 HISTORICAL BACKFILL ONLY — Kaggle worker.
 
 Downloads FDCO CSVs (football-data.co.uk) and loads genuinely completed
-historical soccer fixtures into Neon via the existing loader pipeline.
+historical soccer fixtures into Aiven via the existing loader pipeline.
 
 THIS IS P0 ONLY:
   - NO HistoricalEvaluation
