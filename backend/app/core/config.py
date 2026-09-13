@@ -1,0 +1,91 @@
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    # Explicit local-development fallback only. Production validation below
+    # rejects SQLite so Render cannot silently create a split-brain database.
+    # Legacy single-URL (kept as fallback during the three-database migration;
+    # Neon is no longer the production database — Aiven is). See the
+    # primary_database_url property below and app/db/roles.py.
+    database_url: str = "sqlite:///./data/local.db"
+    # Role-specific URLs (Phase 1). AIVEN_DATABASE_URL is the production
+    # primary; the other roles default to empty and fall back per roles.py.
+    # Never commit real values.
+    aiven_database_url: str = ""
+    cockroach_database_url: str = ""
+    turso_database_url: str = ""
+    app_env: str = "development"
+    admin_api_key: str = "change-me"
+    cron_secret: str = ""
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    enable_scheduler: bool = False
+    min_training_rows: int = 200
+    model_dir: str = "data/models"
+    public_brand_name: str = "LOYAL EDGE"
+    api_football_key: str = ""
+    api_football_com_key: str = ""
+    api_basketball_key: str = ""
+    api_sports_key: str = ""
+    allsportsapi_key: str = ""
+    allsportsapi_sports: str = "football,basketball,tennis,cricket,hockey,baseball,american-football,volleyball,handball"
+    thesportsdb_api_key: str = "3"
+    thesportsdb_enabled: bool = True
+    thesportsdb_sports: str = "Soccer,Basketball,American Football,Cricket,Tennis,Ice Hockey,Baseball,Rugby,Motorsport,Fighting"
+    thesportsdb_max_calls: int = 10
+    sportmonks_api_key: str = ""
+    football_data_api_key: str = ""
+    bzzoiro_api_key: str = ""
+    openfoot_api_key: str = ""
+    the_odds_api_key: str = ""
+    the_odds_api_sport_keys: str = "soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league,soccer_fifa_world_cup_qualifier,soccer_uefa_european_championship_qualifier,soccer_conmebol_world_cup_qualifier,soccer_concacaf_world_cup_qualifier,soccer_afc_asian_cup_qualifier,soccer_caf_africa_cup_of_nations_qualifier,soccer_international_friendly,basketball_nba,basketball_euroleague,americanfootball_nfl,baseball_mlb,icehockey_nhl,tennis_atp_us_open,tennis_wta_us_open"
+    live_ingest_days: int = 7
+    github_repo: str = "zagzy8776/REEDS"
+    historical_bootstrap_enabled: bool = False
+    fcdo_leagues: str = "E0,E1,E2,E3,SP1,D1,D2,I1,I2,F1,F2"
+    fcdo_seasons: str = "2425,2324,2223,2122,2021,1920,1819,1718"
+    bootstrap_odds_source: str = "B365"
+
+    @property
+    def allowed_cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def primary_database_url(self) -> str:
+        """Production primary connection string: Aiven when configured, else
+        the legacy DATABASE_URL fallback (kept for the transition so existing
+        deployments keep working with no configuration change)."""
+        return (self.aiven_database_url or "").strip() or self.database_url
+
+    @property
+    def odds_api_sport_keys(self) -> list[str]:
+        return [sport.strip() for sport in self.the_odds_api_sport_keys.split(",") if sport.strip()]
+
+    @property
+    def allsportsapi_sport_list(self) -> list[str]:
+        return [sport.strip() for sport in self.allsportsapi_sports.split(",") if sport.strip()]
+
+    @property
+    def thesportsdb_sport_list(self) -> list[str]:
+        return [sport.strip() for sport in self.thesportsdb_sports.split(",") if sport.strip()]
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        protected_namespaces=("settings_",),
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    settings = Settings()
+    primary = settings.primary_database_url.strip().lower()
+    if settings.app_env.lower() == "production" and (
+        not primary or primary.startswith(("sqlite://", "sqlite+"))
+    ):
+        raise RuntimeError(
+            "AIVEN_DATABASE_URL (or DATABASE_URL fallback) must point to PostgreSQL in production"
+        )
+    return settings

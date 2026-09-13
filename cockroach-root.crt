@@ -1,0 +1,4 @@
+{
+  "code": 16,
+  "message": "missing authorization header; see https://www.cockroachlabs.com/docs/cockroachcloud/cloud-api.html#call-the-api"
+}

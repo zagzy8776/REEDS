@@ -1,0 +1,44 @@
+.env
+.env.*
+*.env
+!*.env.example
+.env.example.bak
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.db
+*.sqlite
+node_modules/
+.next/
+.vercel/
+data/models/*.joblib
+data/models/*.json
+backend/data/
+backend/data/local.db
+backend/data/raw/**/*.csv
+backend/data/raw/**/*.json
+backend/data/raw/statsbomb_open_data/
+data/raw/**/*.csv
+data/raw/**/*.json
+data/raw/statsbomb_open_data/
+
+# Secrets: any dotfile env variant, regardless of depth
+**/.env
+**/.env.local
+**/.env.*.local
+
+# Local credential/state files
+*.pem
+*.key
+*.p12
+*.pfx
+.secrets/
+credentials*.json
+client_secret*.json
+
+#Ignore cursor AI rules
+.cursor\rules\codacy.mdc
+
+# Separate repo — never commit
+coach/

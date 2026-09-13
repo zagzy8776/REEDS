@@ -1,0 +1,150 @@
+import Link from "next/link";
+import { getFixtureStatus, getFixtures, getTodayPredictions } from "../../lib/api";
+
+export const dynamic = "force-dynamic";
+
+const DEFAULT_SPORTS = ["soccer", "basketball", "tennis", "cricket", "american_football", "baseball", "hockey", "rugby", "volleyball", "handball", "mma", "motorsport"];
+
+function labelSport(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatDate(value?: string) {
+  if (!value) return "TBA";
+  return new Intl.DateTimeFormat("en", { weekday: "short", month: "short", day: "numeric" }).format(new Date(value));
+}
+
+function formatOdds(value?: number | null) {
+  return typeof value === "number" ? value.toFixed(2) : "-";
+}
+
+function isUsableFixture(f: any) {
+  const home = String(f?.home_team || "").trim();
+  const away = String(f?.away_team || "").trim();
+  const source = String(f?.source || "").toLowerCase();
+  const text = `${home} ${away} ${source}`.toLowerCase();
+  const garbage = [
+    "livescore.in",
+    "web fixtures",
+    "webfixture",
+    "references link on the bottom",
+    "floating icon",
+    "provides bettors",
+    "user id:",
+    "users id:",
+  ];
+  if (!home || !away) return false;
+  if (garbage.some((marker) => text.includes(marker))) return false;
+  if (/\buser\s*id\b/i.test(home) || /\buser\s*id\b/i.test(away)) return false;
+  if (home.length > 90 || away.length > 90) return false;
+  return true;
+}
+
+function predictionBackedFixtures(picks: any[]) {
+  const seen = new Set<number>();
+  return picks
+    .filter((p: any) => Number.isFinite(Number(p.fixture_id)) && !seen.has(Number(p.fixture_id)) && seen.add(Number(p.fixture_id)))
+    .map((p: any) => ({
+      id: p.fixture_id,
+      sport: p.sport,
+      league: p.league,
+      season: "",
+      match_date: p.match_date,
+      home_team: p.home_team,
+      away_team: p.away_team,
+      home_score: null,
+      away_score: null,
+      home_odds: null,
+      draw_odds: null,
+      away_odds: null,
+      has_odds: false,
+      total_goals: null,
+      api_status: "prediction-backed",
+      result_label: "upcoming",
+      source: "prediction",
+      extra: { prediction_backed: true },
+    }));
+}
+
+export default async function Fixtures({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
+  const params = await searchParams;
+  const [fixtureRows, status] = await Promise.all([
+    getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "500" }),
+    getFixtureStatus(),
+  ]);
+
+  let fixtures = (Array.isArray(fixtureRows) ? fixtureRows : []).filter(isUsableFixture);
+  let boardRecoveredFromPredictions = false;
+  if (!fixtures.length && params.scope !== "results") {
+    const picks = await getTodayPredictions(params);
+    if (Array.isArray(picks) && picks.length) {
+      fixtures = predictionBackedFixtures(picks).filter(isUsableFixture);
+      boardRecoveredFromPredictions = fixtures.length > 0;
+    }
+  }
+
+  const sports = Array.from(new Set([...DEFAULT_SPORTS, ...fixtures.map((f: any) => f.sport)])).filter(Boolean);
+  const leagues = Array.from(new Set(fixtures.map((f: any) => f.league))).filter(Boolean);
+  const withOdds = fixtures.filter((f: any) => f.has_odds).length;
+  const completed = fixtures.filter((f: any) => f.home_score !== null && f.away_score !== null).length;
+  const todayCount = fixtures.filter((f: any) => String(f.match_date).slice(0, 10) === new Date().toISOString().slice(0, 10)).length;
+  const grouped = fixtures.reduce((acc: Record<string, any[]>, f: any) => {
+    const key = String(f.match_date || "TBA");
+    acc[key] = acc[key] || [];
+    acc[key].push(f);
+    return acc;
+  }, {});
+
+  return (
+    <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+      <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr] lg:items-end">
+        <div>
+          <p className="badge inline-block">Match center</p>
+          <h1 className="mt-4 text-4xl font-black sm:text-5xl">Upcoming games, today&rsquo;s board, and results.</h1>
+          <p className="mt-3 max-w-3xl text-slate-300">Find the match, check the score or odds, open the exact AI read, or post your own take.</p>
+          <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+            <Link href="/predictions" className="rounded-xl bg-emerald-400 px-5 py-3 text-center font-black text-slate-950">View AI picks</Link>
+            <Link href="/predictions/submit" className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-center font-bold">+ Post community pick</Link>
+          </div>
+        </div>
+        <div className="card">
+          <p className="text-sm text-slate-400">Feed status</p>
+          <div className="mt-4 grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{fixtures.length}</b><br /><span className="text-xs text-slate-500">Fixtures</span></div>
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{leagues.length}</b><br /><span className="text-xs text-slate-500">Leagues</span></div>
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{withOdds}</b><br /><span className="text-xs text-slate-500">With odds</span></div>
+            <div className="rounded-2xl bg-slate-950/70 p-3"><b className="text-2xl text-emerald-300">{todayCount}</b><br /><span className="text-xs text-slate-500">Today</span></div>
+          </div>
+        </div>
+      </section>
+
+      <form className="mt-6 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/50 p-4 md:grid-cols-5">
+        <select name="scope" defaultValue={params.scope || "all"} className="rounded-xl border border-slate-800 bg-slate-950 p-3"><option value="all">All active/upcoming</option><option value="live">Today / Live</option><option value="upcoming">Upcoming</option><option value="results">Old results</option></select>
+        <select name="sport" defaultValue={params.sport || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3"><option value="">All sports</option>{sports.map((x: any) => <option key={x} value={x}>{labelSport(String(x))}</option>)}</select>
+        <select name="league" defaultValue={params.league || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3"><option value="">All leagues</option>{leagues.map((x: any) => <option key={x} value={x}>{x}</option>)}</select>
+        <input name="limit" type="number" min="25" max="500" defaultValue={params.limit || "500"} className="rounded-xl border border-slate-800 bg-slate-950 p-3" />
+        <button className="rounded-xl bg-emerald-400 px-4 py-3 font-bold text-slate-950">Refresh board</button>
+      </form>
+
+      {status ? <section className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div><b className="text-white">Feed status:</b> <span className={boardRecoveredFromPredictions ? "text-amber-300" : status.feed_health === "active" ? "text-emerald-300" : "text-amber-300"}>{boardRecoveredFromPredictions ? "prediction-backed" : String(status.feed_health).replaceAll("_", " ")}</span><p className="mt-1 text-slate-400">API rows: {status.api_rows} • Sample rows: {status.sample_rows} • Scores: {status.with_scores} • Odds: {status.with_odds}</p></div><p className="max-w-xl text-xs text-slate-500">{boardRecoveredFromPredictions ? "Fixture feed is temporarily empty, so the match centre is reusing matches already powering the AI board." : status.feed_health === "active" ? "The match feed is connected." : "If the feed looks empty, check the API keys and scheduler on Render."}</p></div></section> : null}
+
+      <section className="mt-8 space-y-6">
+        {fixtures.length ? Object.entries(grouped).map(([day, rows]: [string, any[]]) => (
+          <div key={day} className="card">
+            <div className="flex flex-col gap-2 border-b border-white/10 pb-4 sm:flex-row sm:items-center sm:justify-between"><h2 className="text-xl font-black">{formatDate(day)}</h2><p className="text-sm text-slate-400">{rows.length} match{rows.length === 1 ? "" : "es"}</p></div>
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              {rows.map((f: any) => (
+                <div key={f.id} className="rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><p className="text-xs uppercase tracking-wide text-slate-500">{f.sport} • {f.league}</p><h3 className="mt-1 text-lg font-black">{f.home_team} vs {f.away_team}</h3></div><div className="flex flex-wrap gap-2"><span className={f.result_label === "completed" ? "rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs text-emerald-200" : "rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-1 text-xs text-sky-200"}>{f.result_label === "completed" ? "Result" : f.result_label === "live" ? "Live" : f.result_label === "today" ? "Today" : "Upcoming"}</span><span className={f.has_odds ? "badge w-fit" : "rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400"}>{f.has_odds ? "Odds live" : "Odds pending"}</span></div></div>
+                  <div className="mt-4 grid grid-cols-3 gap-2 text-center text-sm"><div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Score</span><br /><b>{f.home_score ?? "-"} - {f.away_score ?? "-"}</b></div><div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Goals</span><br /><b>{f.total_goals ?? "-"}</b></div><div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Status</span><br /><b className="capitalize">{String(f.api_status || f.result_label || "pending").replaceAll("_", " ")}</b></div></div>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-center text-sm"><div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Home</span><br /><b>{formatOdds(f.home_odds)}</b></div><div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Draw</span><br /><b>{formatOdds(f.draw_odds)}</b></div><div className="rounded-xl bg-slate-900 p-3"><span className="text-slate-500">Away</span><br /><b>{formatOdds(f.away_odds)}</b></div></div>
+                  <div className="mt-4 flex flex-wrap gap-2 text-xs font-bold"><Link href={`/fixtures/${f.id}/ai-reads`} className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-emerald-200">AI Reads</Link><Link href={`/fixtures/${f.id}`} className="rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-sky-200">Match Hub</Link><Link href="/predictions/submit" className="rounded-full border border-slate-700 bg-slate-900 px-3 py-2 text-slate-200">+ Community pick</Link></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )) : <div className="card border-dashed border-emerald-400/30 bg-emerald-400/5 text-slate-300"><h2 className="text-2xl font-black text-white">No fixtures are showing yet.</h2><p className="mt-2">Once the live feed runs, fixtures and results will show here.</p></div>}
+      </section>
+    </main>
+  );
+}

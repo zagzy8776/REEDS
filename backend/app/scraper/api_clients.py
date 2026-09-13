@@ -1,0 +1,235 @@
+from datetime import date, timedelta
+
+from app.scraper.http_client import HttpClient
+
+
+class ApiFootballClient:
+    """API-Football-style adapter. Keep keys in env; never hardcode secrets."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://v3.football.api-sports.io"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def fixtures(self, league_id: int, season: int) -> dict:
+        if not self.api_key:
+            return {"response": [], "note": "API_FOOTBALL_KEY not configured"}
+        return self.http.get(
+            f"{self.base_url}/fixtures",
+            params={"league": league_id, "season": season},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+    def fixtures_by_date(self, target_date: str) -> dict:
+        if not self.api_key:
+            return {"response": [], "note": "API_FOOTBALL_KEY not configured"}
+        return self.http.get(
+            f"{self.base_url}/fixtures",
+            params={"date": target_date},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+    def fixture_events(self, fixture_id: int) -> dict:
+        if not self.api_key:
+            return {"response": []}
+        return self.http.get(
+            f"{self.base_url}/fixtures/events",
+            params={"fixture": fixture_id},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+    def fixture_lineups(self, fixture_id: int) -> dict:
+        if not self.api_key:
+            return {"response": []}
+        return self.http.get(
+            f"{self.base_url}/fixtures/lineups",
+            params={"fixture": fixture_id},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+    def fixture_statistics(self, fixture_id: int) -> dict:
+        if not self.api_key:
+            return {"response": []}
+        return self.http.get(
+            f"{self.base_url}/fixtures/statistics",
+            params={"fixture": fixture_id},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+    def odds_by_date(self, target_date: str, bookmaker: int | None = None) -> dict:
+        if not self.api_key:
+            return {"response": [], "note": "API_FOOTBALL_KEY not configured"}
+        params = {"date": target_date}
+        if bookmaker:
+            params["bookmaker"] = bookmaker
+        return self.http.get(
+            f"{self.base_url}/odds",
+            params=params,
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+
+class ApiBasketballClient:
+    """API-Basketball-style adapter from API-SPORTS."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://v1.basketball.api-sports.io"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def games_by_date(self, target_date: str) -> dict:
+        if not self.api_key:
+            return {"response": [], "note": "API_BASKETBALL_KEY/API_SPORTS_KEY not configured"}
+        return self.http.get(
+            f"{self.base_url}/games",
+            params={"date": target_date},
+            headers={"x-apisports-key": self.api_key},
+        ).json()
+
+
+class TheOddsApiClient:
+    """The Odds API adapter. Keys come from https://dash.the-odds-api.com/."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://api.the-odds-api.com/v4"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def h2h_odds(self, sport_key: str, regions: str = "uk,eu,us", bookmakers: str | None = None) -> dict | list:
+        if not self.api_key:
+            return {"response": [], "note": "THE_ODDS_API_KEY not configured"}
+        params = {
+            "apiKey": self.api_key,
+            "regions": regions,
+            "markets": "h2h",
+            "oddsFormat": "decimal",
+            "dateFormat": "iso",
+        }
+        if bookmakers:
+            params["bookmakers"] = bookmakers
+        return self.http.get(f"{self.base_url}/sports/{sport_key}/odds", params=params).json()
+
+    def sports(self) -> list:
+        """Return list of available sport keys from the API."""
+        if not self.api_key:
+            return []
+        return self.http.get(f"{self.base_url}/sports", params={"apiKey": self.api_key, "all": "true"}).json()
+
+
+class ApiFootballComClient:
+    """apifootball.com adapter. This is different from API-SPORTS API-Football."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://apiv3.apifootball.com"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def fixtures_by_date(self, target_date: str) -> dict | list:
+        if not self.api_key:
+            return []
+        return self.fixtures_by_range(target_date, target_date)
+
+    def fixtures_by_range(self, from_date: str, to_date: str) -> dict | list:
+        if not self.api_key:
+            return []
+        return self.http.get(
+            self.base_url,
+            params={"action": "get_events", "from": from_date, "to": to_date, "APIkey": self.api_key},
+        ).json()
+
+
+class SportMonksFootballClient:
+    """SportMonks Football v3 adapter."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://api.sportmonks.com/v3/football"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def fixtures_by_date(self, target_date: str) -> dict:
+        if not self.api_key:
+            return {"data": []}
+        return self.http.get(
+            f"{self.base_url}/fixtures/date/{target_date}",
+            params={"api_token": self.api_key, "include": "participants;scores;league"},
+        ).json()
+
+
+class FootballDataOrgClient:
+    """football-data.org v4 adapter."""
+
+    def __init__(self, api_key: str | None, base_url: str = "https://api.football-data.org/v4"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def matches_by_date(self, target_date: str) -> dict:
+        if not self.api_key:
+            return {"matches": []}
+        return self.matches_by_range(target_date, target_date)
+
+    def matches_by_range(self, from_date: str, to_date: str) -> dict:
+        """Fetch a possibly wide range in bounded chunks.
+
+        The production scheduler can ask for two weeks of fixtures. Keep each
+        upstream request to a maximum ten-day window and merge the results.
+        """
+        if not self.api_key:
+            return {"matches": []}
+
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date)
+        matches: list[dict] = []
+        current = start
+        while current <= end:
+            chunk_end = min(current + timedelta(days=9), end)
+            payload = self.http.get(
+                f"{self.base_url}/matches",
+                params={"dateFrom": current.isoformat(), "dateTo": chunk_end.isoformat()},
+                headers={"X-Auth-Token": self.api_key},
+            ).json()
+            if isinstance(payload, dict):
+                matches.extend(payload.get("matches", []) or [])
+            current = chunk_end + timedelta(days=1)
+        return {"matches": matches}
+
+
+class AllSportsApiClient:
+    """AllSportsAPI adapter.
+
+    Free tier note: the provider allows around 260 calls/hour but only exposes
+    two assigned leagues per year. We therefore call one ranged endpoint per
+    sport instead of one request per date, keeping usage low.
+    """
+
+    def __init__(self, api_key: str | None, base_url: str = "https://apiv2.allsportsapi.com"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.http = HttpClient()
+
+    def events_by_range(self, sport: str, from_date: str, to_date: str) -> dict | list:
+        if not self.api_key:
+            return {"result": []}
+        return self.http.get(
+            f"{self.base_url}/{sport}",
+            params={"met": "Fixtures", "APIkey": self.api_key, "from": from_date, "to": to_date},
+        ).json()
+
+
+class TheSportsDbClient:
+    """TheSportsDB free-tier adapter.
+
+    We use the public v1 JSON endpoint and keep scheduler calls capped. This is
+    a fallback/coverage source, not a high-frequency live feed.
+    """
+
+    def __init__(self, api_key: str | None = "3", base_url: str = "https://www.thesportsdb.com/api/v1/json"):
+        self.api_key = api_key or "3"
+        self.base_url = f"{base_url.rstrip('/')}/{self.api_key}"
+        self.http = HttpClient()
+
+    def events_day(self, target_date: str, sport: str | None = None) -> dict:
+        params = {"d": target_date}
+        if sport:
+            params["s"] = sport
+        return self.http.get(f"{self.base_url}/eventsday.php", params=params).json()

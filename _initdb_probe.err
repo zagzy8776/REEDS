@@ -1,0 +1,4 @@
+2026-09-13 17:43:28,034 INFO patched predictions signature helpers
+2026-09-13 17:43:28,046 INFO patched _backfill_fixture_odds (no fake bookmaker lines)
+2026-09-13 17:43:28,120 INFO patched soccer league difficulty normalizer
+2026-09-13 17:43:28,269 INFO wrapped loaders.upsert_fixture with fixture quality gate

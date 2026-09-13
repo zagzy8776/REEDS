@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+from sqlalchemy.orm import Session
+
+from app.db.models import Fixture, OddsSnapshot, Prediction
+
+
+def selected_decimal_odds(prediction: Prediction, snapshot: OddsSnapshot) -> float | None:
+    """Return the decimal odds that correspond to the public pick.
+
+    This first version supports 1X2/moneyline-style odds. Spread/total ROI needs
+    line-specific bookmaker odds and push handling, so those markets are skipped
+    until the odds feed stores complete line data.
+    """
+
+    pick = prediction.pick.lower()
+    market = prediction.market.lower()
+    if market in {"1x2", "moneyline"}:
+        if "home" in pick:
+            return snapshot.home_odds
+        if "away" in pick:
+            return snapshot.away_odds
+        if "draw" in pick:
+            return snapshot.draw_odds
+    return None
+
+
+def prediction_won(prediction: Prediction, fixture: Fixture) -> bool | None:
+    if fixture.home_score is None or fixture.away_score is None:
+        return None
+    pick = prediction.pick.lower()
+    market = prediction.market.lower()
+    if market in {"1x2", "moneyline"}:
+        if "home" in pick:
+            return fixture.home_score > fixture.away_score
+        if "away" in pick:
+            return fixture.away_score > fixture.home_score
+        if "draw" in pick:
+            return fixture.home_score == fixture.away_score
+    if market == "goals":
+        total = fixture.home_score + fixture.away_score
+        if "over 2.5" in pick:
+            return total > 2.5
+        if "under 2.5" in pick:
+            return total < 2.5
+    if market == "btts":
+        both_scored = fixture.home_score > 0 and fixture.away_score > 0
+        if "yes" in pick:
+            return both_scored
+        if "no" in pick:
+            return not both_scored
+    return None
+
+
+def latest_snapshot(db: Session, prediction_id: int, phase: str) -> OddsSnapshot | None:
+    return (
+        db.query(OddsSnapshot)
+        .filter(OddsSnapshot.prediction_id == prediction_id, OddsSnapshot.phase == phase)
+        .order_by(OddsSnapshot.captured_at.desc())
+        .first()
+    )
+
+
+def _recent_settled_rows(db: Session, limit: int = 5000):
+    """Bounded set of settled published predictions, newest first."""
+    from datetime import date, timedelta
+    cutoff = date.today() - timedelta(days=180)
+    return (
+        db.query(Prediction, Fixture)
+        .join(Fixture, Prediction.fixture_id == Fixture.id)
+        .filter(
+            Prediction.is_published == True,
+            Fixture.home_score != None,
+            Fixture.away_score != None,
+            Fixture.match_date >= cutoff,
+        )
+        .order_by(Fixture.match_date.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def _snapshot_map(db: Session, prediction_ids: list[int], phase: str) -> dict[int, OddsSnapshot]:
+    """Fetch the latest snapshot per prediction in one query (no N+1)."""
+    if not prediction_ids:
+        return {}
+    rows = (
+        db.query(OddsSnapshot)
+        .filter(OddsSnapshot.prediction_id.in_(prediction_ids), OddsSnapshot.phase == phase)
+        .order_by(OddsSnapshot.prediction_id.asc(), OddsSnapshot.captured_at.desc())
+        .all()
+    )
+    result: dict[int, OddsSnapshot] = {}
+    for snap in rows:
+        result.setdefault(snap.prediction_id, snap)
+    return result
+
+
+def roi_clv_summary(db: Session) -> dict:
+    rows = _recent_settled_rows(db)
+    ids = [pred.id for pred, _ in rows]
+    published_snaps = _snapshots(db, ids, "published")
+    closing_snaps = _snapshots(db, ids, "closing")
+    roi_total = roi_profit = clv_total = clv_positive = 0
+    by_market: dict[str, dict] = {}
+
+    for pred, fx in rows:
+        published = published_snaps.get(pred.id)
+        if not published:
+            continue
+        published_odds = selected_decimal_odds(pred, published)
+        won = prediction_won(pred, fx)
+        if published_odds and won is not None:
+            roi_total += 1
+            profit = (published_odds - 1) if won else -1
+            roi_profit += profit
+            market_row = by_market.setdefault(pred.market, {"market": pred.market, "bets": 0, "profit": 0.0, "clv_total": 0, "clv_positive": 0})
+            market_row["bets"] += 1
+            market_row["profit"] += profit
+            roi_count += 1
+
+            closing = closing_snaps.get(pred.id)
+            if closing:
+                closing_odds = selected_decimal_odds(pred, closing)
+                if closing_odds:
+                    clv_total += 1
+                    market_row["clv_total"] += 1
+                    if published_odds > closing_odds:
+                        clv_positive += 1
+                        market_row["clv_positive"] += 1
+
+    return {
+        "tracked_bets": roi_total,
+        "profit_units": round(roi_profit, 2),
+        "roi_percent": round((roi_profit / roi_count) * 100, 2) if roi_count else 0,
+        "clv_tracked": clv_total,
+        "positive_clv_rate": round((clv_positive / clv_total) * 100, 2) if clv_total else 0,
+        "by_market": [
+            {
+                **row,
+                "profit": round(row["profit"], 2),
+                "roi_percent": round((row["profit"] / row["bets"]) * 100, 2) if row["bets"] else 0,
+                "positive_clv_rate": round((row["clv_positive"] / row["clv_total"]) * 100, 2) if row["clv_total"] else 0,
+            }
+            for row in by_market.values()
+        ],
+        "note": "ROI is calculated as flat 1-unit staking on recent supported settled markets. CLV requires matching closing odds snapshots.",
+    }
+
+
+def yield_by_tier(db: Session) -> dict:
+    """Track win rate and yield per confidence tier for value bet monitoring.
+
+    Tiers based on prediction confidence:
+      Elite:    confidence >= 60%
+      Standard: 52% <= confidence < 60%
+      Sandbox:  confidence < 52%
+
+    Win rate below 55% on Elite tier over 200+ bets = tighten the certainty floor.
+    """
+    from app.db.models import Fixture, Prediction
+
+    rows = _recent_settled_rows(db)
+    ids = [pred.id for pred, _ in rows]
+    published_snaps = _snapshots(db, ids, "published")
+
+    tiers: dict[str, dict] = {
+        "elite":    {"label": "Elite (≥60%)", "bets": 0, "wins": 0, "profit": 0.0, "threshold": 60},
+        "standard": {"label": "Standard (52-59%)", "bets": 0, "wins": 0, "profit": 0.0, "threshold": 52},
+        "sandbox":  {"label": "Sandbox (<52%)", "bets": 0, "wins": 0, "profit": 0.0, "threshold": 0},
+    }
+
+    for pred, fx in rows:
+        won = prediction_won(pred, fx)
+        if won is None:
+            continue
+        snap = published_snaps.get(pred.id)
+        odds = selected_decimal_odds(pred, snap) if snap else None
+
+        conf = pred.confidence
+        if conf >= 60:
+            tier_key = "elite"
+        elif conf >= 52:
+            tier_key = "standard"
+        else:
+            tier_key = "sandbox"
+
+        t = tiers[tier_key]
+        t["bets"] += 1
+        t["wins"] += 1 if won else 0
+        if odds:
+            t["profit"] += (odds - 1) if won else -1.0
+
+    result = []
+    for key, t in tiers.items():
+        bets = t["bets"]
+        wins = t["wins"]
+        profit = round(t["profit"], 2)
+        win_rate = round(wins / bets * 100, 1) if bets else 0.0
+        roi = round(profit / bets * 100, 2) if bets else 0.0
+        health = "✅ On track" if win_rate >= 55 and bets >= 20 else ("⚠️ Tighten floor" if win_rate < 50 and bets >= 50 else "📊 Building sample")
+        result.append({
+            "tier":      key,
+            "label":     t["label"],
+            "bets":      bets,
+            "wins":      wins,
+            "win_rate":  win_rate,
+            "profit_units": profit,
+            "roi_pct":   roi,
+            "health":    health,
+            "note":      "Tighten certainty floor if Elite win_rate < 55% over 200+ bets" if key == "elite" else "",
+        })
+
+    return {
+        "yield_by_tier": result,
+        "recommendation": next(
+            (f"⚠️ {t['label']} win rate {t['win_rate']}% below 55% — tighten floor"
+             for t in result if t["tier"] == "elite" and t["win_rate"] < 55 and t["bets"] >= 50),
+            "✅ Elite tier performing within expected range"
+        ),
+    }

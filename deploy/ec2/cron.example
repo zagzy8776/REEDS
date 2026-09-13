@@ -1,0 +1,7 @@
+# REEDS EC2 worker cron line (commented out — enable manually after CI validation).
+#
+# Runs the full sequential OOF training every day at 05:00 UTC, appending to a
+# log. Each sport runs in its own child process. Requires /etc/reeds.env to be
+# sourced, e.g. via a wrapper script or `env $(grep -v '^#' /etc/reeds.env | xargs)`.
+#
+# 0 5 * * * /home/ubuntu/reeds-venv/bin/python /home/ubuntu/REEDS/backend/scripts/ec2_train_worker.py run-all >> /home/ubuntu/REEDS/deploy/ec2/logs/run-all.cron.log 2>&1

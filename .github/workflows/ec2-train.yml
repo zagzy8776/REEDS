@@ -1,0 +1,98 @@
+name: EC2 Training Worker
+
+on:
+  repository_dispatch:
+    types:
+      - reeds-training
+  workflow_dispatch:
+    inputs:
+      sports:
+        description: 'Comma-separated sports to train (default: all)'
+        required: false
+        default: ''
+      skip_upload:
+        description: 'Train only, do not publish to GitHub/Render'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  ec2-train:
+    name: EC2 Training
+    runs-on: self-hosted
+    if: github.event_name == 'workflow_dispatch' || github.event.action == 'reeds-training'
+    timeout-minutes: 540
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify Python version
+        run: python --version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Verify scikit-learn lock
+        run: |
+          python - <<'PY'
+          import sklearn
+          major, minor = (int(p) for p in sklearn.__version__.split(".")[:2])
+          assert (1, 6) <= (major, minor) < (1, 7), f"sklearn {sklearn.__version__} out of 1.6.x lock"
+          print(f"scikit-learn {sklearn.__version__} OK (lock range 1.6.x)")
+          PY
+
+      - name: Validate EC2 worker configuration
+        run: python backend/scripts/ec2_train_worker.py validate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+
+      - name: Run EC2 training
+        run: |
+          if [ -n "${{ inputs.sports }}" ]; then
+            python backend/scripts/ec2_train_worker.py run-all --sports "${{ inputs.sports }}"
+          else
+            python backend/scripts/ec2_train_worker.py run-all
+          fi
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+          MODEL_DIR: ${{ github.workspace }}/backend/data/models
+          MIN_TRAINING_ROWS: ${{ secrets.MIN_TRAINING_ROWS || '200' }}
+          SPORTS_OVERRIDE: ${{ inputs.sports }}
+
+      - name: Upload training logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ec2-training-logs-${{ github.run_id }}
+          path: |
+            backend/data/models/*.joblib
+            backend/data/models/*.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Training summary
+        if: always()
+        run: |
+          echo "## EC2 Training Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Trigger: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Runner: self-hosted" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
