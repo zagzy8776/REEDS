@@ -206,3 +206,57 @@ def test_cmd_train_force_overrides_lock(tmp_path):
             code = worker._cmd_train(args)
         assert code == worker.EXIT_OK
         worker._release_training_lock()
+
+
+# ── Stale-lock regression ──────────────────────────────────────────────────
+
+def test_stale_lock_with_dead_pid_is_reclaimed(tmp_path):
+    """A lock file whose recorded PID is dead must be reclaimed, not block."""
+    lock_file = tmp_path / "stale-training.lock"
+    # Write a PID that cannot exist (negative).
+    lock_file.write_text("-999999", encoding="utf-8")
+    with mock.patch.object(worker, "TRAINING_LOCK_FILE", lock_file):
+        assert worker._acquire_training_lock() is True
+        worker._release_training_lock()
+
+
+def test_nonexistent_lock_file_acquires_cleanly(tmp_path):
+    """No lock file at all must acquire without error."""
+    lock_file = tmp_path / "missing-training.lock"
+    assert not lock_file.exists()
+    with mock.patch.object(worker, "TRAINING_LOCK_FILE", lock_file):
+        assert worker._acquire_training_lock() is True
+        worker._release_training_lock()
+
+
+def test_release_when_no_lock_held_is_safe(tmp_path):
+    """Releasing without holding must not raise."""
+    lock_file = tmp_path / "never-acquired-training.lock"
+    with mock.patch.object(worker, "TRAINING_LOCK_FILE", lock_file):
+        worker._release_training_lock()
+        assert not lock_file.exists()
+
+
+def test_lock_file_removed_on_release(tmp_path):
+    """The lock file must be unlinked after a clean release."""
+    lock_file = tmp_path / "cleanup-training.lock"
+    with mock.patch.object(worker, "TRAINING_LOCK_FILE", lock_file):
+        assert worker._acquire_training_lock() is True
+        assert lock_file.is_file()
+        worker._release_training_lock()
+        assert not lock_file.exists()
+
+
+def test_lock_directory_failure_returns_false(tmp_path):
+    """A lock path whose parent is a file (not a dir) must return False, not raise.
+
+    Previously the mkdir exception was swallowed by a bare except, which then
+    fell through to the fcntl path and could surface a misleading 'lock held'
+    message. The new implementation prints the error and returns False.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("I am a file, not a directory", encoding="utf-8")
+    lock_file = blocker / "perm-training.lock"
+    with mock.patch.object(worker, "TRAINING_LOCK_FILE", lock_file):
+        result = worker._acquire_training_lock()
+        assert result is False

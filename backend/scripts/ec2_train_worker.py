@@ -71,84 +71,122 @@ SPORTS = (
 _STATE = {"peak_mb": 0.0}
 
 # ── Training lock ──────────────────────────────────────────────────────────
-# Prevents overlapping training runs. Uses atomic file creation (O_CREAT|O_EXCL)
-# for cross-platform support. The lock file is removed on release.
+# Prevents overlapping training runs. Uses POSIX advisory flock on Linux
+# (the EC2 target) which is released automatically when the process dies, so
+# a killed worker can never leave a stale lock. The lock file is also removed
+# on clean release. A stale file with a dead PID is detected and reclaimed.
+#
+# On non-Linux platforms the O_CREAT|O_EXCL create-lock is used as a fallback.
 TRAINING_LOCK_FILE = Path(os.environ.get("TRAINING_LOCK_FILE", "/tmp/reeds-training.lock"))
 _training_lock_fd = None
+_training_lock_pid: int | None = None
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if pid exists and is not a zombie we can reap."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_lock_pid() -> int | None:
+    """Read the PID recorded in the lock file, or None if unreadable."""
+    try:
+        if not TRAINING_LOCK_FILE.is_file():
+            return None
+        return int(TRAINING_LOCK_FILE.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
 
 
 def _acquire_training_lock() -> bool:
-    """Try to acquire the training lock. Returns True if acquired."""
-    global _training_lock_fd
+    """Try to acquire the training lock. Returns True if acquired.
+
+    On Linux uses flock(LOCK_EX|LOCK_NB) which is released automatically when
+    the holding process exits (abnormal termination included). A stale file
+    whose recorded PID is dead is reclaimed before attempting the lock.
+    """
+    global _training_lock_fd, _training_lock_pid
+
     try:
         TRAINING_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
+    except Exception as exc:
+        print(f"[lock] cannot create lock directory: {exc}", file=sys.stderr)
         return False
 
-    # Primary: atomic file creation with O_CREAT|O_EXCL (cross-platform)
+    # Reclaim a stale lock file before attempting to lock it.
+    stale_pid = _read_lock_pid()
+    if stale_pid is not None and not _pid_alive(stale_pid):
+        try:
+            TRAINING_LOCK_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # Linux/macOS: advisory flock — released automatically on process exit.
+    try:
+        import fcntl  # type: ignore[import-not-found]
+
+        _training_lock_fd = open(TRAINING_LOCK_FILE, "w")
+        try:
+            fcntl.flock(_training_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Lock held by a live process — expected, not an error.
+            try:
+                _training_lock_fd.close()
+            except Exception:
+                pass
+            _training_lock_fd = None
+            return False
+        _training_lock_fd.write(str(os.getpid()))
+        _training_lock_fd.flush()
+        _training_lock_pid = os.getpid()
+        return True
+    except ImportError:
+        pass
+    except Exception as exc:
+        # Unexpected failure — surface it rather than silently falling through
+        # to a misleading "lock held" message.
+        print(f"[lock] flock acquisition failed: {exc}", file=sys.stderr)
+        if _training_lock_fd is not None:
+            try:
+                _training_lock_fd.close()
+            except Exception:
+                pass
+            _training_lock_fd = None
+        return False
+
+    # Fallback (Windows): O_CREAT|O_EXCL create-lock.
     try:
         fd = os.open(str(TRAINING_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         _training_lock_fd = os.fdopen(fd, "w")
         _training_lock_fd.write(str(os.getpid()))
         _training_lock_fd.flush()
+        _training_lock_pid = os.getpid()
         return True
     except FileExistsError:
         return False
-    except Exception:
-        pass
-
-    # Fallback: try fcntl (Linux/macOS)
-    try:
-        import fcntl
-        _training_lock_fd = open(TRAINING_LOCK_FILE, "w")
-        fcntl.flock(_training_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        _training_lock_fd.write(str(os.getpid()))
-        _training_lock_fd.flush()
-        return True
-    except ImportError:
-        pass
-    except Exception:
-        if _training_lock_fd is not None:
-            try:
-                _training_lock_fd.close()
-            except Exception:
-                pass
-            _training_lock_fd = None
-
-    # Fallback: try msvcrt (Windows)
-    try:
-        import msvcrt
-        _training_lock_fd = open(TRAINING_LOCK_FILE, "w")
-        msvcrt.locking(_training_lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
-        _training_lock_fd.write(str(os.getpid()))
-        _training_lock_fd.flush()
-        return True
-    except ImportError:
-        pass
-    except Exception:
-        if _training_lock_fd is not None:
-            try:
-                _training_lock_fd.close()
-            except Exception:
-                pass
-            _training_lock_fd = None
-
-    return False
+    except Exception as exc:
+        print(f"[lock] create-lock acquisition failed: {exc}", file=sys.stderr)
+        return False
 
 
 def _release_training_lock() -> None:
-    """Release the training lock."""
-    global _training_lock_fd
+    """Release the training lock. Safe to call when no lock is held."""
+    global _training_lock_fd, _training_lock_pid
     if _training_lock_fd is not None:
         try:
-            import fcntl
+            import fcntl  # type: ignore[import-not-found]
             fcntl.flock(_training_lock_fd, fcntl.LOCK_UN)
         except ImportError:
-            try:
-                import msvcrt
-                msvcrt.locking(_training_lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-            except Exception:
-                pass
+            pass
         except Exception:
             pass
         finally:
@@ -157,10 +195,11 @@ def _release_training_lock() -> None:
             except Exception:
                 pass
             _training_lock_fd = None
-            try:
-                TRAINING_LOCK_FILE.unlink(missing_ok=True)
-            except Exception:
-                pass
+    _training_lock_pid = None
+    try:
+        TRAINING_LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _rss_mb() -> float | None:
