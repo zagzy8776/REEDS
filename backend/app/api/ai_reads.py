@@ -167,6 +167,26 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
         from app.services.fixture_quality import prediction_readiness
         readiness = prediction_readiness(db, fixture)
         checks = readiness.get("checks") or {}
+        failure_mode = readiness.get("failure_mode")
+        
+        # Generate specific message based on failure mode
+        if failure_mode == "model_unavailable":
+            message = f"REEDS has historical data for this fixture, but no trained model is available for {fixture.sport or 'this sport'}. A model must be trained before predictions can be generated."
+        elif failure_mode == "insufficient_history":
+            message = (
+                "REEDS analysed this fixture but found insufficient team-specific history "
+                "(cold-start / neutral priors). No customer-facing read is shown until "
+                "real form and results for these clubs are available."
+            )
+        elif failure_mode == "no_odds":
+            message = "REEDS has historical data for this fixture, but no odds market is available. Odds are required for value-based predictions."
+        elif failure_mode == "invalid_teams":
+            message = "REEDS could not validate the team names for this fixture. The fixture may contain invalid or placeholder team data."
+        elif failure_mode == "league_not_identified":
+            message = "REEDS could not identify the league for this fixture. League context is required for accurate predictions."
+        else:
+            message = f"REEDS analysed this fixture but prediction generation was blocked: {', '.join(readiness.get('reason') or [])}"
+        
         return {
             "status": "insufficient_data",
             "fixture": _fixture_payload(fixture),
@@ -174,11 +194,8 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
             "intelligence": {"revisions": [], "market": {}, "timeline": []},
             "generation_queued": False,
             "readiness": readiness,
-            "message": (
-                "REEDS analysed this fixture but found insufficient team-specific history "
-                "(cold-start / neutral priors). No customer-facing read is shown until "
-                "real form and results for these clubs are available."
-            ),
+            "failure_mode": failure_mode,
+            "message": message,
             "responsible_note": "AI Reads require match-specific evidence. Default priors are never published as recommendations.",
             "evidence_checklist": {
                 "fixture_found": True,
@@ -186,6 +203,7 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
                 "odds_present": bool(checks.get("odds_present")),
                 "history_present": bool(checks.get("history_present")),
                 "teams_valid": bool(checks.get("teams_valid")),
+                "model_available": bool(checks.get("model_available")),
                 "gaps": readiness.get("reason") or [],
             },
         }
