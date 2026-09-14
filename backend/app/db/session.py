@@ -322,9 +322,20 @@ def ensure_schema() -> None:
         _add_column_if_missing("market_evidence", col, ddl)
 
 
-# Apply production hotfixes (signature + league normalize)
-try:
-    from app.services.runtime_patches import apply_runtime_patches
-    apply_runtime_patches()
-except Exception:
-    pass
+# ── Runtime patches ─────────────────────────────────────────────────────────
+# NOTE: apply_runtime_patches() is NOT called at module import time here.
+# Doing so created a circular import: session.py -> runtime_patches ->
+# predictions -> app.db.models -> app.db.session (Base not yet defined).
+# The patches are applied lazily by app.main.startup_runtime_patches() after
+# every router and model module has finished importing.
+
+def apply_runtime_patches_late() -> None:
+    """Apply production hotfixes (signature + league normalize) after startup.
+
+    Safe to call multiple times; each patch is idempotent.
+    """
+    try:
+        from app.services.runtime_patches import apply_runtime_patches
+        apply_runtime_patches()
+    except Exception:
+        log.exception("failed to apply runtime patches")

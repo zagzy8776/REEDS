@@ -70,6 +70,11 @@ def _finish_startup_once() -> None:
             log.exception("Could not install provider runtime hardening")
         from app.services.prediction_guard import install_prediction_guard
         install_prediction_guard()
+        # Runtime patches must run AFTER every router/model module has finished
+        # importing, otherwise the lazy import in session.py creates a circular
+        # dependency (session -> runtime_patches -> predictions -> models -> session).
+        from app.db.session import apply_runtime_patches_late
+        apply_runtime_patches_late()
         if settings.enable_scheduler:
             from app.services.scheduler import start_scheduler
             start_scheduler()

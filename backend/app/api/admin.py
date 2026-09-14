@@ -1,9 +1,11 @@
 from datetime import date, timedelta
+import gc
+import hashlib
 import logging
+import os
 import threading
 
-log = logging.getLogger(__name__)
-
+import requests
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from sqlalchemy import func
@@ -24,6 +26,58 @@ from app.services.coverage_seed import ensure_multisport_showcase
 
 
 router = APIRouter()
+
+
+def _validate_bundle(path) -> dict:
+    """Structural artifact check WITHOUT deserializing estimators.
+
+    Reads the first bytes to confirm a non-empty joblib/pickle header and
+    pulls metadata from an optional sidecar .json. Never calls joblib.load(),
+    so the 512 MiB Render instance cannot OOM while syncing a large ensemble.
+    """
+    from pathlib import Path as _Path
+    import json as _json
+    from sklearn import __version__ as _SKLEARN_VERSION
+
+    path = _Path(path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError("model artifact is empty or missing")
+    with path.open("rb") as handle:
+        header = handle.read(16)
+    if not header:
+        raise ValueError("model artifact is empty")
+    sidecar = path.with_suffix(".json")
+    metadata: dict = {}
+    if sidecar.is_file():
+        try:
+            metadata = _json.loads(sidecar.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = {}
+    sport = str(metadata.get("sport") or "").strip().lower()
+    if not sport:
+        lowered = path.name.lower()
+        sport = "basketball" if "basketball" in lowered else "soccer"
+    accuracy = float(metadata.get("accuracy", 0.0) or 0.0)
+    sample_size = int(metadata.get("sample_size", 0) or 0)
+    model_types = metadata.get("model_types") or []
+    runtime_versions = metadata.get("runtime_versions") or {}
+    artifact_sklearn = str(runtime_versions.get("scikit_learn") or "").strip()
+    if artifact_sklearn and artifact_sklearn != _SKLEARN_VERSION:
+        raise ValueError(
+            f"incompatible scikit-learn artifact version {artifact_sklearn}; production uses {_SKLEARN_VERSION}"
+        )
+    if not 0.0 <= accuracy <= 1.0:
+        raise ValueError(f"invalid accuracy: {accuracy}")
+    if sample_size <= 0:
+        raise ValueError(f"invalid sample_size: {sample_size}")
+    return {
+        "sport": sport,
+        "accuracy": accuracy,
+        "sample_size": sample_size,
+        "model_type": "+".join(str(x) for x in model_types)[:50] or "uploaded",
+        "runtime_versions": runtime_versions,
+        "validation": "structural_header_sidecar_metadata",
+    }
 
 
 def require_admin(x_admin_key: str = Header(default="")):
@@ -835,28 +889,20 @@ def sync_models(db: Session = Depends(get_db)):
 def download_models(payload: dict | None = None, db: Session = Depends(get_db)):
     """Download the latest trained model artifacts from GitHub Releases.
 
-    Called automatically by the GitHub Actions train.yml workflow after
-    training completes. Also callable manually to pull a specific run.
+    Every artifact is streamed directly to a ``.tmp`` file in a staging
+    directory, SHA-256 is computed while streaming (constant memory), the
+    trusted sidecar checksum is compared, and only then is the temp file
+    atomically renamed into MODEL_DIR. A corrupt or incomplete download can
+    never replace the active model. No joblib.load() is called here — the
+    512 MiB Render instance never deserializes a bundle during sync.
 
     Requires GITHUB_REPO env var (e.g. 'zagzy8776/REEDS') to be set on Render.
     """
-    import shutil as _shutil
-    import requests as _req
-    from pathlib import Path as _Path
-
-    settings = get_settings()
-    # ── Disk sanitization: wipe stale models before pulling fresh ones ───────
-    try:
-        model_dir = _Path(settings.model_dir)
-        if model_dir.exists():
-            for old in model_dir.glob("*.joblib"):
-                old.unlink()
-        else:
-            model_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Model cleanup failed: {exc}")
-    import tempfile
+    import hashlib
+    import json as _json
     import os
+    import shutil as _shutil
+    import tempfile
     from pathlib import Path
 
     settings = get_settings()
@@ -867,80 +913,127 @@ def download_models(payload: dict | None = None, db: Session = Depends(get_db)):
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
 
-    # Get latest release tagged models-v*
     try:
         releases_url = f"https://api.github.com/repos/{github_repo}/releases"
-        resp = _req.get(releases_url, headers=headers, timeout=15)
+        resp = requests.get(releases_url, headers=headers, timeout=15)
         resp.raise_for_status()
         releases = resp.json()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"GitHub API error: {exc}")
 
-    # Find the latest models release
     model_releases = [r for r in releases if str(r.get("tag_name", "")).startswith("models-v")]
     if not model_releases:
         return {"status": "no_models_release", "message": "No model releases found on GitHub yet. Run the train workflow first."}
 
-    latest = model_releases[0]  # sorted newest first
+    latest = model_releases[0]
     assets = latest.get("assets", [])
     joblib_assets = [a for a in assets if a["name"].endswith(".joblib")]
-
     if not joblib_assets:
         return {"status": "no_joblib_assets", "release": latest["tag_name"],
                 "message": "Release found but no .joblib files attached."}
 
-    Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
-    downloaded = []
-    errors = []
-
-    for asset in joblib_assets:
-        try:
-            dl_url = asset["browser_download_url"]
-            fname = asset["name"]
-            dest = Path(settings.model_dir) / fname
-
-            dl_resp = _req.get(dl_url, headers=headers, timeout=120, stream=True)
-            dl_resp.raise_for_status()
-            with open(dest, "wb") as f:
-                for chunk in dl_resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            downloaded.append(str(dest))
-        except Exception as exc:
-            errors.append({"file": asset["name"], "error": str(exc)})
-
-    if not downloaded:
-        return {"status": "download_failed", "errors": errors}
-
-    # Re-register all downloaded models in the DB without deserializing them.
-    # Metadata is read from a sidecar .json published next to each artifact;
-    # artifacts without sidecar metadata are registered but left inactive.
-    import json as _json
-    registered = []
-    for path in downloaded:
-        try:
-            sidecar = f"{path.rsplit('.', 1)[0]}.json"
-            metadata = {}
-            if os.path.isfile(sidecar):
-                with open(sidecar, "r", encoding="utf-8") as handle:
-                    metadata = _json.load(handle)
-            sport = str(metadata.get("sport") or "").strip().lower() or (
-                "basketball" if "basketball" in path else "soccer"
-            )
-            acc = float(metadata.get("accuracy", 0.0) or 0.0)
-            rows = int(metadata.get("sample_size", 0) or 0)
-            model_types = metadata.get("model_types") or ["uploaded"]
-            mv = register_model(db, sport, "+".join(str(x) for x in model_types)[:50], path, acc, rows)
-            registered.append({"sport": sport, "accuracy": round(acc * 100, 1), "rows": rows, "active": mv.is_active})
-        except Exception as exc:
-            errors.append({"file": path, "error": str(exc)})
-
-    return {
-        "status": "success",
-        "release": latest["tag_name"],
-        "downloaded": len(downloaded),
-        "registered": registered,
-        "errors": errors,
+    model_dir = Path(settings.model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix="reeds-download-stage-", dir=str(model_dir)))
+    downloaded: list[dict] = []
+    errors: list[dict] = []
+    sidecar_by_name: dict[str, str] = {
+        str(a.get("name", "")).rsplit(".", 1)[0]: a.get("browser_download_url", "")
+        for a in assets
+        if str(a.get("name", "")).endswith(".json")
     }
+
+    try:
+        for asset in joblib_assets:
+            fname = asset["name"]
+            tmp_path = stage / f"{fname}.tmp"
+            try:
+                dl_resp = requests.get(asset["browser_download_url"], headers=headers, timeout=180, stream=True)
+                dl_resp.raise_for_status()
+                hasher = hashlib.sha256()
+                with tmp_path.open("wb") as handle:
+                    for chunk in dl_resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+                            hasher.update(chunk)
+                actual_sha = hasher.hexdigest()
+
+                base_name = fname.rsplit(".", 1)[0]
+                sidecar_url = sidecar_by_name.get(base_name)
+                sidecar_metadata: dict = {}
+                if sidecar_url:
+                    try:
+                        side_resp = requests.get(sidecar_url, headers=headers, timeout=60, stream=True)
+                        if side_resp.ok:
+                            side_bytes = b""
+                            for chunk in side_resp.iter_content(chunk_size=64 * 1024):
+                                if chunk:
+                                    side_bytes += chunk
+                            sidecar_metadata = _json.loads(side_bytes.decode("utf-8"))
+                    except Exception:
+                        log.exception("Could not download sidecar metadata for %s", fname)
+
+                expected_sha = str(sidecar_metadata.get("sha256") or "").strip().lower()
+                if expected_sha and actual_sha != expected_sha:
+                    tmp_path.unlink(missing_ok=True)
+                    errors.append({"file": fname, "error": f"SHA-256 mismatch: expected {expected_sha[:16]}..., got {actual_sha[:16]}..."})
+                    continue
+                if not expected_sha:
+                    log.warning("No sidecar SHA-256 for %s; proceeding without checksum", fname)
+
+                # Structural check only — never deserialize estimators.
+                _validate_bundle(tmp_path)
+                destination = model_dir / fname
+                if destination.exists():
+                    destination.unlink()
+                os.replace(tmp_path, destination)
+                downloaded.append({"file": fname, "sha256": actual_sha})
+            except Exception as exc:
+                tmp_path.unlink(missing_ok=True)
+                errors.append({"file": fname, "error": str(exc)})
+
+        if not downloaded:
+            return {"status": "download_failed", "errors": errors}
+
+        registered = []
+        for item in downloaded:
+            try:
+                path = str(model_dir / item["file"])
+                sidecar = f"{path.rsplit('.', 1)[0]}.json"
+                metadata = {}
+                if os.path.isfile(sidecar):
+                    with open(sidecar, "r", encoding="utf-8") as handle:
+                        metadata = _json.load(handle)
+                sport = str(metadata.get("sport") or "").strip().lower() or (
+                    "basketball" if "basketball" in item["file"] else "soccer"
+                )
+                acc = float(metadata.get("accuracy", 0.0) or 0.0)
+                rows = int(metadata.get("sample_size", 0) or 0)
+                model_types = metadata.get("model_types") or ["uploaded"]
+                mv = register_model(db, sport, "+".join(str(x) for x in model_types)[:50], path, acc, rows)
+                registered.append({"sport": sport, "accuracy": round(acc * 100, 1), "rows": rows, "active": mv.is_active})
+            except Exception as exc:
+                errors.append({"file": item["file"], "error": str(exc)})
+
+        # Drop resident bundles so the new artifacts are loaded lazily on next
+        # inference and old/new versions are never resident simultaneously.
+        try:
+            from app.ml.model_cache import clear_model_cache
+            clear_model_cache()
+        except Exception:
+            pass
+        gc.collect()
+
+        return {
+            "status": "success",
+            "release": latest["tag_name"],
+            "downloaded": len(downloaded),
+            "registered": registered,
+            "errors": errors,
+        }
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+        gc.collect()
 
 
 @router.post("/trigger-training", dependencies=[Depends(require_admin)])
