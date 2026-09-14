@@ -1,4 +1,13 @@
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://16.170.171.190:8000";
+const CONFIGURED_API_URL = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/$/, "");
+const AWS_API_URL = "http://16.170.171.190:8000";
+const LEGACY_RENDER_API_URL = "https://reeds-phj1.onrender.com";
+
+// Never let an old Render environment variable silently send the live frontend
+// back to the retired backend. A deliberately configured non-Render endpoint
+// still wins; otherwise production uses the AWS backend.
+export const API_URL = CONFIGURED_API_URL && CONFIGURED_API_URL !== LEGACY_RENDER_API_URL
+  ? CONFIGURED_API_URL
+  : AWS_API_URL;
 
 const DEFAULT_API_TIMEOUT_MS = 70000;
 
