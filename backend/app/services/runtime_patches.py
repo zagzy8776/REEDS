@@ -4,14 +4,14 @@ from __future__ import annotations
 import logging
 
 log = logging.getLogger(__name__)
-PREDICTION_ENGINE_VERSION = "history-ensemble-v2"
+PREDICTION_ENGINE_VERSION = "history-ensemble-v3"
 
 
 def apply_runtime_patches() -> None:
     """Wire production inference, history, model signatures, and data hygiene."""
     try:
         from app.services import predictions as pred_mod
-        from app.services.prediction_signature import prediction_signature, existing_prediction_changed
+        from app.services.prediction_signature import prediction_signature
 
         def _versioned_signature(item: dict) -> tuple:
             return (PREDICTION_ENGINE_VERSION, prediction_signature(item))
@@ -25,6 +25,21 @@ def apply_runtime_patches() -> None:
         log.info("patched prediction signatures: %s", PREDICTION_ENGINE_VERSION)
     except Exception:
         log.exception("failed to patch prediction signatures")
+
+    try:
+        from app.ml.ensemble import LoyalEdgeEngine
+        original_ensemble_predict = LoyalEdgeEngine._ensemble_predict
+        if not getattr(original_ensemble_predict, "_reeds_strict_model", False):
+            def strict_ensemble_predict(self, features_row, labels):
+                bundle = self._load_bundle()
+                if not bundle or "models" not in bundle:
+                    raise RuntimeError("trained ensemble bundle is unavailable; refusing silent default probabilities")
+                return original_ensemble_predict(self, features_row, labels)
+            strict_ensemble_predict._reeds_strict_model = True
+            LoyalEdgeEngine._ensemble_predict = strict_ensemble_predict
+            log.info("removed silent ensemble default probabilities")
+    except Exception:
+        log.exception("failed to install strict ensemble inference")
 
     try:
         from app.services import predictions as pred_mod
@@ -65,7 +80,6 @@ def apply_runtime_patches() -> None:
         from app.ml import features as feat_mod
         from app.ml.league_normalize import soccer_league_difficulty
         feat_mod._soccer_league_difficulty = soccer_league_difficulty
-        log.info("patched soccer league difficulty normalizer")
     except Exception:
         log.exception("failed to patch league difficulty")
 
@@ -94,7 +108,6 @@ def apply_runtime_patches() -> None:
                 return original(db, fixture)
             upsert_fixture_with_quality._reeds_quality_wrapped = True
             loaders_mod.upsert_fixture = upsert_fixture_with_quality
-            log.info("wrapped fixture loader with quality gate")
     except Exception:
         log.exception("failed to wrap fixture loader")
 
