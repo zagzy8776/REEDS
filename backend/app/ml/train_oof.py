@@ -1,15 +1,13 @@
 """Production-safe OOF ensemble trainer.
 
 Chronological holdout stays untouched. Expanding-window OOF trains the meta
-learner. Accuracy boosts vs v1:
-  - recency filter (last REEDS_TRAIN_YEARS years, default 6)
-  - balanced class weights (helps draws)
-  - log_loss reported alongside accuracy
-  - team names already normalized inside build_soccer_features
+learner. Training uses only signals that exist in the historical corpus and
+removes cold-start fixtures from the supervised sample while preserving their
+state for feature construction.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import joblib
@@ -29,6 +27,34 @@ from app.ml.train import (
     _build_generic_features,
     _build_model_factories,
 )
+from app.utils.team_names import normalize_team_name
+
+
+# Historical corpus has bookmaker odds, but does not contain reliable
+# opening/closing movement, weather, injury, referee, or public-bet snapshots.
+# Those live-only signals must not become synthetic zero-valued training inputs.
+_DEAD_HISTORICAL_FEATURES = {
+    "sharp_home_move",
+    "sharp_away_move",
+    "clv_home_signal",
+    "insider_sharp_home_move",
+    "insider_sharp_away_move",
+    "insider_clv_home",
+    "insider_steam",
+    "insider_opening_home_prob",
+    "insider_weather_precip",
+    "insider_weather_wind",
+    "insider_home_injury",
+    "insider_away_injury",
+    "insider_referee_cards",
+    "insider_public_home_pct",
+}
+
+SOCCER_TRAINING_FEATURES = [
+    f for f in FEATURES if f not in _DEAD_HISTORICAL_FEATURES
+]
+if "h2h_meetings" not in SOCCER_TRAINING_FEATURES:
+    SOCCER_TRAINING_FEATURES.append("h2h_meetings")
 
 
 def _aligned_proba(model, X, labels):
@@ -60,18 +86,54 @@ def _recency_weights(index_like, match_dates: pd.Series | None) -> np.ndarray | 
     age_days = (max_ts - dates).dt.total_seconds() / 86400.0
     age_days = age_days.fillna(age_days.median() if age_days.notna().any() else 0)
     weights = np.exp(-np.log(2) * age_days.to_numpy(dtype=float) / (365.0 * 2.0))
-    weights = np.clip(weights, 0.15, 1.0)
-    return weights
+    return np.clip(weights, 0.15, 1.0)
 
 
 def _apply_class_weight(model, name: str, y):
-    cw = _class_weight_dict(y)
     try:
         if name in {"random_forest", "lightgbm"} and hasattr(model, "set_params"):
             model.set_params(class_weight="balanced")
     except Exception:
         pass
-    return model, cw
+    return model, _class_weight_dict(y)
+
+
+def _soccer_training_state(fixtures: pd.DataFrame):
+    """Return masks/signals computed strictly from prior fixtures."""
+    counts: dict[str, int] = {}
+    h2h_counts: dict[tuple[str, str], int] = {}
+    last_match: dict[str, pd.Timestamp] = {}
+    eligible = []
+    h2h = []
+    home_rest = []
+    away_rest = []
+
+    for _, row in fixtures.iterrows():
+        home = normalize_team_name(str(row["home_team"]), "soccer")
+        away = normalize_team_name(str(row["away_team"]), "soccer")
+        key = tuple(sorted((home, away)))
+        eligible.append(counts.get(home, 0) >= 5 and counts.get(away, 0) >= 5)
+        h2h.append(float(h2h_counts.get(key, 0)))
+
+        current = pd.to_datetime(row.get("match_date"), errors="coerce")
+        hr = 4.0
+        ar = 4.0
+        if not pd.isna(current):
+            if home in last_match:
+                hr = max((current - last_match[home]).total_seconds() / 86400.0, 0.0)
+            if away in last_match:
+                ar = max((current - last_match[away]).total_seconds() / 86400.0, 0.0)
+        home_rest.append(hr)
+        away_rest.append(ar)
+
+        counts[home] = counts.get(home, 0) + 1
+        counts[away] = counts.get(away, 0) + 1
+        h2h_counts[key] = h2h_counts.get(key, 0) + 1
+        if not pd.isna(current):
+            last_match[home] = current
+            last_match[away] = current
+
+    return np.asarray(eligible, dtype=bool), np.asarray(h2h), np.asarray(home_rest), np.asarray(away_rest)
 
 
 def _fit_oof_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_splits=3, sample_weight_train=None):
@@ -158,10 +220,7 @@ def _fit_oof_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_spl
         ll = float(log_loss(y_test, final_proba, labels=labels))
     except Exception:
         ll = None
-    if ll is not None:
-        print(f"  holdout accuracy={accuracy:.4f}, log_loss={ll:.4f}")
-    else:
-        print(f"  holdout accuracy={accuracy:.4f}")
+    print(f"  holdout accuracy={accuracy:.4f}" + (f", log_loss={ll:.4f}" if ll is not None else ""))
 
     return {
         "models": models,
@@ -175,13 +234,6 @@ def _fit_oof_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_spl
 
 
 def _factories(binary: bool):
-    """Every model type configured in _build_model_factories (full ensemble).
-
-    RF + XGBoost + GradientBoosting + LightGBM + CatBoost + MLP are all included;
-    models are NOT dropped to save memory here. EC2 isolates each sport in its own
-    child process so the OS reclaims memory between sports, which is what allows
-    the full ensemble to train reliably on the ~8 GiB worker.
-    """
     return _build_model_factories(binary=binary, slim=False)
 
 
@@ -257,12 +309,8 @@ def _split_and_train(X, y, labels, factories, sport, features, match_dates=None)
     y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
     if len(X_test) < 5:
         raise ValueError(f"Test set too small ({len(X_test)})")
-    sw = None
-    if match_dates is not None:
-        sw = _recency_weights(X_train.index, match_dates)
-    result = _fit_oof_ensemble(
-        X_train, y_train, X_test, y_test, factories, labels, sample_weight_train=sw
-    )
+    sw = _recency_weights(X_train.index, match_dates) if match_dates is not None else None
+    result = _fit_oof_ensemble(X_train, y_train, X_test, y_test, factories, labels, sample_weight_train=sw)
     return _save_bundle(result, features, labels, sport, len(X))
 
 
@@ -272,14 +320,33 @@ def train_soccer_model_oof(fixtures):
     else:
         fixtures = fixtures.sort_values("match_date").copy()
     fixtures = _filter_recent(fixtures)
+
+    eligible, h2h_counts, home_rest, away_rest = _soccer_training_state(fixtures)
     X, y = build_soccer_features(fixtures)
-    X = X.reindex(columns=FEATURES, fill_value=0)
+
+    # build_soccer_features preserves chronological state, so apply the
+    # cold-start mask only after feature construction.
+    if len(eligible) == len(X):
+        X = X.copy()
+        X["h2h_meetings"] = h2h_counts
+        X["home_rest_days"] = home_rest
+        X["away_rest_days"] = away_rest
+        X["rest_advantage"] = home_rest - away_rest
+        X["home_back_to_back"] = (home_rest < 3.0).astype(int)
+        X["away_back_to_back"] = (away_rest < 3.0).astype(int)
+        X = X.loc[eligible].reset_index(drop=True)
+        y = y.loc[eligible].reset_index(drop=True)
+
+    X = X.reindex(columns=SOCCER_TRAINING_FEATURES, fill_value=0)
     dates = pd.to_datetime(fixtures["match_date"], errors="coerce") if "match_date" in fixtures.columns else None
-    if dates is not None and len(dates) == len(X):
+    if dates is not None and len(dates) == len(eligible):
+        dates = dates.loc[eligible].reset_index(drop=True)
         match_dates = pd.Series(dates.to_numpy(), index=X.index)
     else:
         match_dates = None
-    return _split_and_train(X, y, [0, 1, 2], _factories(False), "soccer", FEATURES, match_dates=match_dates)
+    print(f"  soccer training schema: {len(SOCCER_TRAINING_FEATURES)} features")
+    print(f"  soccer cold-start rows excluded: {int((~eligible).sum())}")
+    return _split_and_train(X, y, [0, 1, 2], _factories(False), "soccer", SOCCER_TRAINING_FEATURES, match_dates=match_dates)
 
 
 def train_basketball_model_oof(fixtures):
