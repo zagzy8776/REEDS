@@ -70,6 +70,25 @@ SPORTS = (
 
 _STATE = {"peak_mb": 0.0}
 
+# Canonical required bundle fields, derived from app/ml/train_oof.py:_save_bundle.
+# Every artifact produced by the OOF ensemble trainer MUST contain these keys
+# before it is uploaded. The list is intentionally minimal: it covers what the
+# runtime needs to load and predict, not every metadata key the trainer writes.
+BUNDLE_REQUIRED_FIELDS = (
+    "bundle_version",
+    "sport",
+    "models",
+    "meta_learner",
+    "features",
+    "model_types",
+    "weights",
+    "accuracy",
+    "sample_size",
+    "labels",
+    "training_method",
+    "runtime_versions",
+)
+
 # ── Training lock ──────────────────────────────────────────────────────────
 # Prevents overlapping training runs. Uses POSIX advisory flock on Linux
 # (the EC2 target) which is released automatically when the process dies, so

@@ -350,3 +350,76 @@ def test_run_all_continues_after_child_failure(tmp_path, monkeypatch):
     code = worker._run_all_sports(args)
     assert calls["count"] == 2
     assert code == worker.EXIT_DATA  # one sport failed
+
+
+# ── Bundle verification regression ──────────────────────────────────────────
+
+def _make_bundle(sport: str) -> dict:
+    """Build a canonical bundle matching app/ml/train_oof.py:_save_bundle."""
+    return {
+        "bundle_version": 3,
+        "sport": sport,
+        "models": {"random_forest": object(), "xgboost": object()},
+        "meta_learner": object(),
+        "features": ["feature_a", "feature_b"],
+        "model_types": ["random_forest", "xgboost"],
+        "weights": [0.5, 0.5],
+        "accuracy": 0.6293,
+        "log_loss": 0.6426,
+        "sample_size": 17831,
+        "split": "chronological_70_30_oof_meta",
+        "calibrator_path": None,
+        "labels": [0, 1],
+        "training_method": "expanding_window_oof_meta_recency_classweight",
+        "runtime_versions": {
+            "python": "3.11.0",
+            "scikit_learn": "1.6.0",
+            "numpy": "1.26.0",
+            "joblib": "1.4.0",
+        },
+    }
+
+
+def test_verify_bundle_accepts_canonical_soccer_bundle(tmp_path):
+    """A real soccer bundle produced by train_oof.py must pass _verify_bundle."""
+    import joblib
+    artifact = tmp_path / "soccer_oof_ensemble.joblib"
+    joblib.dump(_make_bundle("soccer"), artifact)
+    sidecar = tmp_path / "soccer_oof_ensemble.json"
+    sidecar.write_text(json.dumps({"sport": "soccer", "accuracy": 0.6293, "sample_size": 17831}))
+    # Must not raise.
+    worker._verify_bundle(artifact)
+
+
+def test_verify_bundle_accepts_canonical_basketball_bundle(tmp_path):
+    """A real basketball bundle produced by train_oof.py must pass _verify_bundle."""
+    import joblib
+    artifact = tmp_path / "basketball_oof_ensemble.joblib"
+    joblib.dump(_make_bundle("basketball"), artifact)
+    sidecar = tmp_path / "basketball_oof_ensemble.json"
+    sidecar.write_text(json.dumps({"sport": "basketball", "accuracy": 0.6293, "sample_size": 17831}))
+    # Must not raise.
+    worker._verify_bundle(artifact)
+
+
+def test_verify_bundle_rejects_bundle_missing_required_fields(tmp_path):
+    """A bundle missing a canonical required field must be rejected."""
+    import joblib
+    bundle = _make_bundle("soccer")
+    del bundle["meta_learner"]
+    artifact = tmp_path / "broken.joblib"
+    joblib.dump(bundle, artifact)
+    sidecar = tmp_path / "broken.json"
+    sidecar.write_text(json.dumps({"sport": "soccer"}))
+    with pytest.raises(RuntimeError, match="missing expected field"):
+        worker._verify_bundle(artifact)
+
+
+def test_bundle_required_fields_match_trainer_schema():
+    """BUNDLE_REQUIRED_FIELDS must match the keys _save_bundle writes."""
+    expected = {
+        "bundle_version", "sport", "models", "meta_learner", "features",
+        "model_types", "weights", "accuracy", "sample_size", "labels",
+        "training_method", "runtime_versions",
+    }
+    assert set(worker.BUNDLE_REQUIRED_FIELDS) == expected
