@@ -1,5 +1,6 @@
 import math
 import os
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -23,14 +24,7 @@ MIN_SAMPLE_RATIO_TO_REPLACE = 0.90
 
 
 def _artifact_exists(path: str) -> bool:
-    """Cheap, non-deserializing artifact check.
-
-    Previously this function called ``joblib.load()`` to confirm a bundle was
-    loadable. On the 512 MiB Render instance that deserialization is exactly
-    what OOMs the process during upload validation and startup. Training
-    workers validate their own artifacts before upload; production only needs
-    to know that the file is present and non-empty.
-    """
+    """Cheap, non-deserializing artifact check."""
     if not path or not os.path.isfile(path):
         return False
     try:
@@ -49,14 +43,7 @@ def _metric(value, default=None):
 
 
 def _candidate_is_better(current: ModelVersion, accuracy: float, sample_size: int) -> bool:
-    """Conservative replacement gate.
-
-    Accuracy remains the legacy-compatible primary metric. If newer training
-    metadata is present in model_type (for example ``accuracy=...;log_loss=...``),
-    this function deliberately does not parse it: the current schema has no
-    dedicated validation columns. Sample size + accuracy therefore form the
-    safe gate until validation metrics get first-class persistence.
-    """
+    """Conservative replacement gate."""
     current_accuracy = _metric(current.accuracy, 0.0)
     accuracy_floor = current_accuracy - MAX_ACCURACY_REGRESSION
     sample_floor = max(
@@ -64,6 +51,69 @@ def _candidate_is_better(current: ModelVersion, accuracy: float, sample_size: in
         int(current.sample_size * MIN_SAMPLE_RATIO_TO_REPLACE),
     )
     return accuracy >= accuracy_floor and sample_size >= sample_floor
+
+
+def _local_model_candidates(sport: str) -> list[Path]:
+    """Find real local artifacts available to the running backend.
+
+    Model metadata can outlive a deployment path (for example a model registered
+    while the service lived on Render). The artifact itself may already be on the
+    AWS disk. Search only the backend model directories; never invent a URL or
+    deserialize anything during this repair.
+    """
+    try:
+        from app.core.config import get_settings
+
+        configured = Path(get_settings().model_dir)
+    except Exception:
+        configured = Path("data/models")
+
+    roots = [
+        configured,
+        Path.cwd() / configured,
+        Path.cwd() / "data" / "models",
+        Path.cwd().parent / "data" / "models",
+    ]
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    token = str(sport).strip().lower()
+    for root in roots:
+        try:
+            root = root.resolve()
+        except OSError:
+            continue
+        if root in seen or not root.is_dir():
+            continue
+        seen.add(root)
+        for path in root.glob("*.joblib"):
+            name = path.name.lower()
+            if token not in name:
+                continue
+            if not _artifact_exists(str(path)):
+                continue
+            candidates.append(path)
+    return sorted(set(candidates), key=lambda p: (p.stat().st_mtime_ns, p.stat().st_size), reverse=True)
+
+
+def _repair_active_model_path(db: Session, mv: ModelVersion, sport: str) -> ModelVersion:
+    """Repair stale DB paths when the real artifact is already on this host."""
+    if _artifact_exists(mv.path):
+        return mv
+
+    candidates = _local_model_candidates(sport)
+    if not candidates:
+        return mv
+
+    local_path = str(candidates[0])
+    old_path = mv.path
+    mv.path = local_path
+    try:
+        db.commit()
+        db.refresh(mv)
+    except Exception:
+        db.rollback()
+        mv.path = old_path
+    return mv
 
 
 def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
@@ -78,9 +128,14 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
         .order_by(ModelVersion.trained_at.desc())
         .first()
     )
-    if mv and _artifact_exists(mv.path):
-        return mv
+    if mv:
+        mv = _repair_active_model_path(db, mv, sport)
+        if _artifact_exists(mv.path):
+            return mv
 
+    # If an older inactive record has a real local artifact, it is still safer
+    # to use that validated artifact than to report "no model" and silently
+    # suppress all predictions. The existing DB metrics remain authoritative.
     available = (
         db.query(ModelVersion)
         .filter(ModelVersion.sport == sport, ModelVersion.sample_size >= min_samples)
@@ -88,6 +143,7 @@ def active_model(db: Session, sport: str = "soccer") -> ModelVersion | None:
         .all()
     )
     for candidate in available:
+        candidate = _repair_active_model_path(db, candidate, sport)
         if _artifact_exists(candidate.path):
             return candidate
     return None
