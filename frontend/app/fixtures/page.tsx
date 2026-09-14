@@ -11,7 +11,21 @@ function labelSport(value: string) {
 
 function formatDate(value?: string) {
   if (!value) return "TBA";
-  return new Intl.DateTimeFormat("en", { weekday: "short", month: "short", day: "numeric" }).format(new Date(value));
+  return new Intl.DateTimeFormat("en", { weekday: "short", month: "short", day: "numeric", timeZone: "Africa/Lagos" }).format(new Date(value));
+}
+
+function todayKey() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
+
+function fixtureDateKey(value?: string) {
+  if (!value) return "";
+  const raw = String(value);
+  // API dates are normally YYYY-MM-DD or ISO timestamps. Preserve a plain
+  // calendar date instead of letting UTC conversion move it across midnight.
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? "" : new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos", year: "numeric", month: "2-digit", day: "2-digit" }).format(parsed);
 }
 
 function formatOdds(value?: number | null) {
@@ -38,6 +52,19 @@ function isUsableFixture(f: any) {
   if (/\buser\s*id\b/i.test(home) || /\buser\s*id\b/i.test(away)) return false;
   if (home.length > 90 || away.length > 90) return false;
   return true;
+}
+
+function filterByScope(rows: any[], scope: string) {
+  const today = todayKey();
+  return rows.filter((f: any) => {
+    const day = fixtureDateKey(f.match_date);
+    if (!day) return scope !== "results";
+    if (scope === "results") return day < today || f.result_label === "completed";
+    if (scope === "live") return day === today;
+    if (scope === "upcoming") return day > today;
+    // "all" means active/today/future only. Past calendar days belong in Results.
+    return day >= today;
+  });
 }
 
 function predictionBackedFixtures(picks: any[]) {
@@ -68,17 +95,18 @@ function predictionBackedFixtures(picks: any[]) {
 
 export default async function Fixtures({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const params = await searchParams;
+  const scope = params.scope || "all";
   const [fixtureRows, status] = await Promise.all([
-    getFixtures({ ...params, scope: params.scope || "all", limit: params.limit || "500" }),
+    getFixtures({ ...params, scope, limit: params.limit || "500" }),
     getFixtureStatus(),
   ]);
 
-  let fixtures = (Array.isArray(fixtureRows) ? fixtureRows : []).filter(isUsableFixture);
+  let fixtures = filterByScope((Array.isArray(fixtureRows) ? fixtureRows : []).filter(isUsableFixture), scope);
   let boardRecoveredFromPredictions = false;
-  if (!fixtures.length && params.scope !== "results") {
+  if (!fixtures.length && scope !== "results") {
     const picks = await getTodayPredictions(params);
     if (Array.isArray(picks) && picks.length) {
-      fixtures = predictionBackedFixtures(picks).filter(isUsableFixture);
+      fixtures = filterByScope(predictionBackedFixtures(picks).filter(isUsableFixture), scope);
       boardRecoveredFromPredictions = fixtures.length > 0;
     }
   }
@@ -87,9 +115,9 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
   const leagues = Array.from(new Set(fixtures.map((f: any) => f.league))).filter(Boolean);
   const withOdds = fixtures.filter((f: any) => f.has_odds).length;
   const completed = fixtures.filter((f: any) => f.home_score !== null && f.away_score !== null).length;
-  const todayCount = fixtures.filter((f: any) => String(f.match_date).slice(0, 10) === new Date().toISOString().slice(0, 10)).length;
+  const todayCount = fixtures.filter((f: any) => fixtureDateKey(f.match_date) === todayKey()).length;
   const grouped = fixtures.reduce((acc: Record<string, any[]>, f: any) => {
-    const key = String(f.match_date || "TBA");
+    const key = String(f.match_date || "TBA").slice(0, 10);
     acc[key] = acc[key] || [];
     acc[key].push(f);
     return acc;
@@ -119,14 +147,14 @@ export default async function Fixtures({ searchParams }: { searchParams: Promise
       </section>
 
       <form className="mt-6 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/50 p-4 md:grid-cols-5">
-        <select name="scope" defaultValue={params.scope || "all"} className="rounded-xl border border-slate-800 bg-slate-950 p-3"><option value="all">All active/upcoming</option><option value="live">Today / Live</option><option value="upcoming">Upcoming</option><option value="results">Old results</option></select>
+        <select name="scope" defaultValue={scope} className="rounded-xl border border-slate-800 bg-slate-950 p-3"><option value="all">All active/upcoming</option><option value="live">Today / Live</option><option value="upcoming">Upcoming</option><option value="results">Old results</option></select>
         <select name="sport" defaultValue={params.sport || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3"><option value="">All sports</option>{sports.map((x: any) => <option key={x} value={x}>{labelSport(String(x))}</option>)}</select>
         <select name="league" defaultValue={params.league || ""} className="rounded-xl border border-slate-800 bg-slate-950 p-3"><option value="">All leagues</option>{leagues.map((x: any) => <option key={x} value={x}>{x}</option>)}</select>
         <input name="limit" type="number" min="25" max="500" defaultValue={params.limit || "500"} className="rounded-xl border border-slate-800 bg-slate-950 p-3" />
         <button className="rounded-xl bg-emerald-400 px-4 py-3 font-bold text-slate-950">Refresh board</button>
       </form>
 
-      {status ? <section className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div><b className="text-white">Feed status:</b> <span className={boardRecoveredFromPredictions ? "text-amber-300" : status.feed_health === "active" ? "text-emerald-300" : "text-amber-300"}>{boardRecoveredFromPredictions ? "prediction-backed" : String(status.feed_health).replaceAll("_", " ")}</span><p className="mt-1 text-slate-400">API rows: {status.api_rows} • Sample rows: {status.sample_rows} • Scores: {status.with_scores} • Odds: {status.with_odds}</p></div><p className="max-w-xl text-xs text-slate-500">{boardRecoveredFromPredictions ? "Fixture feed is temporarily empty, so the match centre is reusing matches already powering the AI board." : status.feed_health === "active" ? "The match feed is connected." : "If the feed looks empty, check the API keys and scheduler on Render."}</p></div></section> : null}
+      {status ? <section className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300"><div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div><b className="text-white">Feed status:</b> <span className={boardRecoveredFromPredictions ? "text-amber-300" : status.feed_health === "active" ? "text-emerald-300" : "text-amber-300"}>{boardRecoveredFromPredictions ? "prediction-backed" : String(status.feed_health).replaceAll("_", " ")}</span><p className="mt-1 text-slate-400">API rows: {status.api_rows} • Sample rows: {status.sample_rows} • Scores: {status.with_scores} • Odds: {status.with_odds}</p></div><p className="max-w-xl text-xs text-slate-500">{boardRecoveredFromPredictions ? "Fixture feed is temporarily empty, so the match centre is reusing matches already powering the AI board." : status.feed_health === "active" ? "The match feed is connected." : "If the feed looks empty, check the API keys and scheduler on AWS."}</p></div></section> : null}
 
       <section className="mt-8 space-y-6">
         {fixtures.length ? Object.entries(grouped).map(([day, rows]: [string, any[]]) => (
