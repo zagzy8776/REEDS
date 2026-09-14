@@ -10,6 +10,7 @@ LOYAL EDGE is a production-style sports analytics website for soccer and basketb
 - Frontend: Next.js + TypeScript + Tailwind CSS
 - Database: Aiven PostgreSQL via `AIVEN_DATABASE_URL` (alias `DATABASE_URL`) for live data; CockroachDB for historical/analytical; Turso for cache/lease
 - Deploy: AWS EC2 backend + Vercel frontend; training via AWS EC2 worker, orchestrated from Kaggle through GitHub Actions
+- Deployment: GitHub pushes automatically trigger the AWS backend webhook deployment.
 
 ## Local setup
 
