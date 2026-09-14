@@ -7,13 +7,10 @@ log = logging.getLogger(__name__)
 
 
 def apply_runtime_patches() -> None:
-    """Wire JSON-safe signatures, league normalization, fixture quality, and odds hygiene."""
+    """Wire JSON-safe signatures, league normalization, fixture quality, odds hygiene, and history."""
     try:
         from app.services import predictions as pred_mod
-        from app.services.prediction_signature import (
-            prediction_signature,
-            existing_prediction_changed,
-        )
+        from app.services.prediction_signature import prediction_signature, existing_prediction_changed
         pred_mod._prediction_signature = prediction_signature
         pred_mod._existing_prediction_changed = existing_prediction_changed
         log.info("patched predictions signature helpers")
@@ -66,7 +63,6 @@ def apply_runtime_patches() -> None:
     try:
         from app.scraper import loaders as loaders_mod
         from app.services.fixture_quality import save_rejected_fixture, validate_fixture
-
         original = loaders_mod.upsert_fixture
         if not getattr(original, "_reeds_quality_wrapped", False):
             def upsert_fixture_with_quality(db, fixture):
@@ -87,9 +83,53 @@ def apply_runtime_patches() -> None:
                 fixture.home_team = quality["home"]
                 fixture.away_team = quality["away"]
                 return original(db, fixture)
-
-            upsert_fixture_with_quality._reeds_quality_wrapped = True  # type: ignore[attr-defined]
+            upsert_fixture_with_quality._reeds_quality_wrapped = True
             loaders_mod.upsert_fixture = upsert_fixture_with_quality
             log.info("wrapped loaders.upsert_fixture with fixture quality gate")
     except Exception:
         log.exception("failed to wrap upsert_fixture quality gate")
+
+    # Critical history path: Aiven contains the hot/current board while
+    # Cockroach contains the historical corpus. Prediction code already asks
+    # predictions.dataframe_from_db() for history, so replace that source with
+    # a combined frame without changing the model/feature code itself.
+    try:
+        from app.services import predictions as pred_mod
+        from app.services.historical_archive import load_archive_dataframe
+        from app.db import roles as db_roles
+        from app.db.session import get_role_engine
+        from app.db.models import Fixture
+        from sqlalchemy import func
+        from datetime import date, timedelta
+        import pandas as pd
+
+        def _historical_dataframe_from_db(db, max_age_days=730):
+            cutoff = date.today() - timedelta(days=max_age_days) if max_age_days is not None else None
+            hot = db.query(Fixture)
+            if cutoff is not None:
+                hot = hot.filter(func.date(Fixture.match_date) >= cutoff)
+            hot_rows = hot.limit(120000).all()
+            hot_df = pd.DataFrame([
+                {"id": r.id, "sport": r.sport, "league": r.league, "season": r.season,
+                 "match_date": r.match_date, "home_team": r.home_team, "away_team": r.away_team,
+                 "home_score": r.home_score, "away_score": r.away_score,
+                 "home_odds": r.home_odds, "draw_odds": r.draw_odds, "away_odds": r.away_odds}
+                for r in hot_rows
+                if r.home_score is not None and r.away_score is not None
+            ])
+            archive_df = load_archive_dataframe(max_age_days=max_age_days)
+            frames = [frame for frame in (archive_df, hot_df) if not frame.empty]
+            if not frames:
+                return pd.DataFrame()
+            combined = pd.concat(frames, ignore_index=True)
+            combined["match_date"] = pd.to_datetime(combined["match_date"], errors="coerce")
+            combined = combined.dropna(subset=["match_date", "home_team", "away_team"])
+            combined = combined.sort_values(["match_date", "id"], kind="stable")
+            combined = combined.drop_duplicates(subset=["sport", "league", "match_date", "home_team", "away_team"], keep="last")
+            return combined.reset_index(drop=True)
+
+        _historical_dataframe_from_db._reeds_historical_archive = True
+        pred_mod.dataframe_from_db = _historical_dataframe_from_db
+        log.info("patched prediction history source: Aiven hot + Cockroach archive")
+    except Exception:
+        log.exception("failed to patch Cockroach historical archive into predictions")
