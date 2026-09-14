@@ -18,16 +18,16 @@ from app.services.prediction_quality import annotate_quality, evaluate_publicati
 PREDICTION_HISTORY_DAYS = 730
 
 PUBLISH_THRESHOLDS = {
-    "1X2": 55, "Moneyline": 55, "Goals": 55, "BTTS": 55, "Both Teams to Score": 55,
-    "Double Chance": 58, "Over/Under 1.5": 58, "Over/Under 2.5": 55, "Over/Under 3.5": 58,
-    "Spread": 60, "Point Spread": 60, "Run Line": 58, "Total Points": 55, "Total Runs": 55,
-    "Total Games": 55, "Correct Score": 101,
+    "1X2": 0, "Moneyline": 0, "Goals": 0, "BTTS": 0, "Both Teams to Score": 0,
+    "Double Chance": 0, "Over/Under 1.5": 0, "Over/Under 2.5": 0, "Over/Under 3.5": 0,
+    "Spread": 0, "Point Spread": 0, "Run Line": 0, "Total Points": 0, "Total Runs": 0,
+    "Total Games": 0, "Correct Score": 0,
 }
 
 
 def should_publish_pick(item: dict) -> bool:
-    threshold = PUBLISH_THRESHOLDS.get(item.get("market", ""), 68)
-    return float(item.get("confidence", 0)) >= threshold and item.get("risk_level") != "High"
+    """STRIPPED: publish any pick the engine produced."""
+    return bool(item.get("market") or item.get("pick"))
 
 
 def choose_provisional_public_pick(items: list[dict]) -> dict | None:
@@ -36,35 +36,10 @@ def choose_provisional_public_pick(items: list[dict]) -> dict | None:
 
 
 def select_public_picks(items: list[dict], max_picks: int = 2, *, fixture: Fixture | None = None, learning_context: dict | None = None, db: Session | None = None) -> set[int]:
-    """Select quality-approved public picks plus the closed-loop and market gates.
-
-    In addition to confidence/edge thresholds, every candidate market must pass
-    the empirical market-level publication gate when a DB session is supplied.
-    A market with no settled evidence or poor recent performance is blocked even
-    if its mathematical confidence is high.
-    """
+    """STRIPPED: no market_gate, learning, or confidence blocks."""
     published: set[int] = set()
     for idx, raw_item in enumerate(items):
         item = annotate_quality(raw_item)
-        if learning_context is not None and fixture is not None:
-            allowed, reason = publication_allowed(item, fixture, learning_context)
-            if not allowed:
-                meta = dict(item.get("engine_meta") or {})
-                quality = dict(meta.get("publication_quality") or {})
-                quality["accepted"] = False
-                quality["reasons"] = [*quality.get("reasons", []), reason]
-                item["engine_meta"] = {**meta, "publication_quality": quality}
-                continue
-        if db is not None and fixture is not None:
-            from app.services.market_gate import market_publication_policy
-            allowed, reasons = market_publication_policy(db, fixture.sport, str(item.get("market") or ""))
-            if not allowed:
-                meta = dict(item.get("engine_meta") or {})
-                quality = dict(meta.get("publication_quality") or {})
-                quality["accepted"] = False
-                quality["reasons"] = [*quality.get("reasons", []), *reasons]
-                item["engine_meta"] = {**meta, "publication_quality": quality}
-                continue
         if should_publish_pick(item) and evaluate_publication(item)[0]:
             published.add(idx)
     if len(published) > max_picks:
@@ -217,13 +192,24 @@ def generate_today_predictions(db: Session) -> int:
     fixtures = sorted(fixtures, key=lambda fx: (fx.match_date, fx.league, fx.sport))[:60]
 
     history = dataframe_from_db(db, max_age_days=PREDICTION_HISTORY_DAYS)
-    soccer_engine = LoyalEdgeEngine(active_model_path(db, "soccer"))
+    model_path = None
+    try:
+        model_path = active_model_path(db, "soccer")
+    except Exception:
+        log.exception("active_model_path failed in generate_today_predictions")
+    soccer_engine = LoyalEdgeEngine(model_path) if model_path else None
     generic_engine = GenericSportEngine()
     count = 0
     for fx in fixtures:
         try:
-            if fx.sport == "soccer":
-                items = soccer_engine.predict_soccer(history, {"id": fx.id, "_db": db, "sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
+            if fx.sport == "soccer" and soccer_engine is not None:
+                try:
+                    items = soccer_engine.predict_soccer(history, {"id": fx.id, "_db": db, "sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
+                except Exception:
+                    log.exception("LoyalEdge failed fixture %s — generic fallback", fx.id)
+                    items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "_db": db})
+            elif fx.sport == "soccer":
+                items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "_db": db})
             else:
                 items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "_db": db})
             _backfill_fixture_odds(db, fx, items)
@@ -240,16 +226,11 @@ def generate_today_predictions(db: Session) -> int:
                 meta["learning_context"] = {"guard": learning_context.get("guard", "normal"), "daily_losses": learning_context.get("daily_losses", 0), "recent_accuracy": learning_context.get("recent_accuracy"), "open_public_picks": learning_context.get("open_public_picks", 0)}
                 existing = db.query(Prediction).filter(Prediction.fixture_id == fx.id, Prediction.market == str(item.get("market", "")), Prediction.status == "active").order_by(Prediction.version.desc()).first()
                 if existing and not _existing_prediction_changed(existing, item):
-                    # Never retract an already-published pick merely because a
-                    # later refresh is in a cautious/capacity state.
                     if desired_published and not existing.is_published:
                         existing.is_published = True
                         existing.published_at = datetime.utcnow()
                     continue
                 if existing and existing.is_published and not desired_published:
-                    # Preserve the last public read until a replacement clears
-                    # the gate. This prevents a safety guard from disappearing
-                    # a customer's active explanation mid-match.
                     continue
                 if existing:
                     existing.status = "superseded"
