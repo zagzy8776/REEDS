@@ -1,4 +1,4 @@
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://reeds-phj1.onrender.com";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://16.170.171.190:8000";
 
 const DEFAULT_API_TIMEOUT_MS = 70000;
 
