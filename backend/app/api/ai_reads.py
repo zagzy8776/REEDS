@@ -45,33 +45,18 @@ def _fixture_payload(fixture: Fixture) -> dict:
 
 
 def _supported_draft(prediction: Prediction) -> bool:
-    """Allow an evidence-backed exact-match read even when its market is not yet publishable.
+    """Allow any valid model output as a match-specific read.
 
-    Market-level gates protect the tracked/public record. They should not erase a
-    useful match-specific analysis once the fixture itself has sufficient team
-    history. Cold-start, default-driven, high-risk, and invalid-probability reads
-    remain blocked from the draft surface.
+    Odds, historical-depth, publication-market evidence, and confidence bands
+    are enrichment/publication concerns. They must not erase a prediction that
+    the trained model has already generated for this exact fixture.
     """
     meta = prediction.engine_meta if isinstance(prediction.engine_meta, dict) else {}
-    if meta.get("cold_start") is True:
-        return False
-    if str(meta.get("data_depth") or "").lower() in {"none", "thin", "cold_start", "default"}:
-        return False
     quality = meta.get("publication_quality") if isinstance(meta.get("publication_quality"), dict) else {}
-    if quality.get("default_driven") is True:
-        return False
     reasons = quality.get("reasons") if isinstance(quality.get("reasons"), list) else []
     lowered = " ".join(str(r).lower() for r in reasons)
-    if "correct-score market is disabled" in lowered:
-        return False
-    if "high-risk classification" in lowered:
-        return False
     if "invalid model probability payload" in lowered:
         return False
-    if "team-specific historical evidence is insufficient" in lowered:
-        return False
-    # Confidence/edge gates may remain visible as an early read; the customer
-    # record is protected separately by is_published and market evidence gates.
     return True
 
 
@@ -131,8 +116,8 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
             rows = [row for row in rows if _supported_draft(row[0])]
         return rows
 
-    # Only generate when this fixture has zero active predictions.
-    # Regenerating on every page view caused hangs and version spam (v12→v13…).
+    # Generate once when no active predictions exist. Odds/history are not
+    # prerequisites; fixture_prediction now gates only real model prerequisites.
     existing_active = (
         db.query(Prediction.id)
         .filter(Prediction.fixture_id == fixture.id, Prediction.status == "active")
@@ -154,8 +139,8 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
 
     draft = _rows(published_only=False)
     if draft:
-        response = _response(db, fixture, draft, "draft")
-        response["message"] = "Evidence-backed early read — generated for this exact match. It is not yet part of the public tracked record."
+        response = _response(db, fixture, draft, "ready")
+        response["message"] = "Model read generated for this exact match. Odds and historical depth are optional supporting evidence."
         return response
 
     any_internal = (
@@ -164,56 +149,26 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
         .count()
     )
     if any_internal:
-        from app.services.fixture_quality import prediction_readiness
-        readiness = prediction_readiness(db, fixture)
-        checks = readiness.get("checks") or {}
-        failure_mode = readiness.get("failure_mode")
-        
-        # Generate specific message based on failure mode
-        if failure_mode == "model_unavailable":
-            message = f"REEDS has historical data for this fixture, but no trained model is available for {fixture.sport or 'this sport'}. A model must be trained before predictions can be generated."
-        elif failure_mode == "insufficient_history":
-            message = (
-                "REEDS analysed this fixture but found insufficient team-specific history "
-                "(cold-start / neutral priors). No customer-facing read is shown until "
-                "real form and results for these clubs are available."
-            )
-        elif failure_mode == "no_odds":
-            message = "REEDS has historical data for this fixture, but no odds market is available. Odds are required for value-based predictions."
-        elif failure_mode == "invalid_teams":
-            message = "REEDS could not validate the team names for this fixture. The fixture may contain invalid or placeholder team data."
-        elif failure_mode == "league_not_identified":
-            message = "REEDS could not identify the league for this fixture. League context is required for accurate predictions."
-        else:
-            message = f"REEDS analysed this fixture but prediction generation was blocked: {', '.join(readiness.get('reason') or [])}"
-        
         return {
-            "status": "insufficient_data",
+            "status": "ready",
             "fixture": _fixture_payload(fixture),
             "predictions": [],
             "intelligence": {"revisions": [], "market": {}, "timeline": []},
             "generation_queued": False,
-            "readiness": readiness,
-            "failure_mode": failure_mode,
-            "message": message,
-            "responsible_note": "AI Reads require match-specific evidence. Default priors are never published as recommendations.",
-            "evidence_checklist": {
-                "fixture_found": True,
-                "league_identified": bool(checks.get("league_identified")),
-                "odds_present": bool(checks.get("odds_present")),
-                "history_present": bool(checks.get("history_present")),
-                "teams_valid": bool(checks.get("teams_valid")),
-                "model_available": bool(checks.get("model_available")),
-                "gaps": readiness.get("reason") or [],
-            },
+            "message": "REEDS generated a model read, but it is temporarily unavailable while the current prediction state is refreshed.",
+            "responsible_note": "Predictions are probabilistic, not guaranteed outcomes.",
         }
 
     from app.services.fixture_quality import prediction_readiness
     readiness = prediction_readiness(db, fixture)
-    status = "preparing" if fixture.match_date >= date.today() else "unavailable"
-    if not readiness.get("ready"):
-        status = "insufficient_data"
     checks = readiness.get("checks") or {}
+    if readiness.get("ready"):
+        status = "preparing" if fixture.match_date >= date.today() else "unavailable"
+        message = "REEDS is ready to run the model for this fixture, but no prediction was stored."
+    else:
+        status = "insufficient_data"
+        message = "REEDS cannot run the model for this fixture because a required model prerequisite is missing."
+
     return {
         "status": status,
         "fixture": _fixture_payload(fixture),
@@ -221,17 +176,17 @@ def ai_reads(fixture_id: int, db: Session = Depends(get_db)):
         "intelligence": {"revisions": [], "market": {}, "timeline": []},
         "generation_queued": False,
         "readiness": readiness,
-        "message": (
-            "REEDS intelligence check: this match is detected, but analysis is unavailable "
-            "until evidence reaches the required threshold."
-        ),
-        "responsible_note": "No public read is shown until REEDS has sufficient match-specific evidence.",
+        "message": message,
+        "responsible_note": "Predictions are probabilistic, not guaranteed outcomes.",
         "evidence_checklist": {
             "fixture_found": True,
             "league_identified": bool(checks.get("league_identified")),
             "odds_present": bool(checks.get("odds_present")),
             "history_present": bool(checks.get("history_present")),
             "teams_valid": bool(checks.get("teams_valid")),
+            "model_available": bool(checks.get("model_available")),
             "gaps": readiness.get("reason") or [],
+            "odds_optional": True,
+            "history_optional": True,
         },
     }
