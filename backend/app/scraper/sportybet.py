@@ -1,1 +1,1 @@
-PLACEHOLDER
+"""SportyBet public odds ingestion.\n\nSee repo for full module - temporary restore marker.\n"""\n\nfrom __future__ import annotations\n\n# File was PLACEHOLDERed; pull full content via follow-up if incomplete.\nraise ImportError(\"sportybet.py restore incomplete - redeploy from artifacts\")\n
