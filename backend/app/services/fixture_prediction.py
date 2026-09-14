@@ -55,24 +55,50 @@ def generate_fixture_predictions(db: Session, fixture_id: int) -> int:
             db.rollback()
         return 0
 
-    # Current-day fixtures can sit between seasons. Keep a bounded two-year
-    # history window so the engine does not silently fall back to league-average
-    # defaults just because the last 180 days contain no completed matches.
     history = dataframe_from_db(db, max_age_days=730)
+    items = []
     if fx.sport == "soccer":
-        engine = LoyalEdgeEngine(active_model_path(db, "soccer"))
-        items = engine.predict_soccer(history, {
-            "id": fx.id,
-            "_db": db,
-            "sport": fx.sport,
-            "home_team": fx.home_team,
-            "away_team": fx.away_team,
-            "match_date": fx.match_date,
-            "league": fx.league,
-            "home_odds": fx.home_odds,
-            "draw_odds": fx.draw_odds,
-            "away_odds": fx.away_odds,
-        })
+        model_path = None
+        try:
+            model_path = active_model_path(db, "soccer")
+        except Exception:
+            log.exception("active_model_path failed fixture %s", fixture_id)
+        if model_path:
+            try:
+                engine = LoyalEdgeEngine(model_path)
+                items = engine.predict_soccer(history, {
+                    "id": fx.id,
+                    "_db": db,
+                    "sport": fx.sport,
+                    "home_team": fx.home_team,
+                    "away_team": fx.away_team,
+                    "match_date": fx.match_date,
+                    "league": fx.league,
+                    "home_odds": fx.home_odds,
+                    "draw_odds": fx.draw_odds,
+                    "away_odds": fx.away_odds,
+                })
+            except Exception:
+                log.exception(
+                    "LoyalEdgeEngine failed fixture %s — falling back to GenericSportEngine",
+                    fixture_id,
+                )
+                items = []
+        if not items:
+            log.warning(
+                "soccer fixture %s using GenericSportEngine (no model or engine error)",
+                fixture_id,
+            )
+            items = GenericSportEngine().predict(history, {
+                "sport": fx.sport,
+                "home_team": fx.home_team,
+                "away_team": fx.away_team,
+                "match_date": fx.match_date,
+                "league": fx.league,
+                "home_odds": fx.home_odds,
+                "draw_odds": fx.draw_odds,
+                "away_odds": fx.away_odds,
+            })
     else:
         items = GenericSportEngine().predict(history, {
             "sport": fx.sport,
