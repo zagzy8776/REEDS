@@ -1,37 +1,42 @@
-"""SportyBet scraper — fetches upcoming fixtures and their live odds.
+"""SportyBet public odds ingestion.
 
-Uses requests + BeautifulSoup for the JSON API that SportyBet's frontend calls
-internally. This is far more stable than scraping rendered HTML and doesn't
-require a headless browser, which is important on Render's free tier where
-Playwright/Selenium can't run without extra setup.
+The old /api/ng/query/* endpoints were retired.  The current public web
+application uses the factsCenter feed.  REEDS prefers that feed directly and
+can optionally use the Vercel transport relay when SportyBet's CloudFront
+blocks the AWS egress IP.
 
-SportyBet exposes a REST API at the same endpoints their mobile app uses.
-We target those directly with standard HTTP headers to look like the app.
-
-IMPORTANT — Terms of Service:
-  Scraping for personal/research use is technically possible but may violate
-  SportyBet's ToS. Use this for model training and value detection only.
-  Do not automate bet placement. Do not republish their odds commercially.
+This module only reads publicly displayed pre-match data.  It never places
+bets or submits account credentials.
 """
 
+from __future__ import annotations
+
 import logging
+import os
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 import requests
 
 log = logging.getLogger(__name__)
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/140.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Origin": "https://www.sportybet.com",
-    "Referer": "https://www.sportybet.com/",
+    "Referer": "https://www.sportybet.com/ng/lite",
     "x-app-name": "sportybet",
 }
 
 _BASE = "https://www.sportybet.com/api/ng"
+_CURRENT_UPCOMING = f"{_BASE}/factsCenter/wapConfigurableUpcomingEvents"
+_PROXY_URL = os.getenv("SPORTYBET_PROXY_URL", "https://reeds-phi.vercel.app/api/sportybet")
 
 SPORT_IDS = {
     "soccer": "sr:sport:1",
@@ -47,176 +52,302 @@ _MARKET_1X2 = "1"
 _MARKET_MONEYLINE = "219"
 
 
-def _get(url: str, params: dict | None = None, retries: int = 2) -> dict | list | None:
-    """Safe GET with retries and rate-limit awareness."""
-    for attempt in range(retries):
+def _request_json(url: str, params: dict[str, Any], retries: int = 2) -> Any:
+    """GET JSON with bounded retry/backoff and explicit HTTP handling."""
+    for attempt in range(retries + 1):
         try:
-            resp = requests.get(url, headers=_HEADERS, params=params, timeout=15)
-            if resp.status_code == 429:
-                log.warning("SportyBet rate limit hit, sleeping 10s")
-                time.sleep(10)
+            response = requests.get(url, headers=_HEADERS, params=params, timeout=15)
+            if response.status_code == 429:
+                if attempt >= retries:
+                    log.warning("SportyBet rate limit exhausted")
+                    return None
+                time.sleep(2 ** attempt)
                 continue
-            if resp.status_code != 200:
-                log.warning("SportyBet %s returned %d", url, resp.status_code)
+            if response.status_code in (403, 404):
+                log.warning("SportyBet %s returned %d", url, response.status_code)
                 return None
-            return resp.json()
+            response.raise_for_status()
+            try:
+                return response.json()
+            except ValueError:
+                log.warning("SportyBet returned malformed JSON from %s", url)
+                return None
+        except requests.RequestException as exc:
+            if attempt >= retries:
+                log.warning("SportyBet request failed: %s", exc)
+                return None
+            time.sleep(1.5 * (2 ** attempt))
         except Exception as exc:
-            log.warning("SportyBet request failed (attempt %d): %s", attempt + 1, exc)
-            time.sleep(2)
+            log.warning("Unexpected SportyBet request failure: %s", exc)
+            return None
     return None
 
 
-def fetch_upcoming_fixtures(sport: str = "soccer", limit: int = 100) -> list[dict]:
-    """Fetch upcoming matches with odds from SportyBet."""
-    sport_id = SPORT_IDS.get(sport, SPORT_IDS["soccer"])
-    results: list[dict] = []
-    tournaments_url = f"{_BASE}/query/tournamentMarkets"
-    params = {
-        "sportId": sport_id,
-        "marketId": _MARKET_1X2 if sport == "soccer" else _MARKET_MONEYLINE,
-        "groupId": "0",
+def _params_for_sport(sport: str, page: int = 1, page_size: int = 100) -> dict[str, Any]:
+    market_id = _MARKET_1X2 if sport == "soccer" else _MARKET_MONEYLINE
+    return {
+        "sportId": SPORT_IDS.get(sport, SPORT_IDS["soccer"]),
+        "marketId": market_id,
+        "productId": "3",
+        "page": page,
+        "pageSize": min(page_size, 100),
         "_t": int(time.time() * 1000),
     }
-    data = _get(tournaments_url, params)
-    if not data:
-        return _fetch_via_odds_endpoint(sport, limit)
 
-    tournaments = []
-    if isinstance(data, dict):
-        tournaments = data.get("data", {}).get("tournaments", []) or data.get("tournaments", []) or []
-    elif isinstance(data, list):
-        tournaments = data
 
-    for tournament in tournaments[:20]:
-        t_id = tournament.get("id") or tournament.get("tournamentId")
-        league_name = tournament.get("name") or tournament.get("tournamentName", "Unknown")
-        if not t_id:
+def _fetch_current(sport: str, limit: int) -> Any:
+    """Fetch the current factsCenter feed directly from SportyBet."""
+    page_size = min(max(limit, 1), 100)
+    return _request_json(_CURRENT_UPCOMING, _params_for_sport(sport, 1, page_size))
+
+
+def _fetch_via_relay(sport: str, limit: int) -> Any:
+    """Fetch the same public feed through the optional Vercel relay.
+
+    AWS EC2 can receive a CloudFront 403 even when the public SportyBet site
+    is reachable from normal browser infrastructure.  The relay keeps the
+    source URL fixed and forwards only the small, whitelisted query set.
+    """
+    if not _PROXY_URL:
+        return None
+    return _request_json(_PROXY_URL, _params_for_sport(sport, 1, min(limit, 100)))
+
+
+def _name_from(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("name", "teamName", "homeTeamName", "awayTeamName", "desc", "description"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+    return ""
+
+
+def _to_odds(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+        if number <= 0 or number != number:
+            return None
+        return number
+    except (TypeError, ValueError):
+        return None
+
+
+def _match_time(event: dict[str, Any]) -> str | None:
+    value = (
+        event.get("estimateStartTime")
+        or event.get("kickoffTime")
+        or event.get("startTime")
+        or event.get("matchTime")
+        or event.get("scheduledStartTime")
+    )
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            seconds = float(value) / 1000 if float(value) > 1e11 else float(value)
+            return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    return str(value)
+
+
+def _iter_event_dicts(payload: Any):
+    """Yield event-like dicts from several known SportyBet response shapes."""
+    seen: set[int] = set()
+
+    def walk(node: Any, inherited_league: str = ""):
+        if isinstance(node, dict):
+            marker = id(node)
+            if marker in seen:
+                return
+            seen.add(marker)
+
+            league = inherited_league
+            for key in ("tournamentName", "tournament", "leagueName", "competitionName"):
+                value = node.get(key)
+                if isinstance(value, str) and value.strip():
+                    league = value.strip()
+                    break
+                if isinstance(value, dict):
+                    candidate = _name_from(value)
+                    if candidate:
+                        league = candidate
+                        break
+
+            home = node.get("homeTeamName") or node.get("homeTeam") or node.get("home")
+            away = node.get("awayTeamName") or node.get("awayTeam") or node.get("away")
+            if _name_from(home) and _name_from(away):
+                item = dict(node)
+                item.setdefault("_league", league)
+                yield item
+
+            for key in ("tournaments", "tournamentList", "events", "eventList", "data", "result", "response", "items", "list", "matches"):
+                child = node.get(key)
+                if child is not None:
+                    yield from walk(child, league)
+            return
+
+        if isinstance(node, list):
+            for item in node:
+                yield from walk(item, inherited_league)
+
+    yield from walk(payload)
+
+
+def _extract_market_values(event: dict[str, Any], sport: str) -> tuple[float | None, float | None, float | None]:
+    home_odds = draw_odds = away_odds = None
+
+    direct = {
+        "home": ("homeOdds", "homeOdd", "home_odds"),
+        "draw": ("drawOdds", "drawOdd", "draw_odds"),
+        "away": ("awayOdds", "awayOdd", "away_odds"),
+    }
+    for key in direct["home"]:
+        home_odds = _to_odds(event.get(key))
+        if home_odds is not None:
+            break
+    for key in direct["draw"]:
+        draw_odds = _to_odds(event.get(key))
+        if draw_odds is not None:
+            break
+    for key in direct["away"]:
+        away_odds = _to_odds(event.get(key))
+        if away_odds is not None:
+            break
+
+    containers = []
+    for key in ("markets", "marketList", "odds", "marketData"):
+        value = event.get(key)
+        if isinstance(value, list):
+            containers.extend(value)
+        elif isinstance(value, dict):
+            containers.append(value)
+
+    for market in containers:
+        if not isinstance(market, dict):
             continue
-        events_url = f"{_BASE}/query/tournamentMarkets"
-        event_params = {
-            "sportId": sport_id,
-            "tournamentId": t_id,
-            "marketId": _MARKET_1X2 if sport == "soccer" else _MARKET_MONEYLINE,
-            "_t": int(time.time() * 1000),
-        }
-        event_data = _get(events_url, event_params)
-        if not event_data:
-            continue
-        events = []
-        if isinstance(event_data, dict):
-            events = (event_data.get("data", {}) or {}).get("events", []) or event_data.get("events", []) or []
-        for event in events:
-            try:
-                parsed = _parse_event(event, league_name, sport)
-                if parsed:
-                    results.append(parsed)
-                    if len(results) >= limit:
-                        return results
-            except Exception:
+        market_id = str(market.get("id") or market.get("marketId") or "")
+        market_name = str(market.get("name") or market.get("marketDesc") or market.get("description") or "").lower()
+        if sport == "soccer":
+            if market_id != _MARKET_1X2 and not any(token in market_name for token in ("1x2", "match result", "match winner")):
                 continue
-        time.sleep(0.3)
-    return results
+        else:
+            if market_id != _MARKET_MONEYLINE and not any(token in market_name for token in ("moneyline", "winner")):
+                continue
+
+        outcomes = market.get("outcomes") or market.get("selections") or market.get("outcomeList") or []
+        if isinstance(outcomes, dict):
+            outcomes = list(outcomes.values())
+        for outcome in outcomes if isinstance(outcomes, list) else []:
+            if not isinstance(outcome, dict):
+                continue
+            outcome_id = str(outcome.get("id") or outcome.get("outcomeId") or outcome.get("selectionId") or "")
+            label = str(outcome.get("desc") or outcome.get("name") or outcome.get("outcomeDesc") or "").lower().strip()
+            odds = _to_odds(outcome.get("odds") or outcome.get("price") or outcome.get("value"))
+            if sport == "soccer":
+                if outcome_id == "1" or label in {"1", "home", "home win", "w1"}:
+                    home_odds = odds
+                elif outcome_id == "2" or label in {"2", "away", "away win", "w2"}:
+                    away_odds = odds
+                elif outcome_id in {"x", "0"} or label in {"x", "draw", "tie"}:
+                    draw_odds = odds
+            else:
+                if outcome_id in {"1", "4"} or label in {"home", "home winner", "1"}:
+                    home_odds = odds
+                elif outcome_id in {"2", "5"} or label in {"away", "away winner", "2"}:
+                    away_odds = odds
+        if home_odds is not None or away_odds is not None:
+            break
+
+    return home_odds, draw_odds, away_odds
 
 
-def _fetch_via_odds_endpoint(sport: str, limit: int) -> list[dict]:
-    """Use SportyBet's main event listing endpoint when tournaments are unavailable."""
-    sport_id = SPORT_IDS.get(sport, SPORT_IDS["soccer"])
-    data = _get(f"{_BASE}/query/sportEvents", {"sportId": sport_id, "time": "today", "_t": int(time.time() * 1000)})
-    if not data:
-        return []
-    results = []
-    events = data.get("data", {}).get("events", []) if isinstance(data, dict) else []
-    events = events or (data.get("events", []) if isinstance(data, dict) else [])
-    for event in events:
-        parsed = _parse_event(event, event.get("tournamentName", "Unknown"), sport)
+def _parse_event(event: dict[str, Any], league_name: str, sport: str) -> dict | None:
+    home = _name_from(event.get("homeTeamName") or event.get("homeTeam") or event.get("home"))
+    away = _name_from(event.get("awayTeamName") or event.get("awayTeam") or event.get("away"))
+    if not home or not away or home.lower() == away.lower():
+        return None
+
+    home_odds, draw_odds, away_odds = _extract_market_values(event, sport)
+    event_id = str(event.get("eventId") or event.get("eventID") or event.get("id") or "").strip()
+    if not event_id and event.get("event"):
+        nested = event.get("event")
+        if isinstance(nested, dict):
+            event_id = str(nested.get("id") or nested.get("eventId") or "").strip()
+
+    return {
+        "home_team": home[:80],
+        "away_team": away[:80],
+        "league": str(league_name or event.get("_league") or "Unknown")[:80],
+        "sport": sport,
+        "match_date": _match_time(event),
+        "home_odds": home_odds,
+        "draw_odds": draw_odds,
+        "away_odds": away_odds,
+        "sportybet_match_id": event_id,
+        "source": "sportybet",
+    }
+
+
+def _dedupe(fixtures: list[dict]) -> list[dict]:
+    unique: dict[tuple, dict] = {}
+    for item in fixtures:
+        key = item.get("sportybet_match_id") or (
+            item.get("sport"),
+            str(item.get("home_team", "")).lower(),
+            str(item.get("away_team", "")).lower(),
+            item.get("match_date"),
+        )
+        unique[key] = item
+    return list(unique.values())
+
+
+def _parse_payload(payload: Any, sport: str, limit: int) -> list[dict]:
+    results: list[dict] = []
+    for event in _iter_event_dicts(payload):
+        parsed = _parse_event(event, str(event.get("_league") or "Unknown"), sport)
         if parsed:
             results.append(parsed)
             if len(results) >= limit:
                 break
-    return results
+    return _dedupe(results)[:limit]
 
 
-def _parse_event(event: dict, league_name: str, sport: str) -> dict | None:
-    """Extract fixture + odds from a SportyBet event object."""
-    try:
-        home = event.get("homeTeamName") or event.get("home", {}).get("name", "")
-        away = event.get("awayTeamName") or event.get("away", {}).get("name", "")
-        if not home or not away:
-            return None
+def fetch_upcoming_fixtures(sport: str = "soccer", limit: int = 100) -> list[dict]:
+    """Fetch current public pre-match events and odds."""
+    sport = sport if sport in SPORT_IDS else "soccer"
+    limit = min(max(int(limit), 1), 100)
 
-        start_time = event.get("estimateStartTime") or event.get("startTime") or event.get("matchTime")
-        match_dt = None
-        if start_time:
-            try:
-                if isinstance(start_time, (int, float)) and start_time > 1e10:
-                    match_dt = datetime.fromtimestamp(start_time / 1000, tz=timezone.utc).isoformat()
-                else:
-                    match_dt = str(start_time)
-            except Exception:
-                match_dt = str(start_time)
+    payload = _fetch_current(sport, limit)
+    source = "direct"
+    if payload is None:
+        payload = _fetch_via_relay(sport, limit)
+        source = "relay"
 
-        home_odds = draw_odds = away_odds = None
-        markets = event.get("markets", []) or event.get("odds", []) or []
-        for market in markets:
-            market_name = str(market.get("name", "")).lower()
-            market_id = str(market.get("id", ""))
-            is_1x2 = market_id == "1" or "1x2" in market_name or "match result" in market_name or "match winner" in market_name
-            is_ml = market_id == "219" or "moneyline" in market_name or "winner" in market_name
-            if not (is_1x2 or is_ml):
-                continue
-            outcomes = market.get("outcomes", []) or market.get("selections", []) or []
-            for outcome in outcomes:
-                name = str(outcome.get("desc", "") or outcome.get("name", "")).lower()
-                odds_val = None
-                raw_odds = outcome.get("odds") or outcome.get("price")
-                if raw_odds:
-                    try:
-                        f = float(raw_odds)
-                        odds_val = f / 100 if f > 100 else f
-                    except (TypeError, ValueError):
-                        pass
-                if name in ("1", "home", "home win", "w1") or name == home.lower():
-                    home_odds = odds_val
-                elif name in ("x", "draw", "tie"):
-                    draw_odds = odds_val
-                elif name in ("2", "away", "away win", "w2") or name == away.lower():
-                    away_odds = odds_val
-            if home_odds or away_odds:
-                break
+    if payload is None:
+        log.warning("SportyBet unavailable for %s; continuing without this source", sport)
+        return []
 
-        return {
-            "home_team": str(home).strip(),
-            "away_team": str(away).strip(),
-            "league": str(league_name)[:80],
-            "sport": sport,
-            "match_date": match_dt,
-            "home_odds": home_odds,
-            "draw_odds": draw_odds,
-            "away_odds": away_odds,
-            "sportybet_match_id": str(event.get("eventId") or event.get("id") or ""),
-            "source": "sportybet",
-        }
-    except Exception as exc:
-        log.debug("Failed to parse SportyBet event: %s", exc)
-        return None
+    fixtures = _parse_payload(payload, sport, limit)
+    log.info("SportyBet %s: parsed %d fixtures via %s", sport, len(fixtures), source)
+    return fixtures
 
 
 def fetch_all_sports(sports: list[str] | None = None, limit_per_sport: int = 50) -> list[dict]:
-    """Fetch upcoming fixtures across all supported SportyBet sports."""
-    target = sports or [
-        "soccer", "basketball", "tennis", "american_football",
-        "hockey", "baseball", "cricket",
-    ]
-    all_fixtures = []
+    """Fetch upcoming fixtures across supported SportyBet sports."""
+    target = sports or ["soccer", "basketball", "tennis", "american_football", "hockey", "baseball", "cricket"]
+    all_fixtures: list[dict] = []
     for sport in target:
         try:
-            fixtures = fetch_upcoming_fixtures(sport, limit=limit_per_sport)
-            all_fixtures.extend(fixtures)
-            log.info("SportyBet: fetched %d %s fixtures", len(fixtures), sport)
-            time.sleep(1)
+            all_fixtures.extend(fetch_upcoming_fixtures(sport, limit=limit_per_sport))
         except Exception as exc:
             log.warning("SportyBet %s fetch failed: %s", sport, exc)
-    return all_fixtures
+        time.sleep(0.5)
+    return _dedupe(all_fixtures)
 
 
 def ingest_upcoming_fixtures(db, sports: list[str] | None = None, limit_per_sport: int = 75) -> int:
@@ -237,10 +368,9 @@ def ingest_upcoming_fixtures(db, sports: list[str] | None = None, limit_per_spor
             away = str(item.get("away_team") or "").strip()
             if not home or not away:
                 continue
-            league = str(item.get("league") or "Unknown")[:80]
             fx = Fixture(
                 sport=sport,
-                league=league,
+                league=str(item.get("league") or "Unknown")[:80],
                 season=str(kickoff.year),
                 match_date=kickoff.date(),
                 home_team=resolve_team_name(db, home, sport, "sportybet"),
