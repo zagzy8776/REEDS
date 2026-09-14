@@ -2,52 +2,55 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import text
-
-from app.db import roles as db_roles
-from app.db.session import get_role_engine
 
 log = logging.getLogger(__name__)
 
-_ARCHIVE_SQL = text(
-    """
-    SELECT id, sport, league, season, match_date, home_team, away_team,
-           home_score, away_score, home_odds, draw_odds, away_odds
-    FROM fixtures_archive
-    WHERE match_date IS NOT NULL
-      AND home_team IS NOT NULL
-      AND away_team IS NOT NULL
-    ORDER BY match_date ASC, id ASC
-    """
-)
+
+def _connect():
+    import psycopg
+    from app.core.config import get_settings
+
+    url = (get_settings().cockroach_database_url or os.environ.get("COCKROACH_DATABASE_URL") or "").strip()
+    if not url:
+        return None
+    url = url.replace("postgresql+psycopg://", "postgresql://", 1)
+    # Cockroach's documented CA location is ~/.postgresql/root.crt. Do not put
+    # certificates or credentials in the repository.
+    cert = Path.home() / ".postgresql" / "root.crt"
+    kwargs = {}
+    if cert.exists():
+        kwargs["sslrootcert"] = str(cert)
+    return psycopg.connect(url, **kwargs)
 
 
 def load_archive_dataframe(max_age_days: int | None = None) -> pd.DataFrame:
     """Load completed historical fixtures from Cockroach into a pandas frame."""
-    engine = get_role_engine(db_roles.COCKROACH)
-    if engine is None:
-        return pd.DataFrame()
+    conn = None
     try:
-        sql = _ARCHIVE_SQL
-        params = {}
+        conn = _connect()
+        if conn is None:
+            return pd.DataFrame()
+        sql = """
+            SELECT id, sport, league, season, match_date, home_team, away_team,
+                   home_score, away_score, home_odds, draw_odds, away_odds
+            FROM fixtures_archive
+            WHERE match_date IS NOT NULL
+              AND home_team IS NOT NULL
+              AND away_team IS NOT NULL
+        """
+        params = None
         if max_age_days is not None:
-            sql = text(
-                """
-                SELECT id, sport, league, season, match_date, home_team, away_team,
-                       home_score, away_score, home_odds, draw_odds, away_odds
-                FROM fixtures_archive
-                WHERE match_date >= current_date - (:days * INTERVAL '1 day')
-                  AND match_date IS NOT NULL
-                  AND home_team IS NOT NULL
-                  AND away_team IS NOT NULL
-                ORDER BY match_date ASC, id ASC
-                """
-            )
-            params = {"days": int(max_age_days)}
-        with engine.connect() as conn:
-            return pd.read_sql_query(sql, conn, params=params)
+            sql += " AND match_date >= current_date - (%s * INTERVAL '1 day')"
+            params = (int(max_age_days),)
+        sql += " ORDER BY match_date ASC, id ASC"
+        return pd.read_sql_query(sql, conn, params=params)
     except Exception:
         log.exception("Could not load Cockroach historical archive")
         return pd.DataFrame()
+    finally:
+        if conn is not None:
+            conn.close()
