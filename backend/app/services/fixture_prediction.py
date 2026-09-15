@@ -10,13 +10,12 @@ from app.db.models import Fixture, Prediction
 from app.ml.generic import GenericSportEngine
 from app.ml.ensemble import LoyalEdgeEngine
 from app.services.model_registry import active_model_path
+from app.services import predictions as prediction_service
 from app.services.predictions import (
     _backfill_fixture_odds,
     _capture_odds_snapshot,
     _next_prediction_version,
     explain_prediction_item,
-    select_public_picks,
-    dataframe_from_db,
 )
 from app.services.prediction_signature import (
     prediction_signature as _prediction_signature,
@@ -37,25 +36,7 @@ def generate_fixture_predictions(db: Session, fixture_id: int) -> int:
     if not fx:
         return 0
 
-    from app.services.fixture_quality import prediction_readiness
-
-    readiness = prediction_readiness(db, fx)
-    if not readiness.get("ready"):
-        log.info(
-            "Skipping prediction for fixture %s — not ready: %s",
-            fixture_id,
-            readiness.get("reason"),
-        )
-        extra = dict(fx.extra or {}) if isinstance(fx.extra, dict) else {}
-        extra["prediction_readiness"] = readiness
-        fx.extra = extra
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-        return 0
-
-    history = dataframe_from_db(db, max_age_days=730)
+    history = prediction_service.dataframe_from_db(db, max_age_days=730)
     items = []
     if fx.sport == "soccer":
         model_path = None
@@ -63,42 +44,25 @@ def generate_fixture_predictions(db: Session, fixture_id: int) -> int:
             model_path = active_model_path(db, "soccer")
         except Exception:
             log.exception("active_model_path failed fixture %s", fixture_id)
-        if model_path:
-            try:
-                engine = LoyalEdgeEngine(model_path)
-                items = engine.predict_soccer(history, {
-                    "id": fx.id,
-                    "_db": db,
-                    "sport": fx.sport,
-                    "home_team": fx.home_team,
-                    "away_team": fx.away_team,
-                    "match_date": fx.match_date,
-                    "league": fx.league,
-                    "home_odds": fx.home_odds,
-                    "draw_odds": fx.draw_odds,
-                    "away_odds": fx.away_odds,
-                })
-            except Exception:
-                log.exception(
-                    "LoyalEdgeEngine failed fixture %s — falling back to GenericSportEngine",
-                    fixture_id,
-                )
-                items = []
-        if not items:
-            log.warning(
-                "soccer fixture %s using GenericSportEngine (no model or engine error)",
-                fixture_id,
+
+        if not model_path:
+            raise RuntimeError(
+                f"No active soccer model available for fixture {fixture_id}"
             )
-            items = GenericSportEngine().predict(history, {
-                "sport": fx.sport,
-                "home_team": fx.home_team,
-                "away_team": fx.away_team,
-                "match_date": fx.match_date,
-                "league": fx.league,
-                "home_odds": fx.home_odds,
-                "draw_odds": fx.draw_odds,
-                "away_odds": fx.away_odds,
-            })
+
+        engine = LoyalEdgeEngine(model_path)
+        items = engine.predict_soccer(history, {
+            "id": fx.id,
+            "_db": db,
+            "sport": fx.sport,
+            "home_team": fx.home_team,
+            "away_team": fx.away_team,
+            "match_date": fx.match_date,
+            "league": fx.league,
+            "home_odds": fx.home_odds,
+            "draw_odds": fx.draw_odds,
+            "away_odds": fx.away_odds,
+        })
     else:
         items = GenericSportEngine().predict(history, {
             "sport": fx.sport,
@@ -108,12 +72,11 @@ def generate_fixture_predictions(db: Session, fixture_id: int) -> int:
         })
 
     _backfill_fixture_odds(db, fx, items)
-    published = select_public_picks(items, fixture=fx, db=db)
     generated = 0
 
     for idx, raw in enumerate(items):
         item = annotate_quality(explain_prediction_item(raw, fx))
-        is_published = idx in published
+        is_published = True
         market = str(item.get("market") or "")
         if not market:
             continue
@@ -156,7 +119,7 @@ def generate_fixture_predictions(db: Session, fixture_id: int) -> int:
         )
         db.add(prediction)
         db.flush()
-        _capture_odds_snapshot(db, fx, prediction, "published" if is_published else "initial")
+        _capture_odds_snapshot(db, fx, prediction, "published")
         generated += 1
 
     db.commit()

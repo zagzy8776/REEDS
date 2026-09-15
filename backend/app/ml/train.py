@@ -81,6 +81,7 @@ FEATURES = [
     "h2h_away_venue_win_rate",   # away team win rate in H2H when away
     "h2h_last3_home_goals",      # avg home goals in last 3 H2H meetings
     "h2h_last3_away_goals",      # avg away goals in last 3 H2H meetings
+    "h2h_meetings",             # actual number of prior H2H meetings
     # --- Scoring consistency ---
     "home_scoring_consistency", "away_scoring_consistency",
     "home_conceding_consistency", "away_conceding_consistency",
@@ -105,17 +106,6 @@ FEATURES = [
     "home_high_scoring_rate",   # % games with 3+ goals (proxy for set-piece value)
     "away_high_scoring_rate",
     # --- Insider signals (sharp money, weather, injuries, referee) ---
-    "insider_sharp_home_move",   # home implied prob move open→close
-    "insider_sharp_away_move",   # away implied prob move open→close
-    "insider_clv_home",          # closing-line value proxy
-    "insider_steam",             # 1 = rapid line move (<2h, ≥3%)
-    "insider_opening_home_prob", # opening implied prob for home
-    "insider_weather_precip",    # precipitation mm
-    "insider_weather_wind",      # wind speed km/h
-    "insider_home_injury",       # key player injury severity 0-1
-    "insider_away_injury",       # key player injury severity 0-1
-    "insider_referee_cards",     # referee avg cards/match
-    "insider_public_home_pct",   # % of public bets on home side
 ]
 
 BASKETBALL_FEATURES = [
@@ -418,13 +408,17 @@ def train_soccer_model(fixtures: pd.DataFrame) -> dict:
     labels = [0, 1, 2]  # away, draw, home
     factories = _build_model_factories()
 
-    # Train ensemble with available models. For very large public-history imports,
-    # use a fast RF path so training finishes reliably on local/Render machines.
-    # Threshold raised to 60k — HF Space has enough RAM for the full ensemble up to that size.
-    if len(X) >= 60000:
-        result = _train_fast_large_dataset_model(X_train, y_train, X_test, y_test, labels, "soccer")
-    else:
-        result = _train_ensemble(X_train, y_train, X_test, y_test, factories, labels, n_trials=15)
+    # AWS training uses the complete ensemble.
+    # Never silently downgrade to a single Random Forest.
+    result = _train_ensemble(
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        factories,
+        labels,
+        n_trials=15,
+    )
 
     Path(settings.model_dir).mkdir(parents=True, exist_ok=True)
     model_type_str = "+".join(result["model_types"])

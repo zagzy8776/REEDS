@@ -94,7 +94,7 @@ def parse_file(path: Path) -> list[dict]:
                 "id": stable_id(sport, league, dt.date(), home, away), "sport": sport, "league": league,
                 "season": path.stem[-6:] or "Historical", "match_date": dt.date(), "home_team": home, "away_team": away,
                 "home_score": int(hs), "away_score": int(aas), "home_odds": num(ho_col), "draw_odds": num(do_col), "away_odds": num(ao_col),
-                "source": f"raw:{path.relative_to(ROOT)}", "extra": json.dumps({"historical_import": True, "source_file": str(path.relative_to(ROOT))}),
+                "source": f"raw:{path.relative_to(ROOT)}", "created_at": None, "extra": json.dumps({"historical_import": True, "source_file": str(path.relative_to(ROOT))}),
             })
         except Exception:
             continue
@@ -114,7 +114,7 @@ def main():
             rows.extend(parsed)
             print(f"{path.relative_to(ROOT)} -> {len(parsed)} completed rows")
         print(f"Prepared {len(rows):,} rows from {len(files)} CSVs; skipped {skipped} files")
-        sql = """UPSERT INTO fixtures_archive (id,sport,league,season,match_date,home_team,away_team,home_score,away_score,home_odds,draw_odds,away_odds,source,extra) VALUES (%(id)s,%(sport)s,%(league)s,%(season)s,%(match_date)s,%(home_team)s,%(away_team)s,%(home_score)s,%(away_score)s,%(home_odds)s,%(draw_odds)s,%(away_odds)s,%(source)s,%(extra)s::JSONB)"""
+        sql = """UPSERT INTO fixtures_archive (id,sport,league,season,match_date,home_team,away_team,home_score,away_score,home_odds,draw_odds,away_odds,source,created_at,extra) VALUES (%(id)s,%(sport)s,%(league)s,%(season)s,%(match_date)s,%(home_team)s,%(away_team)s,%(home_score)s,%(away_score)s,%(home_odds)s,%(draw_odds)s,%(away_odds)s,%(source)s,now(),%(extra)s::JSONB)"""
         for start in range(0, len(rows), 250):
             with conn.cursor() as cur:
                 cur.executemany(sql, rows[start:start+250])

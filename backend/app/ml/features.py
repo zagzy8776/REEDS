@@ -85,34 +85,67 @@ def _update_h2h(h2h: dict, home: str, away: str, hs: int, aas: int) -> None:
 def _h2h_features(h2h: dict, home: str, away: str) -> dict:
     key = tuple(sorted((home, away)))
     record = h2h.get(key)
-    if not record or record["total"] < 2:
+
+    # No prior meetings: neutral prior, explicitly represented by zero
+    # evidence count. Do not fabricate H2H history.
+    if not record or record["total"] == 0:
         return {
             "h2h_home_win_rate": 0.50,
             "h2h_draw_rate": 0.25,
             "h2h_away_win_rate": 0.25,
             "h2h_avg_total_goals": 2.5,
+            "h2h_home_venue_win_rate": 0.50,
+            "h2h_away_venue_win_rate": 0.25,
+            "h2h_last3_home_goals": 1.3,
+            "h2h_last3_away_goals": 1.1,
+            "h2h_meetings": 0.0,
         }
+
     total = record["total"]
-    home_wins = record["home_wins"] if key[0] == home else record["away_wins"]
-    away_wins = record["away_wins"] if key[0] == home else record["home_wins"]
-    # Venue-adjusted rates
+
+    home_wins = (
+        record["home_wins"]
+        if key[0] == home
+        else record["away_wins"]
+    )
+    away_wins = (
+        record["away_wins"]
+        if key[0] == home
+        else record["home_wins"]
+    )
+
+    # Use every available meeting. Small samples remain noisy, but
+    # they are real evidence and should not be replaced wholesale
+    # with an arbitrary default.
     vt = record.get("venue_total", 0)
-    h_venue_wr = record.get("venue_home_wins", 0) / vt if vt >= 2 else 0.50
-    a_venue_wr = record.get("venue_away_wins", 0) / vt if vt >= 2 else 0.25
-    # Last-3 average goals
+    h_venue_wr = (
+        record.get("venue_home_wins", 0) / vt
+        if vt > 0 else 0.50
+    )
+    a_venue_wr = (
+        record.get("venue_away_wins", 0) / vt
+        if vt > 0 else 0.25
+    )
+
     l3h = record.get("last3_home_goals", [])
     l3a = record.get("last3_away_goals", [])
-    l3h_avg = sum(l3h) / len(l3h) if l3h else 1.3
-    l3a_avg = sum(l3a) / len(l3a) if l3a else 1.1
+
     return {
-        "h2h_home_win_rate":       home_wins / total,
-        "h2h_draw_rate":           record["draws"] / total,
-        "h2h_away_win_rate":       away_wins / total,
-        "h2h_avg_total_goals":     (record["home_goals"] + record["away_goals"]) / total,
+        "h2h_home_win_rate": home_wins / total,
+        "h2h_draw_rate": record["draws"] / total,
+        "h2h_away_win_rate": away_wins / total,
+        "h2h_avg_total_goals": (
+            record["home_goals"] + record["away_goals"]
+        ) / total,
         "h2h_home_venue_win_rate": h_venue_wr,
         "h2h_away_venue_win_rate": a_venue_wr,
-        "h2h_last3_home_goals":    l3h_avg,
-        "h2h_last3_away_goals":    l3a_avg,
+        "h2h_last3_home_goals": (
+            sum(l3h) / len(l3h) if l3h else 1.3
+        ),
+        "h2h_last3_away_goals": (
+            sum(l3a) / len(l3a) if l3a else 1.1
+        ),
+        "h2h_meetings": float(total),
     }
 
 
@@ -187,6 +220,7 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
     streak_tracker: dict[str, list[str]] = {}  # track result streaks
     h2h_tracker: dict = {}
     season_form: dict[str, list[float]] = {}  # points per match in season
+    team_last_match: dict[str, pd.Timestamp] = {}
     for _, r in df.iterrows():
         if pd.isna(r.get("home_score")) or pd.isna(r.get("away_score")):
             continue
@@ -194,6 +228,32 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
         away = normalize_team_name(r["away_team"], "soccer")
         hh, ah = team_hist.get(home, [])[-10:], team_hist.get(away, [])[-10:]
         h_home, a_away = team_home_hist.get(home, [])[-10:], team_away_hist.get(away, [])[-10:]
+
+        # Do not train on cold-start fixtures. These rows have no genuine
+        # prior team history and would otherwise receive synthetic defaults.
+        if len(hh) < 5 or len(ah) < 5:
+            hs = int(r["home_score"])
+            aas = int(r["away_score"])
+            home_entry = {
+                "gf": hs,
+                "ga": aas,
+                "gd": hs - aas,
+                "points": 3 if hs > aas else 1 if hs == aas else 0,
+                "result": "W" if hs > aas else "D" if hs == aas else "L",
+            }
+            away_entry = {
+                "gf": aas,
+                "ga": hs,
+                "gd": aas - hs,
+                "points": 3 if aas > hs else 1 if aas == hs else 0,
+                "result": "W" if aas > hs else "D" if aas == hs else "L",
+            }
+            team_hist.setdefault(home, []).append(home_entry)
+            team_hist.setdefault(away, []).append(away_entry)
+            team_last_match[home] = pd.Timestamp(r["match_date"])
+            team_last_match[away] = pd.Timestamp(r["match_date"])
+            continue
+
         home_elo, away_elo = team_elo.get(home, 1500.0), team_elo.get(away, 1500.0)
         home_elo_h, away_elo_a = team_elo_home.get(home, 1500.0), team_elo_away.get(away, 1500.0)
         league_difficulty = _soccer_league_difficulty(r.get("league"))
@@ -319,12 +379,49 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
                 sum(x["gd"] for x in ah[-3:]) / 3 if len(ah) >= 3
                 else sum(x["gd"] for x in ah) / max(len(ah), 1)
             ),
-            # --- Rest days (days since last match — proxy from row index gap) ---
-            "home_rest_days": 4.0,   # populated in features_for_fixture; default to avg
-            "away_rest_days": 4.0,
-            "home_back_to_back": 0,
-            "away_back_to_back": 0,
-            "rest_advantage": 0.0,
+            # --- Rest days ---
+            # Calculated strictly from matches BEFORE this fixture.
+            # First observed match gets a neutral 4-day prior because
+            # there is no earlier observation from which to calculate rest.
+            "home_rest_days": (
+                min(max(
+                    (pd.Timestamp(r.match_date) - team_last_match[home]).days,
+                    0
+                ), 14)
+                if home in team_last_match else 4.0
+            ),
+            "away_rest_days": (
+                min(max(
+                    (pd.Timestamp(r.match_date) - team_last_match[away]).days,
+                    0
+                ), 14)
+                if away in team_last_match else 4.0
+            ),
+            "home_back_to_back": int(
+                home in team_last_match and
+                (pd.Timestamp(r.match_date) - team_last_match[home]).days <= 1
+            ),
+            "away_back_to_back": int(
+                away in team_last_match and
+                (pd.Timestamp(r.match_date) - team_last_match[away]).days <= 1
+            ),
+            "rest_advantage": (
+                (
+                    min(max(
+                        (pd.Timestamp(r.match_date) - team_last_match[home]).days,
+                        0
+                    ), 14)
+                    if home in team_last_match else 4.0
+                )
+                -
+                (
+                    min(max(
+                        (pd.Timestamp(r.match_date) - team_last_match[away]).days,
+                        0
+                    ), 14)
+                    if away in team_last_match else 4.0
+                )
+            ),
             # --- Market signals ---
             "home_implied": _implied_prob(r.get("home_odds")),
             "draw_implied": _implied_prob(r.get("draw_odds")),
@@ -338,6 +435,12 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
             "away_high_scoring_rate": _condition_rate(ah, lambda x: (x["gf"] + x["ga"]) >= 3, 0.45, 10),
         })
         y.append(normalize_result(hs, aas))
+
+        # Update last-match timestamps only AFTER feature creation.
+        # This prevents the current fixture from leaking into its own features.
+        current_match_date = pd.Timestamp(r.match_date)
+        team_last_match[home] = current_match_date
+        team_last_match[away] = current_match_date
         home_entry = {"gf": hs, "ga": aas, "gd": hs - aas, "points": 3 if hs > aas else 1 if hs == aas else 0, "result": "W" if hs > aas else "D" if hs == aas else "L"}
         away_entry = {"gf": aas, "ga": hs, "gd": aas - hs, "points": 3 if aas > hs else 1 if hs == aas else 0, "result": "W" if aas > hs else "D" if hs == aas else "L"}
         team_hist.setdefault(home, []).append(home_entry)
@@ -345,9 +448,15 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
         team_home_hist.setdefault(home, []).append(home_entry)
         team_away_hist.setdefault(away, []).append(away_entry)
         team_elo[home], team_elo[away] = _update_elo(home_elo, away_elo, home_result)
-        # Separate home/away Elo
-        team_elo_home[home] = _update_elo(home_elo_h, away_elo, 1.0, k=24)[0]  # home win/loss
-        team_elo_away[away] = _update_elo(away_elo_a, home_elo, 1.0 - home_result, k=24)[0]
+        # Separate home/away Elo.
+        # IMPORTANT: use the actual pre-match result. The previous code
+        # treated every home fixture as a home win, contaminating venue Elo.
+        team_elo_home[home] = _update_elo(
+            home_elo_h, away_elo, home_result, k=24
+        )[0]
+        team_elo_away[away] = _update_elo(
+            away_elo_a, home_elo, 1.0 - home_result, k=24
+        )[0]
         # Streak tracking
         home_result_label = "W" if hs > aas else "D" if hs == aas else "L"
         away_result_label = "W" if aas > hs else "D" if hs == aas else "L"
@@ -503,7 +612,36 @@ def features_for_fixture(
     home_rest = _rest_days(home_team)
     away_rest = _rest_days(away_team)
 
+    # Explicit evidence availability. Numeric fallback values above are kept
+    # for model compatibility, but must never be presented as real team data.
+    home_history_count = len(hh)
+    away_history_count = len(ah)
+    home_venue_history_count = len(h_home)
+    away_venue_history_count = len(a_away)
+
+    # Count actual H2H meetings between these normalized teams.
+    h2h_meetings = 0
+    if not hist.empty:
+        for _, _r in hist.iterrows():
+            _h = normalize_team_name(str(_r.home_team), "soccer")
+            _a = normalize_team_name(str(_r.away_team), "soccer")
+            if {_h, _a} == {home_team, away_team}:
+                if pd.notna(_r.get("home_score")) and pd.notna(_r.get("away_score")):
+                    h2h_meetings += 1
+
     return {
+        # --- Evidence availability ---
+        "home_history_count": home_history_count,
+        "away_history_count": away_history_count,
+        "home_venue_history_count": home_venue_history_count,
+        "away_venue_history_count": away_venue_history_count,
+        "h2h_meetings": h2h_meetings,
+        "home_history_available": home_history_count > 0,
+        "away_history_available": away_history_count > 0,
+        "home_venue_history_available": home_venue_history_count > 0,
+        "away_venue_history_available": away_venue_history_count > 0,
+        "h2h_history_available": h2h_meetings >= 2,
+
         # --- Core form ---
         "home_form_points": avg(hh, "points", 1.2),
         "away_form_points": avg(ah, "points", 1.2),

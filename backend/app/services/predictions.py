@@ -81,12 +81,66 @@ def explain_prediction_item(item: dict, fixture: Fixture) -> dict:
 
 
 def dataframe_from_db(db: Session, max_age_days: int | None = 180) -> pd.DataFrame:
+    """Build inference history from Aiven hot data + Cockroach archive."""
+    from app.services.historical_archive import load_archive_dataframe
+
+    columns = [
+        "id", "sport", "league", "season", "match_date",
+        "home_team", "away_team", "home_score", "away_score",
+        "home_odds", "draw_odds", "away_odds",
+    ]
+
+    # Aiven: recent/live application history.
     rows = db.query(Fixture)
     if max_age_days is not None:
         cutoff = date.today() - timedelta(days=max_age_days)
         rows = rows.filter(func.date(Fixture.match_date) >= cutoff)
     rows = rows.limit(120000).all()
-    return pd.DataFrame([{"id": r.id, "sport": r.sport, "league": r.league, "season": r.season, "match_date": r.match_date, "home_team": r.home_team, "away_team": r.away_team, "home_score": r.home_score, "away_score": r.away_score, "home_odds": r.home_odds, "draw_odds": r.draw_odds, "away_odds": r.away_odds} for r in rows])
+
+    hot = pd.DataFrame([
+        {
+            "id": r.id,
+            "sport": r.sport,
+            "league": r.league,
+            "season": r.season,
+            "match_date": r.match_date,
+            "home_team": r.home_team,
+            "away_team": r.away_team,
+            "home_score": r.home_score,
+            "away_score": r.away_score,
+            "home_odds": r.home_odds,
+            "draw_odds": r.draw_odds,
+            "away_odds": r.away_odds,
+        }
+        for r in rows
+    ], columns=columns)
+
+    # Cockroach: long-term historical training/inference archive.
+    archive = load_archive_dataframe()
+
+    frames = [df for df in (archive, hot) if not df.empty]
+    if not frames:
+        return pd.DataFrame(columns=columns)
+
+    history = pd.concat(frames, ignore_index=True)
+
+    # Only completed fixtures can contribute team history.
+    history = history[
+        history["home_score"].notna() &
+        history["away_score"].notna()
+    ].copy()
+
+    # Prevent duplicate historical matches across the two stores.
+    history["match_date"] = pd.to_datetime(
+        history["match_date"], errors="coerce"
+    )
+    history = history.dropna(subset=["match_date"])
+    history = history.drop_duplicates(
+        subset=["sport", "league", "match_date", "home_team", "away_team"],
+        keep="last",
+    )
+
+    return history.sort_values(["match_date", "id"]).reset_index(drop=True)
 
 
 def _next_prediction_version(db: Session, fixture_id: int, market: str) -> int:

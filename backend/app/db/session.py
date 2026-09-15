@@ -163,6 +163,9 @@ def get_role_engine(role: str):
         engine_kwargs = _role_engine_kwargs(role, url)
         try:
             role_engine = create_engine(normalize_database_url(url), **engine_kwargs)
+
+            if role == db_roles.COCKROACH:
+                role_engine.dialect._get_server_version_info = lambda connection: (15, 0)
         except (ModuleNotFoundError, sqlalchemy.exc.NoSuchModuleError):
             # Missing optional driver/dialect (e.g. libsql for Turso): degrade
             # to None with a clear log instead of breaking the whole process.

@@ -42,4 +42,4 @@ client_secret*.json
 .cursor\rules\codacy.mdc
 
 # Separate repo — never commit
-coach/
+coach/reeds-venv/
