@@ -105,6 +105,21 @@ FEATURES = [
     # --- Set-piece / dead-ball proxy ---
     "home_high_scoring_rate",   # % games with 3+ goals (proxy for set-piece value)
     "away_high_scoring_rate",
+    # --- Standings data (league table snapshot before fixture date) ---
+    "home_league_position", "away_league_position",
+    "home_table_points", "away_table_points",
+    "home_table_points_per_game", "away_table_points_per_game",
+    "home_table_goals_for", "home_table_goals_against",
+    "away_table_goals_for", "away_table_goals_against",
+    "home_table_goal_difference", "away_table_goal_difference",
+    "home_win_rate", "away_win_rate",
+    "home_goal_diff_per_game", "away_goal_diff_per_game",
+    "home_goals_for_per_game", "away_goals_for_per_game",
+    "home_goals_against_per_game", "away_goals_against_per_game",
+    "home_form_score", "away_form_score",
+    "table_position_diff", "table_points_diff",
+    "strength_difference",
+    "has_standings_data",
     # --- Insider signals (sharp money, weather, injuries, referee) ---
 ]
 

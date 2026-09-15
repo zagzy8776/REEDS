@@ -417,3 +417,122 @@ class HistoricalEvaluation(Base):
     job_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     source: Mapped[str] = mapped_column(String(80), default="bootstrap")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class Standing(Base):
+    """Historical league table snapshots — the core of the standings data layer.
+
+    Each row is a team's standing in a league at a particular effective_date.
+    effective_date is the date the snapshot became known (typically the day
+    after the team's last match at or before that date). Feature building
+    queries ``effective_date < fixture_date`` to prevent lookahead leakage.
+    """
+
+    __tablename__ = "standings"
+    __table_args__ = (
+        UniqueConstraint("sport", "league", "season", "team", "effective_date",
+                         "standing_type", name="uq_standing"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    league: Mapped[str] = mapped_column(String(80), index=True)
+    season: Mapped[str] = mapped_column(String(20), index=True)
+    team: Mapped[str] = mapped_column(String(120), index=True)
+    standing_type: Mapped[str] = mapped_column(String(20), default="total")  # total/home/away
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    games_played: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wins: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    draws: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    losses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    goals_for: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    goals_against: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    goal_difference: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recent_form: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    provider_team_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    effective_date: Mapped[date] = mapped_column(Date, index=True)
+    ingestion_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class FixtureStat(Base):
+    """Match-level statistics from providers (shots, possession, corners, etc.).
+
+    Stored as JSON for provider-specific flexibility. effective_date allows
+    the same match to have multiple snapshots if stats are updated post-match.
+    """
+
+    __tablename__ = "fixture_stats"
+    __table_args__ = (
+        UniqueConstraint("fixture_id", "provider", "effective_date",
+                         name="uq_fixture_stat"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fixture_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    league: Mapped[str] = mapped_column(String(80), index=True)
+    match_date: Mapped[date] = mapped_column(Date, index=True)
+    home_team: Mapped[str] = mapped_column(String(120))
+    away_team: Mapped[str] = mapped_column(String(120))
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    provider_fixture_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    statistics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    effective_date: Mapped[date] = mapped_column(Date, index=True)
+    ingestion_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class TeamPerformance(Base):
+    """Rolling team performance metrics (clean sheets, scoring rate, streaks).
+
+    These are derived/aggregated metrics computed from raw fixtures or
+    provider-reported stats, stored at a point-in-time for leakage-safe lookup.
+    """
+
+    __tablename__ = "team_performance"
+    __table_args__ = (
+        UniqueConstraint("sport", "team", "metric_name", "effective_date",
+                         "window_size", "provider", name="uq_team_perf"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    team: Mapped[str] = mapped_column(String(120), index=True)
+    metric_name: Mapped[str] = mapped_column(String(80))
+    metric_value: Mapped[float] = mapped_column(Float, nullable=False)
+    window_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    effective_date: Mapped[date] = mapped_column(Date, index=True)
+    provider: Mapped[str] = mapped_column(String(80), default="derived")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class DataSourceProvenance(Base):
+    """Conflict detection and source transparency for standings data.
+
+    When multiple providers disagree on a team's position/points,
+    record the conflict here instead of silently choosing one.
+    """
+
+    __tablename__ = "data_provenance"
+    __table_args__ = (
+        UniqueConstraint("entity_type", "entity_key", "provider", "effective_date",
+                         name="uq_source_provenance"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String(50))  # 'standing', 'fixture_stat'
+    entity_key: Mapped[str] = mapped_column(String(255))  # composite key
+    sport: Mapped[str] = mapped_column(String(30), index=True)
+    league: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    provider_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    metric_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(20))  # consistent/conflict/missing
+    effective_date: Mapped[date] = mapped_column(Date, index=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

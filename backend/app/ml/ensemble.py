@@ -94,6 +94,8 @@ class LoyalEdgeEngine:
             fixture.get("draw_odds"),
             fixture.get("away_odds"),
             insider=insider,
+            standings_db=db,
+            season=fixture.get("season"),
         )
         home_lam = max((f["home_goals_for"] + f["away_goals_against"]) / 2, 0.2)
         away_lam = max((f["away_goals_for"] + f["home_goals_against"]) / 2, 0.2)

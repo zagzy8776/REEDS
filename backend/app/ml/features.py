@@ -1,6 +1,7 @@
 import pandas as pd
 
 from app.utils.team_names import normalize_team_name
+from app.ml.standings_features import resolve_standings_features
 
 
 def _avg_dict(hist: list[dict], key: str, default: float, window: int | None = None) -> float:
@@ -470,6 +471,18 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
     return pd.DataFrame(rows).fillna(0), pd.Series(y)
 
 
+def _resolve_season(league: str | None) -> str | None:
+    """Best-effort season extraction from league string (e.g. 'EPL 2023/24')."""
+    if not league:
+        return None
+    import re
+
+    match = re.search(r"(\d{4})[/-](\d{2,4})", league)
+    if match:
+        return league[match.start():match.end()]
+    return None
+
+
 def features_for_fixture(
     history: pd.DataFrame,
     home_team: str,
@@ -480,6 +493,8 @@ def features_for_fixture(
     draw_odds: float | None = None,
     away_odds: float | None = None,
     insider: dict | None = None,
+    standings_db=None,
+    season: str | None = None,
 ) -> dict:
     home_team = normalize_team_name(home_team, "soccer")
     away_team = normalize_team_name(away_team, "soccer")
@@ -727,6 +742,8 @@ def features_for_fixture(
             sum(x["gd"] for x in ah[-3:]) / 3 if len(ah) >= 3
             else sum(x["gd"] for x in ah) / max(len(ah), 1)
         ),
+        # --- Standings data (league table snapshot before fixture date) ---
+        **resolve_standings_features(standings_db, league, home_team, away_team, fixture_date),
         # --- Rest days / fatigue ---
         "home_rest_days":    home_rest,
         "away_rest_days":    away_rest,
