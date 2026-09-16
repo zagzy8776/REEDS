@@ -48,8 +48,8 @@ class AfriScoresProvider(SportsDataProvider):
     }
 
     _STANDINGS_QUERY = """
-    query Standings($leagueId: String!) {
-      tables(filters: {league_id: $leagueId}) {
+    query Standings($leagueId: String!, $seasonId: String) {
+      tables(filters: {league_id: $leagueId, season_id: $seasonId}) {
         id
         name
         league_id
@@ -188,7 +188,7 @@ class AfriScoresProvider(SportsDataProvider):
         try:
             resp = self.http.post(
                 self.GRAPHQL_URL,
-                json={"query": self._STANDINGS_QUERY, "variables": {"leagueId": league_id}},
+                json={"query": self._STANDINGS_QUERY, "variables": self._standings_variables(league_id, season)},
                 headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
                 timeout=self.timeout,
             )
@@ -196,16 +196,18 @@ class AfriScoresProvider(SportsDataProvider):
         except Exception:
             return []
 
-        tables = data.get("data", {}).get("tables", [])
+        tables = (data.get("data", {}) or {}).get("tables", []) or []
         rows: list[StandingsRow] = []
 
         # The soccer-graph standings payload carries team_id but often returns
         # an empty team_name string. The authoritative names live on the
         # league's team list, so resolve them there before parsing.
+        # NOTE: teams() resolver 500s on this backend, so this map is usually
+        # empty — standings payload team_name is the primary source.
         team_name_map = self._league_team_names(league_id)
 
         for table in tables:
-            if self._season_matches(table.get("season_id"), season):
+            if self._season_matches(table, season):
                 rows.extend(self._parse_table_standings(table, league, season, standings_date, team_name_map))
 
         return rows
@@ -241,13 +243,127 @@ class AfriScoresProvider(SportsDataProvider):
         self._league_cache[cache_key] = mapping
         return mapping
 
-    def _season_matches(self, table_season_id: str, target_season: str) -> bool:
+    def _standings_variables(self, league_id: str, season: str | None) -> dict:
+        """Build GraphQL variables, pinning season_id when the label maps.
+
+        Season tables are name-keyed (e.g. name "2025/2026" == id "25583"
+        for EPL). Pinning season_id keeps the query scoped to one table,
+        so unfiltered multi-season dumps never reach the parser. Unknown
+        labels fall back to unfiltered fetch + local season match.
+        """
+        season_id = self._season_id_for_label(league_id, season)
+        variables: dict = {"leagueId": league_id}
+        if season_id:
+            variables["seasonId"] = season_id
+        return variables
+
+    def _season_id_for_label(self, league_id: str, season: str | None) -> str | None:
+        if not season:
+            return None
+        label = str(season).strip()
+        tables = self._tables_for_league(league_id)
+        # Pass 1: exact name match ("2025/2026" == "2025/2026")
+        for table in tables:
+            if str(table.get("name") or "") == label:
+                sid = table.get("season_id") or table.get("id")
+                if sid:
+                    return str(sid)
+        # Pass 2: normalized match — normalize BOTH sides to a canonical
+        # "YYYY/YYYY" form so "2025-2026" hits "2025/2026" but never "2026/2027".
+        want = self._canon_season(label)
+        if want:
+            for table in tables:
+                if self._canon_season(str(table.get("name") or "")) == want:
+                    sid = table.get("season_id") or table.get("id")
+                    if sid:
+                        return str(sid)
+        return None
+
+    @staticmethod
+    def _canon_season(s: str) -> str | None:
+        """Canonicalize a season label to 'YYYY/YYYY' or None if unparseable.
+
+        Handles '2025/2026', '2025-2026', '2025-26', '2025' (assumes YYYY/YYYY+1).
+        4-digit codes like '2526' are ambiguous with years — callers must pass
+        explicit labels; returns None for those.
+        """
+        import re
+
+        s = s.strip()
+        if re.fullmatch(r"\d{4}", s):
+            return None  # ambiguous: could be FD code or a year
+        years = re.findall(r"(?:19|20)\d{2}", s)
+        if len(years) >= 2:
+            return f"{years[0]}/{years[1]}"
+        if len(years) == 1:
+            m = re.search(r"(?:19|20)\d{2}\s*[-/]\s*(\d{2})\b", s)
+            if m:
+                century = years[0][:2]
+                return f"{years[0]}/{century}{m.group(1)}"
+            return f"{years[0]}/{int(years[0]) + 1}"
+        return None
+
+    @staticmethod
+    def _season_label_matches(table_name: str, season: str) -> bool:
+        """Match labels like '2025/2026' against '2025-2026'/'2025/2026'.
+
+        Compares canonical 'YYYY/YYYY' forms so only the true season hits —
+        '2025-2026' matches '2025/2026' but never '2026/2027'.
+        """
+        a = AfriScoresProvider._canon_season(table_name)
+        b = AfriScoresProvider._canon_season(season)
+        return a is not None and a == b
+
+    def _tables_for_league(self, league_id: str) -> list[dict]:
+        """Fetch id/name/season_id rows for a league, cached per league id.
+
+        NOTE: failures are NOT cached — a transient network error must not
+        poison the cache into an empty table list for the process lifetime.
+        """
+        cache_key = f"tables:{league_id}"
+        cached = self._league_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            resp = self.http.post(
+                self.GRAPHQL_URL,
+                json={
+                    "query": (
+                        'query Tables($leagueId: String!) {'
+                        ' tables(filters: {league_id: $leagueId}) { id name season_id } }'
+                    ),
+                    "variables": {"leagueId": league_id},
+                },
+                headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+                timeout=self.timeout,
+            )
+            tables = (resp.json().get("data", {}) or {}).get("tables", []) or []
+        except Exception:
+            log.exception("AfriScores: could not list tables for league_id=%s", league_id)
+            return []  # do NOT cache failures
+        self._league_cache[cache_key] = tables
+        return tables
+
+    def _season_matches(self, table: object, target_season: str) -> bool:
+        """Decide whether a tables[] entry belongs to the requested season.
+
+        Accepts the whole table dict: matches when the table's name is the
+        requested season label (canonical 'YYYY/YYYY' compare), when its
+        season_id/id equals the requested id, or when no season was asked.
+        Compares season_id against the canonical label too (some backends
+        return numeric ids; the name check is the reliable one).
+        """
         if not target_season:
             return True
-        if str(table_season_id) == str(target_season):
+        if not isinstance(table, dict):
+            return str(table) == str(target_season)
+        name = str(table.get("name") or "")
+        if name and self._season_label_matches(name, target_season):
             return True
-        if target_season in str(table_season_id):
-            return True
+        for key in ("season_id", "id"):
+            val = table.get(key)
+            if val is not None and str(val) == str(target_season):
+                return True
         return False
 
     def _parse_table_standings(
