@@ -135,96 +135,93 @@ class StandingsIngestor:
         effective_date: date,
         ingestion_id: str,
     ) -> int:
-        """Upsert standings into the DB, deduplicating by (provider, team, date)."""
+        """Upsert standings into the DB, deduplicating by unique key.
+
+        The uq_standing constraint is (sport, league, season, team,
+        effective_date, standing_type) WITHOUT provider — the last provider
+        wins per team, and home/away splits live in the same table with
+        standing_type home/away. Split rows are NESTED in the provider loop
+        so a re-ingest of the same (league, season, date) is a true upsert —
+        no duplicates, no UniqueViolation.
+        """
         written = 0
 
         for row in rows:
             team = normalize_team_name(row.team, row.sport)
+            self._upsert_one(
+                row, league, season, team, "total", effective_date, ingestion_id,
+                row.position, row.points, row.games_played, row.wins,
+                row.draws, row.losses, row.goals_for, row.goals_against,
+                row.goal_difference, row.recent_form,
+            )
+            written += 1
 
-            existing = self.db.execute(
-                select(Standing).where(
-                    Standing.sport == row.sport,
-                    Standing.league == league,
-                    Standing.season == season,
-                    Standing.team == team,
-                    Standing.provider == row.provider,
-                    Standing.effective_date == effective_date,
-                    Standing.standing_type == "total",
+            if row.home_position is not None or row.away_position is not None:
+                self._upsert_one(
+                    row, league, season, team, "home", effective_date, ingestion_id,
+                    row.home_position, row.home_points, row.home_games_played,
+                    row.home_wins, row.home_draws, row.home_losses,
+                    row.home_goals_for, row.home_goals_against, None, None,
                 )
-            ).scalar_one_or_none()
+                self._upsert_one(
+                    row, league, season, team, "away", effective_date, ingestion_id,
+                    row.away_position, row.away_points, row.away_games_played,
+                    row.away_wins, row.away_draws, row.away_losses,
+                    row.away_goals_for, row.away_goals_against, None, None,
+                )
 
-            standing = existing or Standing(
+        return written
+
+    def _upsert_one(
+        self,
+        row: StandingsRow,
+        league: str,
+        season: str,
+        team: str,
+        standing_type: str,
+        effective_date: date,
+        ingestion_id: str,
+        position, points, games_played, wins, draws, losses, gf, ga, gd, form,
+    ) -> None:
+        existing = self.db.execute(
+            select(Standing).where(
+                Standing.sport == row.sport,
+                Standing.league == league,
+                Standing.season == season,
+                Standing.team == team,
+                Standing.effective_date == effective_date,
+                Standing.standing_type == standing_type,
+            )
+        ).scalar_one_or_none()
+
+        if existing is None:
+            existing = Standing(
                 sport=row.sport,
                 league=league,
                 season=season,
                 team=team,
                 provider=row.provider,
-                standing_type="total",
+                standing_type=standing_type,
                 effective_date=effective_date,
                 ingestion_id=ingestion_id,
             )
+            self.db.add(existing)
 
-            standing.position = row.position
-            standing.points = row.points
-            standing.games_played = row.games_played
-            standing.wins = row.wins
-            standing.draws = row.draws
-            standing.losses = row.losses
-            standing.goals_for = row.goals_for
-            standing.goals_against = row.goals_against
-            standing.goal_difference = row.goal_difference
-            standing.recent_form = row.recent_form
-            standing.ingestion_id = ingestion_id
-            standing.created_at = datetime.utcnow()
-
-            if existing is None:
-                self.db.add(standing)
-            written += 1
-
-        # Write home/away splits if available
-        for row in rows:
-            if row.home_position is None and row.away_position is None:
-                continue
-            team = normalize_team_name(row.team, row.sport)
-            self._persist_split(row, league, season, effective_date, ingestion_id, "home", row.home_position, row.home_points, row.home_games_played, row.home_wins, row.home_draws, row.home_losses, row.home_goals_for, row.home_goals_against)
-            self._persist_split(row, league, season, effective_date, ingestion_id, "away", row.away_position, row.away_points, row.away_games_played, row.away_wins, row.away_draws, row.away_losses, row.away_goals_for, row.away_goals_against)
-
-        return written
-
-    def _persist_split(
-        self,
-        row: StandingsRow,
-        league: str,
-        season: str,
-        effective_date: date,
-        ingestion_id: str,
-        standing_type: str,
-        position, points, games_played, wins, draws, losses, gf, ga,
-    ) -> None:
-        if position is None:
-            return
-        team = normalize_team_name(row.team, row.sport)
-        standing = Standing(
-            sport=row.sport,
-            league=league,
-            season=season,
-            team=team,
-            provider=row.provider,
-            standing_type=standing_type,
-            position=position,
-            points=points,
-            games_played=games_played,
-            wins=wins,
-            draws=draws,
-            losses=losses,
-            goals_for=gf,
-            goals_against=ga,
-            goal_difference=(gf - ga) if (gf is not None and ga is not None) else None,
-            effective_date=effective_date,
-            ingestion_id=ingestion_id,
-            created_at=datetime.utcnow(),
+        existing.position = position
+        existing.points = points
+        existing.games_played = games_played
+        existing.wins = wins
+        existing.draws = draws
+        existing.losses = losses
+        existing.goals_for = gf
+        existing.goals_against = ga
+        existing.goal_difference = (
+            (gf - ga) if (gd is None and gf is not None and ga is not None) else gd
         )
-        self.db.add(standing)
+        existing.recent_form = form if standing_type == "total" else None
+        existing.provider = row.provider
+        existing.ingestion_id = ingestion_id
+        existing.created_at = datetime.utcnow()
 
     def _upsert_provenance(
         self,
