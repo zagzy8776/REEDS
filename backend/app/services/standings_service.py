@@ -77,9 +77,17 @@ class StandingsIngestor:
 
         for provider in active_providers:
             if not self._provider_covers_league(provider, sport, league):
+                log.warning(
+                    "provider %s does not cover league %s — skipped",
+                    provider.provider_name, league,
+                )
                 continue
             try:
                 rows = provider.get_standings(sport, league, season, target_date)
+                log.info(
+                    "provider %s returned %d standings rows for %s/%s",
+                    provider.provider_name, len(rows), league, season,
+                )
                 all_rows.extend(rows)
             except Exception:
                 log.exception("provider %s failed standings for %s/%s", provider.provider_name, league, season)
@@ -101,6 +109,17 @@ class StandingsIngestor:
         return [p for p in self.providers if p.provider_name in provider_names]
 
     def _provider_covers_league(self, provider: SportsDataProvider, sport: str, league: str) -> bool:
+        # Resolution maps (ESPN_LEAGUE_TO_AFISCores, LEAGUE_SLUGS, LEAGUE_CODE_MAP)
+        # are the source of truth for coverage — get_supported_leagues() hits
+        # the network in some providers (AfriScores) and returns backend naming
+        # ("Super Lig", "Premiership") that differs from REEDS naming ("EPL",
+        # "Turkish Super Lig"), so it is unreliable as a coverage gate.
+        if hasattr(provider, "_resolve_league_id") and provider._resolve_league_id(league):
+            return True
+        if hasattr(provider, "_resolve_league_slug") and provider._resolve_league_slug(league):
+            return True
+        if hasattr(provider, "_league_to_code") and provider._league_to_code(league):
+            return True
         supported = provider.get_supported_leagues(sport)
         if not supported:
             return True
