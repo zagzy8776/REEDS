@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from app.utils.team_names import normalize_team_name
@@ -5,18 +6,25 @@ from app.ml.standings_features import resolve_standings_features
 
 
 def _avg_dict(hist: list[dict], key: str, default: float, window: int | None = None) -> float:
+    """Mean of real observations; NaN when there are none.
+
+    The legacy `default` argument (1.2/1.3/1.1/...) is IGNORED — inventing a
+    value when no data exists was the fabrication this module is being purged
+    of. NaN is propagated to the model and imputed with TRAIN-TIME medians
+    (stored in the bundle), never with a hardcoded constant.
+    """
     rows = hist[-window:] if window else hist
-    return sum(x[key] for x in rows) / len(rows) if rows else default
+    return sum(x[key] for x in rows) / len(rows) if rows else float("nan")
 
 
 def _rate_dict(hist: list[dict], key: str, value, default: float, window: int | None = None) -> float:
     rows = hist[-window:] if window else hist
-    return sum(1 for x in rows if x[key] == value) / len(rows) if rows else default
+    return sum(1 for x in rows if x[key] == value) / len(rows) if rows else float("nan")
 
 
 def _condition_rate(hist: list[dict], predicate, default: float, window: int | None = None) -> float:
     rows = hist[-window:] if window else hist
-    return sum(1 for x in rows if predicate(x)) / len(rows) if rows else default
+    return sum(1 for x in rows if predicate(x)) / len(rows) if rows else float("nan")
 
 
 def _ema_dict(hist: list[dict], key: str, default: float, window: int = 5, alpha: float | None = None) -> float:
@@ -24,14 +32,17 @@ def _ema_dict(hist: list[dict], key: str, default: float, window: int = 5, alpha
 
     alpha defaults to 2/(window+1) (standard EMA span).
     Higher alpha = more weight on recent games.
+    Returns NaN when there is no history (never the legacy constant).
     """
     rows = hist[-window * 2:] if hist else []  # look back 2× window for stability
     if not rows:
-        return default
+        return float("nan")
     a = alpha if alpha else 2.0 / (window + 1)
-    ema = float(rows[0].get(key, default))
+    if key not in rows[0]:
+        return float("nan")
+    ema = float(rows[0][key])
     for r in rows[1:]:
-        v = float(r.get(key, default))
+        v = float(r.get(key, ema))
         ema = a * v + (1 - a) * ema
     return round(ema, 4)
 
@@ -87,18 +98,20 @@ def _h2h_features(h2h: dict, home: str, away: str) -> dict:
     key = tuple(sorted((home, away)))
     record = h2h.get(key)
 
-    # No prior meetings: neutral prior, explicitly represented by zero
-    # evidence count. Do not fabricate H2H history.
+    # No prior meetings: NaN — there is no H2H evidence to publish. The old
+    # 0.50/0.25/2.5 "neutral priors" fabricated a head-to-head that never
+    # happened. h2h_meetings stays 0.0 (true: zero meetings).
     if not record or record["total"] == 0:
+        nan = float("nan")
         return {
-            "h2h_home_win_rate": 0.50,
-            "h2h_draw_rate": 0.25,
-            "h2h_away_win_rate": 0.25,
-            "h2h_avg_total_goals": 2.5,
-            "h2h_home_venue_win_rate": 0.50,
-            "h2h_away_venue_win_rate": 0.25,
-            "h2h_last3_home_goals": 1.3,
-            "h2h_last3_away_goals": 1.1,
+            "h2h_home_win_rate": nan,
+            "h2h_draw_rate": nan,
+            "h2h_away_win_rate": nan,
+            "h2h_avg_total_goals": nan,
+            "h2h_home_venue_win_rate": nan,
+            "h2h_away_venue_win_rate": nan,
+            "h2h_last3_home_goals": nan,
+            "h2h_last3_away_goals": nan,
             "h2h_meetings": 0.0,
         }
 
@@ -121,11 +134,11 @@ def _h2h_features(h2h: dict, home: str, away: str) -> dict:
     vt = record.get("venue_total", 0)
     h_venue_wr = (
         record.get("venue_home_wins", 0) / vt
-        if vt > 0 else 0.50
+        if vt > 0 else float("nan")
     )
     a_venue_wr = (
         record.get("venue_away_wins", 0) / vt
-        if vt > 0 else 0.25
+        if vt > 0 else float("nan")
     )
 
     l3h = record.get("last3_home_goals", [])
@@ -179,7 +192,10 @@ SOCCER_LEAGUE_DIFFICULTY = {
 
 
 def _soccer_league_difficulty(league) -> float:
-    return SOCCER_LEAGUE_DIFFICULTY.get(str(league), 0.75)
+    # Unknown league -> 1.0: a NEUTRAL multiplier (Elo passes through
+    # unchanged). The old 0.75 silently shrank real teams' Elo based on a
+    # guessed strength.
+    return SOCCER_LEAGUE_DIFFICULTY.get(str(league), 1.0)
 
 
 def _odds_margin(home_odds, draw_odds, away_odds) -> float:
@@ -255,11 +271,21 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
             team_last_match[away] = pd.Timestamp(r["match_date"])
             continue
 
-        home_elo, away_elo = team_elo.get(home, 1500.0), team_elo.get(away, 1500.0)
-        home_elo_h, away_elo_a = team_elo_home.get(home, 1500.0), team_elo_away.get(away, 1500.0)
+        home_elo_prev = team_elo.get(home)
+        away_elo_prev = team_elo.get(away)
+        home_elo_h_prev = team_elo_home.get(home)
+        away_elo_a_prev = team_elo_away.get(away)
         league_difficulty = _soccer_league_difficulty(r.get("league"))
-        normalized_home_elo = home_elo * league_difficulty
-        normalized_away_elo = away_elo * league_difficulty
+        # Pre-match Elo FEATURE: NaN when the team genuinely had no prior
+        # matches at that point in time. The 1500.0 start rating is the Elo
+        # algorithm's internal bootstrap for continuing the replay below —
+        # it is never published as an observation.
+        normalized_home_elo = (home_elo_prev * league_difficulty) if home_elo_prev is not None else float("nan")
+        normalized_away_elo = (away_elo_prev * league_difficulty) if away_elo_prev is not None else float("nan")
+        home_elo = home_elo_prev if home_elo_prev is not None else 1500.0
+        away_elo = away_elo_prev if away_elo_prev is not None else 1500.0
+        home_elo_h = home_elo_h_prev if home_elo_h_prev is not None else 1500.0
+        away_elo_a = away_elo_a_prev if away_elo_a_prev is not None else 1500.0
         hs, aas = int(r["home_score"]), int(r["away_score"])
         home_result = 1.0 if hs > aas else 0.5 if hs == aas else 0.0
 
@@ -338,9 +364,9 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
             "home_elo": normalized_home_elo,
             "away_elo": normalized_away_elo,
             "elo_diff": normalized_home_elo - normalized_away_elo,
-            "home_elo_home_only": home_elo_h * league_difficulty,
-            "away_elo_away_only": away_elo_a * league_difficulty,
-            "elo_diff_venue": (home_elo_h - away_elo_a) * league_difficulty,
+            "home_elo_home_only": (home_elo_h_prev * league_difficulty) if home_elo_h_prev is not None else float("nan"),
+            "away_elo_away_only": (away_elo_a_prev * league_difficulty) if away_elo_a_prev is not None else float("nan"),
+            "elo_diff_venue": ((home_elo_h_prev - away_elo_a_prev) * league_difficulty) if (home_elo_h_prev is not None and away_elo_a_prev is not None) else float("nan"),
             # --- League / season context ---
             "league_strength": league_difficulty,
             "home_form_vs_season": home_season_avg - 1.2,
@@ -357,10 +383,10 @@ def build_soccer_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.Seri
             "h2h_draw_rate":           h2h_feats["h2h_draw_rate"],
             "h2h_away_win_rate":       h2h_feats["h2h_away_win_rate"],
             "h2h_avg_total_goals":     h2h_feats["h2h_avg_total_goals"],
-            "h2h_home_venue_win_rate": h2h_feats.get("h2h_home_venue_win_rate", 0.50),
-            "h2h_away_venue_win_rate": h2h_feats.get("h2h_away_venue_win_rate", 0.25),
-            "h2h_last3_home_goals":    h2h_feats.get("h2h_last3_home_goals", 1.3),
-            "h2h_last3_away_goals":    h2h_feats.get("h2h_last3_away_goals", 1.1),
+            "h2h_home_venue_win_rate": h2h_feats.get("h2h_home_venue_win_rate", float("nan")),
+            "h2h_away_venue_win_rate": h2h_feats.get("h2h_away_venue_win_rate", float("nan")),
+            "h2h_last3_home_goals":    h2h_feats.get("h2h_last3_home_goals", float("nan")),
+            "h2h_last3_away_goals":    h2h_feats.get("h2h_last3_away_goals", float("nan")),
             # --- Consistency ---
             "home_scoring_consistency": _condition_rate(hh, lambda x: x["gf"] >= 1, 0.65, 5),
             "away_scoring_consistency": _condition_rate(ah, lambda x: x["gf"] >= 1, 0.60, 5),
@@ -537,7 +563,7 @@ def features_for_fixture(
         ratings_home: dict[str, float] = {}
         ratings_away: dict[str, float] = {}
         if hist.empty:
-            return 1500.0, 1500.0, 1500.0, 1500.0
+            return float("nan"), float("nan"), float("nan"), float("nan")
         for _, r in hist.iterrows():
             if pd.isna(r.get("home_score")) or pd.isna(r.get("away_score")):
                 continue
@@ -550,25 +576,45 @@ def features_for_fixture(
             hhr = ratings_home.get(h, 1500.0)
             aar = ratings_away.get(a, 1500.0)
             ratings_home[h], ratings_away[a] = _update_elo(hhr, ar, score_h, k=24)
-        return ratings.get(home_team, 1500.0), ratings.get(away_team, 1500.0), ratings_home.get(home_team, 1500.0), ratings_away.get(away_team, 1500.0)
+        # Missing from the replay = the team truly has no matches in the
+        # window: NaN, never a fabricated 1500.
+        return (
+            ratings.get(home_team, float("nan")),
+            ratings.get(away_team, float("nan")),
+            ratings_home.get(home_team, float("nan")),
+            ratings_away.get(away_team, float("nan")),
+        )
 
     def avg(rows, key, default, window: int | None = None):
         sample = rows[-window:] if window else rows
-        return sum(float(x[key]) for x in sample) / len(sample) if sample else default
+        return sum(float(x[key]) for x in sample) / len(sample) if sample else float("nan")
 
     def rate(rows, key, value, default, window: int | None = None):
         sample = rows[-window:] if window else rows
-        return sum(1 for x in sample if x[key] == value) / len(sample) if sample else default
+        return sum(1 for x in sample if x[key] == value) / len(sample) if sample else float("nan")
 
     def condition(rows, predicate, default, window: int | None = None):
         sample = rows[-window:] if window else rows
-        return sum(1 for x in sample if predicate(x)) / len(sample) if sample else default
+        return sum(1 for x in sample if predicate(x)) / len(sample) if sample else float("nan")
 
     # --- H2H computation ---
     def compute_h2h() -> dict:
         h2h: dict = {}
         if hist.empty:
-            return {"h2h_home_win_rate": 0.50, "h2h_draw_rate": 0.25, "h2h_away_win_rate": 0.25, "h2h_avg_total_goals": 2.5}
+            # No history at all: NaN (imputed downstream from real medians),
+            # never fabricated neutral priors.
+            nan = float("nan")
+            return {
+                "h2h_home_win_rate": nan,
+                "h2h_draw_rate": nan,
+                "h2h_away_win_rate": nan,
+                "h2h_avg_total_goals": nan,
+                "h2h_home_venue_win_rate": nan,
+                "h2h_away_venue_win_rate": nan,
+                "h2h_last3_home_goals": nan,
+                "h2h_last3_away_goals": nan,
+                "h2h_meetings": 0.0,
+            }
         for _, r in hist.iterrows():
             if pd.isna(r.get("home_score")) or pd.isna(r.get("away_score")):
                 continue
@@ -593,7 +639,7 @@ def features_for_fixture(
     # --- Season form ---
     def compute_season_avg(rows_list):
         pts = [r["points"] for r in rows_list]
-        return sum(pts) / len(pts) if pts else 1.2
+        return sum(pts) / len(pts) if pts else float("nan")
 
     hh, ah = recent(home_team), recent(away_team)
     h_home, a_away = recent(home_team, "home"), recent(away_team, "away")
@@ -610,18 +656,18 @@ def features_for_fixture(
     # Rest days — days since last match for each team
     def _rest_days(team: str) -> float:
         if hist.empty or fixture_date is None:
-            return 4.0
+            return float("nan")
         hn = normalize_team_name(team, "soccer")
         norm_home = hist.home_team.map(lambda x: normalize_team_name(str(x), "soccer"))
         norm_away = hist.away_team.map(lambda x: normalize_team_name(str(x), "soccer"))
         mask = (norm_home == hn) | (norm_away == hn)
         team_games = hist[mask].copy()
         if team_games.empty:
-            return 4.0
+            return float("nan")
         last_date = pd.to_datetime(team_games["match_date"].max(), errors="coerce")
         cutoff = pd.to_datetime(fixture_date, errors="coerce")
         if pd.isna(last_date) or pd.isna(cutoff):
-            return 4.0
+            return float("nan")
         return min(float((cutoff - last_date).days), 14.0)
 
     home_rest = _rest_days(home_team)
@@ -719,10 +765,10 @@ def features_for_fixture(
         "h2h_draw_rate":           h2h_feats.get("h2h_draw_rate", 0.25),
         "h2h_away_win_rate":       h2h_feats.get("h2h_away_win_rate", 0.25),
         "h2h_avg_total_goals":     h2h_feats.get("h2h_avg_total_goals", 2.5),
-        "h2h_home_venue_win_rate": h2h_feats.get("h2h_home_venue_win_rate", 0.50),
-        "h2h_away_venue_win_rate": h2h_feats.get("h2h_away_venue_win_rate", 0.25),
-        "h2h_last3_home_goals":    h2h_feats.get("h2h_last3_home_goals", 1.3),
-        "h2h_last3_away_goals":    h2h_feats.get("h2h_last3_away_goals", 1.1),
+        "h2h_home_venue_win_rate": h2h_feats.get("h2h_home_venue_win_rate", float("nan")),
+        "h2h_away_venue_win_rate": h2h_feats.get("h2h_away_venue_win_rate", float("nan")),
+        "h2h_last3_home_goals":    h2h_feats.get("h2h_last3_home_goals", float("nan")),
+        "h2h_last3_away_goals":    h2h_feats.get("h2h_last3_away_goals", float("nan")),
         # --- Consistency ---
         "home_scoring_consistency": condition(hh, lambda x: x["gf"] >= 1, 0.65, 5),
         "away_scoring_consistency": condition(ah, lambda x: x["gf"] >= 1, 0.60, 5),
@@ -793,7 +839,14 @@ def build_basketball_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.
         home = normalize_team_name(r["home_team"], "basketball")
         away = normalize_team_name(r["away_team"], "basketball")
         hh, ah = team_hist.get(home, [])[-10:], team_hist.get(away, [])[-10:]
-        home_elo, away_elo = team_elo.get(home, 1500.0), team_elo.get(away, 1500.0)
+        home_elo_prev = team_elo.get(home)
+        away_elo_prev = team_elo.get(away)
+        # Feature: NaN when unseen; 1500.0 is the Elo algorithm's internal
+        # bootstrap used only to continue the replay below.
+        home_elo_feat = home_elo_prev if home_elo_prev is not None else float("nan")
+        away_elo_feat = away_elo_prev if away_elo_prev is not None else float("nan")
+        home_elo = home_elo_prev if home_elo_prev is not None else 1500.0
+        away_elo = away_elo_prev if away_elo_prev is not None else 1500.0
         game_date = pd.to_datetime(r.get("match_date"), errors="coerce")
         home_rest = (game_date - last_played[home]).days if home in last_played and not pd.isna(game_date) else 3
         away_rest = (game_date - last_played[away]).days if away in last_played and not pd.isna(game_date) else 3
@@ -823,7 +876,7 @@ def build_basketball_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.
         # H2H
         key = tuple(sorted((home, away)))
         h2h_rec = h2h_tracker.get(key)
-        h2h_home_advantage = 0.50
+        h2h_home_advantage = float("nan")
         if h2h_rec and h2h_rec["total"] >= 2:
             h2h_home_wins = h2h_rec["home_wins"] if key[0] == home else h2h_rec["away_wins"]
             h2h_home_advantage = h2h_home_wins / h2h_rec["total"]
@@ -839,9 +892,9 @@ def build_basketball_features(fixtures: pd.DataFrame) -> tuple[pd.DataFrame, pd.
             "away_recent_margin_5": _avg_dict(ah, "margin", -2, 5),
             "home_win_rate": _avg_dict(hh, "win", 0.55),
             "away_win_rate": _avg_dict(ah, "win", 0.45),
-            "home_elo": home_elo,
-            "away_elo": away_elo,
-            "elo_diff": home_elo - away_elo,
+            "home_elo": home_elo_feat,
+            "away_elo": away_elo_feat,
+            "elo_diff": (home_elo_feat - away_elo_feat) if (not np.isnan(home_elo_feat) and not np.isnan(away_elo_feat)) else float("nan"),
             "home_rest_days": min(max(home_rest, 0), 7),
             "away_rest_days": min(max(away_rest, 0), 7),
             "home_back_to_back": 1 if home_rest <= 1 else 0,
@@ -909,7 +962,7 @@ def basketball_features_for_fixture(history: pd.DataFrame, home_team: str, away_
         ratings: dict[str, float] = {}
         last_played: dict[str, pd.Timestamp] = {}
         if hist.empty:
-            return 1500.0, 1500.0, 3, 3
+            return float("nan"), float("nan"), 3, 3
         for _, r in hist.iterrows():
             if pd.isna(r.get("home_score")) or pd.isna(r.get("away_score")):
                 continue
@@ -925,10 +978,15 @@ def basketball_features_for_fixture(history: pd.DataFrame, home_team: str, away_
         reference_date = cutoff if cutoff is not None and not pd.isna(cutoff) else pd.Timestamp.utcnow().tz_localize(None)
         home_rest = (reference_date - last_played[home_team]).days if home_team in last_played else 3
         away_rest = (reference_date - last_played[away_team]).days if away_team in last_played else 3
-        return ratings.get(home_team, 1500.0), ratings.get(away_team, 1500.0), min(max(home_rest, 0), 7), min(max(away_rest, 0), 7)
+        return (
+            ratings.get(home_team, float("nan")),
+            ratings.get(away_team, float("nan")),
+            min(max(home_rest, 0), 7),
+            min(max(away_rest, 0), 7),
+        )
 
     def avg(rows, idx, default):
-        return sum(x[idx] for x in rows) / len(rows) if rows else default
+        return sum(x[idx] for x in rows) / len(rows) if rows else float("nan")
 
     # Streaks
     def compute_streaks(rows_list):

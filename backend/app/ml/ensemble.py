@@ -37,8 +37,14 @@ class LoyalEdgeEngine:
         self.bundle = bundle if isinstance(bundle, dict) else None
         return self.bundle
 
-    def _ensemble_predict(self, features_row: dict, labels: list[int]) -> dict[str, float]:
-        """Run the ensemble on a single fixture feature vector."""
+    def _ensemble_predict(self, features_row: dict, labels: list[int], medians: dict | None = None) -> dict[str, float]:
+        """Run the ensemble on a single fixture feature vector.
+
+        NaN features (no history for a slice) are imputed with the bundle's
+        TRAIN-TIME medians; for older bundles without them, with medians
+        computed from the live history (also real data). If every model fails,
+        this raises — it never returns an invented uniform distribution.
+        """
         bundle = self._load_bundle()
         if not bundle or "models" not in bundle:
             # An unmodeled uniform guess (0.33/0.33/0.34) presented as an
@@ -49,11 +55,15 @@ class LoyalEdgeEngine:
             )
 
         x = pd.DataFrame([features_row]).reindex(columns=bundle["features"], fill_value=0)
+        fill = bundle.get("feature_medians") or medians or {}
+        if fill:
+            x = x.fillna(pd.Series(fill))
+
         models = bundle["models"]
         weights = bundle.get("weights", [1.0] * len(models))
-        total_weight = sum(weights)
-        all_probas = []
+        weight_by_name = {name: float(w) for name, w in zip(models.keys(), weights)}
 
+        succeeded: list[tuple[str, "np.ndarray"]] = []
         for name, model in models.items():
             try:
                 probas = model.predict_proba(x)[0]
@@ -61,20 +71,26 @@ class LoyalEdgeEngine:
                 for src_idx, cls in enumerate(model.classes_):
                     if cls in labels:
                         aligned[labels.index(cls)] = probas[src_idx]
-                all_probas.append(aligned)
+                succeeded.append((name, aligned))
             except Exception:
-                # Fallback: if a model fails, skip it
-                uniform = np.ones(len(labels)) / len(labels)
-                all_probas.append(uniform)
+                # A model that cannot handle the input is SKIPPED — never
+                # replaced with a fabricated uniform distribution.
+                continue
 
-        # Weighted average
+        if not succeeded:
+            raise RuntimeError("all ensemble models failed on this feature vector; refusing to fabricate probabilities")
+
+        # Weighted average over ONLY the models that produced probabilities.
+        total_weight = sum(weight_by_name.get(name, 1.0) for name, _ in succeeded) or float(len(succeeded))
         ensemble_probas = sum(
-            proba * (w / total_weight)
-            for proba, w in zip(all_probas, weights)
+            proba * (weight_by_name.get(name, 1.0) / total_weight)
+            for name, proba in succeeded
         )
 
         cls_map = {0: "away", 1: "draw", 2: "home"}
-        return {cls_map.get(i, str(i)): float(ensemble_probas[i]) for i in range(len(labels))}
+        result = {cls_map.get(i, str(i)): float(ensemble_probas[i]) for i in range(len(labels))}
+        s = sum(result.values())
+        return {k: v / s for k, v in result.items()} if s > 0 else result
 
     @staticmethod
     def _market_implied_read(
@@ -231,7 +247,14 @@ class LoyalEdgeEngine:
 
         # Ensemble prediction with meta-learner blend
         labels = [0, 1, 2]  # away, draw, home
-        ml_probs = self._ensemble_predict(f, labels)
+        # Real-data medians for NaN features when the bundle predates
+        # train-time medians (feature_medians). Computed, never hardcoded.
+        feature_names = (self._load_bundle() or {}).get("features", [])
+        medians: dict = {}
+        hist_cols = [c for c in feature_names if c in history.columns]
+        if hist_cols and not history.empty:
+            medians = history[hist_cols].apply(pd.to_numeric, errors="coerce").median().to_dict()
+        ml_probs = self._ensemble_predict(f, labels, medians=medians)
         bundle = self._load_bundle()
         ml_probs = apply_calibration(ml_probs, bundle.get("calibrator_path") if bundle else None)
 

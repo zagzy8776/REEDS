@@ -222,3 +222,57 @@ def test_generic_engine_never_lowers_confidence_to_disguise_missing_data():
     items = GenericSportEngine().predict(history, {"sport": "rugby", "home_team": "Team A", "away_team": "Team B"})
     moneyline = next(i for i in items if i["market"] == "Moneyline")
     assert moneyline["confidence"] > 70  # clamps removed; data speaks
+
+
+def test_no_history_features_are_nan_not_invented():
+    # Phase 3: the feature layer itself no longer fabricates. Empty history
+    # must produce NaN (imputed at train/serving time from real medians),
+    # never the old invented constants (form 1.2, goals 1.3, Elo 1125).
+    from app.ml.features import features_for_fixture
+
+    f = features_for_fixture(pd.DataFrame(), "Team A", "Team B", "2026-09-16", "Unknown League")
+    assert pd.isna(f["home_form_points"])   # was 1.2
+    assert pd.isna(f["home_goals_for"])     # was 1.3
+    assert pd.isna(f["home_elo"])           # was 1500*0.75 = 1125
+    assert pd.isna(f["h2h_home_win_rate"])  # was 0.50
+    assert f["h2h_meetings"] == 0.0         # true zero meetings
+    assert f["league_strength"] == 1.0      # neutral multiplier, no strength claim
+
+
+def test_ensemble_predict_raises_when_every_model_fails(engine):
+    class _Bad:
+        classes_ = [0, 1, 2]
+
+        def predict_proba(self, _x):
+            raise ValueError("cannot handle NaN")
+
+    engine.bundle = {
+        "features": ["x"],
+        "models": {"bad": _Bad()},
+        "weights": [1.0],
+    }
+    with pytest.raises(RuntimeError, match="refusing to fabricate"):
+        engine._ensemble_predict({"x": float("nan")}, [0, 1, 2])
+
+
+def test_ensemble_predict_skips_failed_model_and_uses_survivors(engine):
+    class _Good:
+        classes_ = [0, 1, 2]
+
+        def predict_proba(self, _x):
+            return [[0.2, 0.3, 0.5]]
+
+    class _Bad:
+        classes_ = [0, 1, 2]
+
+        def predict_proba(self, _x):
+            raise ValueError("cannot handle NaN")
+
+    engine.bundle = {
+        "features": ["x"],
+        "models": {"bad": _Bad(), "good": _Good()},
+        "weights": [0.5, 0.5],
+    }
+    probs = engine._ensemble_predict({"x": float("nan")}, [0, 1, 2])
+    assert abs(probs["home"] - 0.5) < 1e-6  # the good model's real output, not a uniform mix
+

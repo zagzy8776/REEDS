@@ -258,7 +258,8 @@ def _save_bundle(result, features, labels, sport, sample_size, calibrator_path=N
         "split": "chronological_70_30_oof_meta",
         "calibrator_path": calibrator_path,
         "labels": labels,
-        "training_method": "expanding_window_oof_meta_recency_classweight",
+        "feature_medians": result.get("feature_medians", {}),
+        "training_method": "expanding_window_oof_meta_recency_classweight_nan_medians_v2",
         "runtime_versions": {
             "python": f"{__import__('sys').version_info.major}.{__import__('sys').version_info.minor}.{__import__('sys').version_info.micro}",
             "scikit_learn": sklearn.__version__,
@@ -309,8 +310,17 @@ def _split_and_train(X, y, labels, factories, sport, features, match_dates=None)
     y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
     if len(X_test) < 5:
         raise ValueError(f"Test set too small ({len(X_test)})")
+
+    # NaN-aware training: missing feature values (teams with no history for a
+    # slice) are imputed with the TRAINING-SET median — computed from real
+    # data and stored in the bundle, never a hardcoded constant.
+    feature_medians = {k: float(v) for k, v in X_train.median(numeric_only=True).to_dict().items()}
+    X_train = X_train.fillna(feature_medians)
+    X_test = X_test.fillna(feature_medians)
+
     sw = _recency_weights(X_train.index, match_dates) if match_dates is not None else None
     result = _fit_oof_ensemble(X_train, y_train, X_test, y_test, factories, labels, sample_weight_train=sw)
+    result["feature_medians"] = feature_medians
     return _save_bundle(result, features, labels, sport, len(X))
 
 
