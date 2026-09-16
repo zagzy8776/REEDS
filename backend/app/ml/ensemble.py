@@ -238,7 +238,7 @@ class LoyalEdgeEngine:
         form_total = f["home_form_points"] + f["away_form_points"] + 0.01
         one_x_two = {
             "Home Win": 0.45 * ml_probs.get("home", 0.34) + 0.35 * p["home"] + 0.20 * (f["home_form_points"] / form_total),
-            "Draw": 0.45 * ml_probs.get("draw", 0.33) + 0.35 * p["draw"] + 0.20 * 0.30,
+            "Draw": 0.45 * ml_probs.get("draw", 0.33) + 0.35 * p["draw"] + 0.20 * ((f["home_draw_rate_5"] + f["away_draw_rate_5"]) / 2),
             "Away Win": 0.45 * ml_probs.get("away", 0.33) + 0.35 * p["away"] + 0.20 * (f["away_form_points"] / form_total),
         }
         pick_1x2, conf_1x2 = max(one_x_two.items(), key=lambda x: x[1])
@@ -336,24 +336,25 @@ class LoyalEdgeEngine:
                 {"market": "Both Teams to Score", "pick": btts_pick, "confidence": btts_final_conf},
             ]
             
-            # Map picks to odds
+            # Map picks to odds — ONLY real odds. Inventing a price (the old
+            # 1.9/1.8 defaults) fed fake "value bets" to users.
             fixture_odds = {}
-            if pick_1x2 == "Home Win":
+            if pick_1x2 == "Home Win" and fixture.get("home_odds"):
                 fixture_odds["1X2_Home_Win"] = fixture["home_odds"]
-            elif pick_1x2 == "Draw":
+            elif pick_1x2 == "Draw" and fixture.get("draw_odds"):
                 fixture_odds["1X2_Draw"] = fixture["draw_odds"]
-            elif pick_1x2 == "Away Win":
+            elif pick_1x2 == "Away Win" and fixture.get("away_odds"):
                 fixture_odds["1X2_Away_Win"] = fixture["away_odds"]
-            
-            if "Over" in goals_pick:
-                fixture_odds["Over/Under_2.5_Over_2.5_Goals"] = fixture.get("over_2_5_odds", 1.9)
-            else:
-                fixture_odds["Over/Under_2.5_Under_2.5_Goals"] = fixture.get("under_2_5_odds", 1.9)
-            
-            if "Yes" in btts_pick:
-                fixture_odds["Both_Teams_to_Score_BTTS_Yes"] = fixture.get("btts_yes_odds", 1.8)
-            else:
-                fixture_odds["Both_Teams_to_Score_BTTS_No"] = fixture.get("btts_no_odds", 1.9)
+
+            if "Over" in goals_pick and fixture.get("over_2_5_odds"):
+                fixture_odds["Over/Under_2.5_Over_2.5_Goals"] = fixture["over_2_5_odds"]
+            elif "Over" not in goals_pick and fixture.get("under_2_5_odds"):
+                fixture_odds["Over/Under_2.5_Under_2.5_Goals"] = fixture["under_2_5_odds"]
+
+            if "Yes" in btts_pick and fixture.get("btts_yes_odds"):
+                fixture_odds["Both_Teams_to_Score_BTTS_Yes"] = fixture["btts_yes_odds"]
+            elif "Yes" not in btts_pick and fixture.get("btts_no_odds"):
+                fixture_odds["Both_Teams_to_Score_BTTS_No"] = fixture["btts_no_odds"]
             
             # Identify value bets
             value_bets = value_engine.identify_value_bets(predictions_for_value, fixture_odds)
