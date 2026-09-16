@@ -87,6 +87,28 @@ class TestStandingsIngestor:
         ).scalars().all()
         assert len(rows) == 1
 
+    def test_standings_table_idempotent_reingest_no_duplicates(self, ingestor, db_session):
+        """Re-ingesting the same league/season/date must not duplicate rows on the
+        ``standings`` table. ``uq_standing`` has no provider column (last writer
+        wins), so a second ingest upserts the same keyed rows instead of inserting.
+        """
+        provider = ingestor.providers[0]
+        provider.set_standings("2024-08-19", EPL_ROUND_2)
+
+        ingestor.ingest_standings("soccer", "EPL", "2024", "2024-08-19")
+        ingestor.ingest_standings("soccer", "EPL", "2024", "2024-08-19")
+
+        rows = db_session.execute(
+            select(Standing).where(
+                Standing.league == "EPL",
+                Standing.sport == "soccer",
+                Standing.effective_date == date(2024, 8, 19),
+                Standing.standing_type == "total",
+            )
+        ).scalars().all()
+        assert len(rows) == 2
+        assert {r.team for r in rows} == {"Arsenal", "Chelsea"}
+
     def test_effective_date_strictly_before_fixture(self, ingestor, db_session):
         provider = ingestor.providers[0]
         provider.set_standings("2024-08-19", [dict(EPL_ROUND_2[0])])

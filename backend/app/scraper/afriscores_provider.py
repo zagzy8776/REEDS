@@ -290,8 +290,6 @@ class AfriScoresProvider(SportsDataProvider):
         import re
 
         s = s.strip()
-        if re.fullmatch(r"\d{4}", s):
-            return None  # ambiguous: could be FD code or a year
         years = re.findall(r"(?:19|20)\d{2}", s)
         if len(years) >= 2:
             return f"{years[0]}/{years[1]}"
