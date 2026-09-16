@@ -200,6 +200,9 @@ class FootballDataCsvProvider(SportsDataProvider):
                 continue
             file_league = parts[0]
             file_season = parts[1] if len(parts) > 1 else ""
+            # Strip extension: "2024-2025.csv" -> "2024-2025"
+            if file_season.lower().endswith(".csv"):
+                file_season = file_season[: -len(".csv")]
 
             if league_code and file_league == league_code:
                 if self._season_matches(file_season, season):
@@ -228,6 +231,20 @@ class FootballDataCsvProvider(SportsDataProvider):
         # Try stripping suffixes
         target_year = target_season.split("-")[0].split("/")[0]
         if file_season.startswith(target_year):
+            return True
+        # Football-Data 4-digit season codes: "2425" == "2024-2025",
+        # "2526" == "2025-2026". Compare implied start years.
+        import re
+
+        def _start_year(s: str) -> str | None:
+            s = s.strip()
+            if re.fullmatch(r"\d{4}", s):
+                return "20" + s[:2]
+            m = re.search(r"(19|20)\d{2}", s)
+            return m.group(0) if m else None
+
+        fsy, tsy = _start_year(file_season), _start_year(target_part)
+        if fsy and tsy and fsy == tsy:
             return True
         return False
 
