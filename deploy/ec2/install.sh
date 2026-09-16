@@ -2,14 +2,14 @@
 # REEDS EC2 worker installer (direct on-instance, no GitHub Actions).
 # - REQUIRES Python 3.11 (refuses to build the venv with any other version).
 # - Creates a dedicated venv OUTSIDE the repo.
-# - Installs backend/requirements.txt (pins scikit-learn==1.6.0, matching Render).
+# - Installs backend/requirements.txt (pins scikit-learn==1.6.0).
 # - Creates the model + log + request directories.
 # - Installs the trigger + training systemd services (NOT enabled/started).
 # - Does NOT start or schedule any training.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VENV_DIR="${REEDS_VENV_DIR:-$home/ubuntu/reeds-venv}"
+VENV_DIR="${REEDS_VENV_DIR:-$HOME/reeds-venv}"
 LOG_DIR="$REPO_ROOT/deploy/ec2/logs"
 REQUEST_DIR="$REPO_ROOT/deploy/ec2/requests"
 
@@ -69,7 +69,7 @@ sudo systemctl daemon-reload
 
 echo "== install complete =="
 echo "Next (manual only):"
-echo "  1. Create /etc/reeds.env with DATABASE_URL, ADMIN_API_KEY, RENDER_URL, GITHUB_TOKEN"
+echo "  1. Create /etc/reeds.env with DATABASE_URL, ADMIN_API_KEY, GITHUB_TOKEN (see deploy/ec2/env.example)"
 echo "  2. Enable the trigger poller:  sudo systemctl enable --now reeds-train-trigger"
 echo "  3. Request training remotely:  python kaggle/trigger_ec2_training.py --sports soccer,basketball"
 echo "  4. Or run once manually:       $VENV_DIR/bin/python $REPO_ROOT/backend/scripts/ec2_train_worker.py run-all"

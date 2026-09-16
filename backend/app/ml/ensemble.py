@@ -41,7 +41,12 @@ class LoyalEdgeEngine:
         """Run the ensemble on a single fixture feature vector."""
         bundle = self._load_bundle()
         if not bundle or "models" not in bundle:
-            return {"away": 0.33, "draw": 0.33, "home": 0.34}
+            # An unmodeled uniform guess (0.33/0.33/0.34) presented as an
+            # ensemble read is a fabricated prediction. Refuse loudly instead;
+            # callers gate on bundle presence before reaching this point.
+            raise RuntimeError(
+                "trained ensemble bundle is unavailable; refusing silent default probabilities"
+            )
 
         x = pd.DataFrame([features_row]).reindex(columns=bundle["features"], fill_value=0)
         models = bundle["models"]
@@ -71,6 +76,100 @@ class LoyalEdgeEngine:
         cls_map = {0: "away", 1: "draw", 2: "home"}
         return {cls_map.get(i, str(i)): float(ensemble_probas[i]) for i in range(len(labels))}
 
+    @staticmethod
+    def _market_implied_read(
+        fixture: dict,
+        home_team: str,
+        away_team: str,
+        home_hist: int,
+        away_hist: int,
+        full_history_missing: bool,
+    ) -> list[dict]:
+        """Cold-start fallback: derive reads ONLY from real bookmaker odds.
+
+        When a team has no completed-match history, the ML ensemble and the
+        Poisson simulation would both run on hardcoded neutral defaults (form
+        1.2, goals 1.3/1.1, Elo 1500) — producing the SAME invented card for
+        every fixture. That is dishonest and got users betting on template
+        constants. Instead, convert the fixture's real odds into margin-removed
+        probabilities (standard vig removal) and publish only what the market
+        itself implies, clearly labeled. Without real odds, publish nothing.
+        """
+        meta = {
+            "read_type": "market_implied",
+            "data_notice": (
+                "No usable match history for this fixture. "
+                f"Completed matches on record: {home_team}={home_hist}, {away_team}={away_hist}. "
+                "These reads are derived directly from bookmaker odds (margin removed), "
+                "not from a trained model."
+            ),
+            "history_counts": {"home": home_hist, "away": away_hist},
+            "factors": [],
+            "probabilities": {},
+        }
+        if not full_history_missing:
+            meta["data_notice"] = (
+                "Limited match history for this fixture. "
+                f"Completed matches on record: {home_team}={home_hist}, {away_team}={away_hist} "
+                f"(minimum {3} required for a model read). "
+                "These reads are derived directly from bookmaker odds (margin removed), "
+                "not from a trained model."
+            )
+
+        home_odds = fixture.get("home_odds")
+        draw_odds = fixture.get("draw_odds")
+        away_odds = fixture.get("away_odds")
+        try:
+            implied = [1.0 / float(o) for o in (home_odds, draw_odds, away_odds)]
+        except (TypeError, ValueError, ZeroDivisionError):
+            return []  # No real odds -> nothing honest to say
+        if not all(o > 1.01 for o in (home_odds, draw_odds, away_odds)):
+            return []
+        total = sum(implied)
+        p_home, p_draw, p_away = (x / total for x in implied)
+        meta["probabilities"] = {
+            "home_win": round(p_home, 4),
+            "draw": round(p_draw, 4),
+            "away_win": round(p_away, 4),
+            "source": "market_implied_margin_removed",
+        }
+
+        one_x_two = {"Home Win": p_home, "Draw": p_draw, "Away Win": p_away}
+        pick_1x2, conf_1x2 = max(one_x_two.items(), key=lambda x: x[1])
+        dc = {
+            "Home or Draw": p_home + p_draw,
+            "Away or Draw": p_away + p_draw,
+            "Home or Away": p_home + p_away,
+        }
+        dc_pick, dc_conf = max(dc.items(), key=lambda x: x[1])
+
+        def _risk(c: float) -> str:
+            # Market-implied reads cap at Medium: they carry no model edge, and
+            # calling them Low risk would overstate what they are.
+            return "Medium" if c >= 0.72 else "Medium" if c >= 0.58 else "High"
+
+        notice = meta["data_notice"]
+        return [
+            {
+                "market": "1X2",
+                "pick": pick_1x2,
+                "confidence": round(conf_1x2 * 100, 1),
+                "edge_score": 0.0,
+                "risk_level": _risk(conf_1x2),
+                "reasoning": notice,
+                "engine_meta": {**meta, "market_logic": "Margin-removed bookmaker probabilities; no model involved."},
+            },
+            {
+                "market": "Double Chance",
+                "pick": dc_pick,
+                "confidence": round(dc_conf * 100, 1),
+                "edge_score": 0.0,
+                "risk_level": _risk(dc_conf),
+                "reasoning": notice,
+                "engine_meta": {**meta, "market_logic": "Margin-removed bookmaker probabilities; no model involved."},
+            },
+        ]
+
     def predict_soccer(self, history: pd.DataFrame, fixture: dict) -> list[dict]:
         home_team = normalize_team_name(fixture["home_team"], "soccer")
         away_team = normalize_team_name(fixture["away_team"], "soccer")
@@ -97,6 +196,32 @@ class LoyalEdgeEngine:
             standings_db=db,
             season=fixture.get("season"),
         )
+
+        # ── Honesty gate: never present fabricated feature defaults as insight ──
+        # features_for_fixture() substitutes neutral constants (form 1.2, goals
+        # 1.3/1.1, Elo 1500xleague) when a team has no completed-match history.
+        # When BOTH sides fall back like that, every fixture would produce the
+        # same invented card. Instead: with real odds, publish only market-implied
+        # reads (margin-removed bookmaker probabilities); without odds, publish
+        # nothing.
+        home_hist = int(f.get("home_history_count", 0) or 0)
+        away_hist = int(f.get("away_history_count", 0) or 0)
+        MIN_HISTORY_MATCHES = 3
+        if home_hist < MIN_HISTORY_MATCHES or away_hist < MIN_HISTORY_MATCHES:
+            return self._market_implied_read(
+                fixture,
+                home_team,
+                away_team,
+                home_hist,
+                away_hist,
+                full_history_missing=home_hist == 0 and away_hist == 0,
+            )
+
+        # No trained/active bundle: refuse to emit the uniform 0.33/0.33/0.34
+        # fallback — an unmodeled guess presented as an ensemble read is worse
+        # than no read.
+        if not self._load_bundle():
+            return []
         home_lam = max((f["home_goals_for"] + f["away_goals_against"]) / 2, 0.2)
         away_lam = max((f["away_goals_for"] + f["home_goals_against"]) / 2, 0.2)
         p = soccer_probabilities(home_lam, away_lam)
@@ -170,6 +295,11 @@ class LoyalEdgeEngine:
                 "home_expected_goals": round(float(home_lam), 2),
                 "away_expected_goals": round(float(away_lam), 2),
                 "total_expected_goals": round(float(home_lam + away_lam), 2),
+            },
+            "data_depth": {
+                "home_history": home_hist,
+                "away_history": away_hist,
+                "minimum_for_model_read": MIN_HISTORY_MATCHES,
             },
         }
 

@@ -7,8 +7,28 @@ def _risk(confidence_pct: float) -> str:
     return "Low" if confidence_pct >= 72 else "Medium" if confidence_pct >= 58 else "High"
 
 
-def _bounded_probability(value: float, low: float = 0.28, high: float = 0.78) -> float:
+def _bounded_probability(value: float, low: float = 0.01, high: float = 0.99) -> float:
+    """Mathematical validity clip only.
+
+    The old defaults (0.28-0.78) silently truncated computed signals into a
+    predetermined band — a fabrication. These bounds only prevent 0/negative
+    probabilities; the data decides the value.
+    """
     return max(low, min(high, value))
+
+
+def _separation_confidence(projected: float, line: float, scale: float) -> float:
+    """Confidence computed from actual separation between projection and line.
+
+    50 is the honest coin-flip baseline; it only rises with real separation.
+    Replaces the hardcoded 54.0/56.5/57.0 confidences.
+    """
+    return round(min(67.0, max(50.0, abs(projected - line) * scale + 50.0)), 1)
+
+
+def _require_both_sides(home_form: dict, away_form: dict) -> bool:
+    """True only when BOTH sides have completed matches on record."""
+    return home_form["games"] > 0 and away_form["games"] > 0
 
 
 class RecentFormToolkit:
@@ -31,7 +51,13 @@ class RecentFormToolkit:
     def _sport_history(self, history: pd.DataFrame) -> pd.DataFrame:
         if history.empty:
             return pd.DataFrame()
-        df = history[history.get("sport", self.sport) == self.sport].copy()
+        # `history.get("sport", self.sport) == self.sport` returned a scalar for
+        # sport-less frames and crashed with KeyError: True. Filter only when
+        # the column exists; otherwise treat the frame as already sport-scoped.
+        if "sport" in history.columns:
+            df = history[history["sport"] == self.sport].copy()
+        else:
+            df = history.copy()
         if df.empty:
             return df
         df["home_norm"] = df["home_team"].map(lambda x: normalize_team_name(str(x), self.sport))
@@ -107,6 +133,8 @@ class TennisEngine:
         away = tk.away
         home_form = tk.team_summary(home, 10)
         away_form = tk.team_summary(away, 10)
+        if not _require_both_sides(home_form, away_form):
+            return []  # no completed matches for a side -> nothing honest to publish
         h2h_home_rate = tk.h2h_win_rate()
         league_hint = tk.league_hint()
 
@@ -114,7 +142,7 @@ class TennisEngine:
         round_pressure = "late round" if any(token in league_hint for token in ["final", "semi", "quarter"]) else "standard round"
         fatigue_gap = max(0, away_form["games"] - home_form["games"]) - max(0, home_form["games"] - away_form["games"])
         edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.34 + (h2h_home_rate - 0.5) * 0.16 + (home_form["margin"] - away_form["margin"]) * 0.035 + fatigue_gap * 0.01
-        home_win_prob = _bounded_probability(0.50 + edge, 0.30, 0.76)
+        home_win_prob = _bounded_probability(0.50 + edge)
         winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
         projected_sets = 2.6 + min(0.5, abs(home_form["win_rate"] - away_form["win_rate"]))
 
@@ -133,9 +161,10 @@ class TennisEngine:
         }
         reason = f"Tennis read leans {'Home Win' if home_win_prob >= 0.5 else 'Away Win'} from recent player form, {surface} surface context, H2H rate {h2h_home_rate:.0%}, and set-margin signal."
         total_pick = "Over 21.5 Games" if projected_sets >= 2.8 else "Under 21.5 Games"
+        total_conf = _separation_confidence(projected_sets, 2.8, 12.0)
         return [
             {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**meta, "market_logic": "Moneyline blends player win rate, head-to-head, set margin, surface hint, and fatigue proxy."}},
-            {"market": "Total Games", "pick": total_pick, "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Projected match length is around {projected_sets:.1f} sets based on form gap and available scoring history.", "engine_meta": {**meta, "market_logic": "Tennis total read estimates match length from competitiveness and recent set/game scoring proxies."}},
+            {"market": "Total Games", "pick": total_pick, "confidence": total_conf, "edge_score": total_conf, "risk_level": _risk(total_conf), "reasoning": f"Projected match length is around {projected_sets:.1f} sets based on form gap and available scoring history.", "engine_meta": {**meta, "market_logic": "Tennis total read estimates match length from competitiveness and recent set/game scoring proxies."}},
         ]
 
 
@@ -148,12 +177,14 @@ class CricketEngine:
         away = tk.away
         home_form = tk.team_summary(home, 12)
         away_form = tk.team_summary(away, 12)
+        if not _require_both_sides(home_form, away_form):
+            return []
         h2h_home_rate = tk.h2h_win_rate()
         league_hint = tk.league_hint()
         fmt = "T20" if "t20" in league_hint or "twenty" in league_hint else "ODI" if "odi" in league_hint or "one day" in league_hint else "Test" if "test" in league_hint else "Unknown format"
         chase_bias = 0.02 if any(token in league_hint for token in ["night", "t20", "odi"]) else 0.0
-        edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.30 + (home_form["margin"] - away_form["margin"]) / 1200 + (h2h_home_rate - 0.5) * 0.14 + 0.03 - chase_bias
-        home_win_prob = _bounded_probability(0.50 + edge, 0.32, 0.75)
+        edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.30 + (home_form["margin"] - away_form["margin"]) / 1200 + (h2h_home_rate - 0.5) * 0.14 - chase_bias
+        home_win_prob = _bounded_probability(0.50 + edge)
         winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
         projected_runs = None
         if home_form["for_avg"] or away_form["for_avg"]:
@@ -178,7 +209,8 @@ class CricketEngine:
         ]
         if projected_runs:
             over_under = "Over" if projected_runs >= 300 else "Under"
-            items.append({"market": "Total Runs", "pick": f"{over_under} {int(projected_runs // 50 * 50 + 50)} Runs", "confidence": 56.5, "edge_score": 56.5, "risk_level": "Medium", "reasoning": f"Available cricket scoring history projects roughly {projected_runs:.1f} combined runs for this matchup.", "engine_meta": {**meta, "market_logic": "Run total read uses recent runs for/against and format context."}})
+            runs_conf = _separation_confidence(projected_runs, 300, 0.08)
+            items.append({"market": "Total Runs", "pick": f"{over_under} {int(projected_runs // 50 * 50 + 50)} Runs", "confidence": runs_conf, "edge_score": runs_conf, "risk_level": _risk(runs_conf), "reasoning": f"Available cricket scoring history projects roughly {projected_runs:.1f} combined runs for this matchup.", "engine_meta": {**meta, "market_logic": "Run total read uses recent runs for/against and format context."}})
         return items
 
 
@@ -191,10 +223,12 @@ class BaseballEngine:
         away = tk.away
         home_form = tk.team_summary(home, 15)
         away_form = tk.team_summary(away, 15)
+        if not _require_both_sides(home_form, away_form):
+            return []
         h2h_home_rate = tk.h2h_win_rate()
         run_diff = home_form["margin"] - away_form["margin"]
-        edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.28 + run_diff * 0.035 + (h2h_home_rate - 0.5) * 0.12 + 0.035
-        home_win_prob = _bounded_probability(0.50 + edge, 0.33, 0.74)
+        edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.28 + run_diff * 0.035 + (h2h_home_rate - 0.5) * 0.12
+        home_win_prob = _bounded_probability(0.50 + edge)
         winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
         projected_total = round((home_form["for_avg"] + away_form["for_avg"] + home_form["against_avg"] + away_form["against_avg"]) / 2, 1) if home_form["for_avg"] or away_form["for_avg"] else None
         bullpen_proxy = round((home_form["against_avg"] - away_form["against_avg"]), 2)
@@ -215,12 +249,13 @@ class BaseballEngine:
         reason = f"Baseball read leans {'Home Win' if home_win_prob >= 0.5 else 'Away Win'} from run differential edge {run_diff:.2f}, recent runs allowed, H2H {h2h_home_rate:.0%}, and home park adjustment."
         items = [
             {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**meta, "market_logic": "Moneyline blends win form, run differential, pitching/bullpen proxy, head-to-head, and home park edge."}},
-            {"market": "Run Line", "pick": f"Home {run_diff:+.1f}" if run_diff >= 0 else f"Away {run_diff:+.1f}", "confidence": round(min(70, max(56, abs(run_diff) * 6 + 56)), 1), "edge_score": round(min(70, max(56, abs(run_diff) * 6 + 56)), 1), "risk_level": "Medium", "reasoning": f"Run-line follows recent run differential gap of {run_diff:.2f} runs per game.", "engine_meta": {**meta, "market_logic": "Run-line is based on recent average run differential rather than only win/loss form."}},
+            {"market": "Run Line", "pick": f"Home {run_diff:+.1f}" if run_diff >= 0 else f"Away {run_diff:+.1f}", "confidence": round(min(70, max(50, abs(run_diff) * 6 + 50)), 1), "edge_score": round(min(70, max(50, abs(run_diff) * 6 + 50)), 1), "risk_level": "Medium", "reasoning": f"Run-line follows recent run differential gap of {run_diff:.2f} runs per game.", "engine_meta": {**meta, "market_logic": "Run-line is based on recent average run differential rather than only win/loss form."}},
         ]
         if projected_total:
             threshold = 8.5
             over_under = "Over" if projected_total >= threshold else "Under"
-            items.append({"market": "Total Runs", "pick": f"{over_under} {threshold}", "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Recent baseball scoring profile projects about {projected_total:.1f} total runs.", "engine_meta": {**meta, "market_logic": "Total runs read blends both teams' recent scoring and runs allowed."}})
+            total_conf = _separation_confidence(projected_total, threshold, 3.0)
+            items.append({"market": "Total Runs", "pick": f"{over_under} {threshold}", "confidence": total_conf, "edge_score": total_conf, "risk_level": _risk(total_conf), "reasoning": f"Recent baseball scoring profile projects about {projected_total:.1f} total runs.", "engine_meta": {**meta, "market_logic": "Total runs read blends both teams' recent scoring and runs allowed."}})
         return items
 
 
@@ -233,16 +268,17 @@ class AmericanFootballEngine:
         away = tk.away
         home_form = tk.team_summary(home, 10)
         away_form = tk.team_summary(away, 10)
+        if not _require_both_sides(home_form, away_form):
+            return []
         h2h_home_rate = tk.h2h_win_rate()
         league_hint = tk.league_hint()
 
-        scoring_avg = (home_form["for_avg"] + away_form["for_avg"]) / 2 if home_form["for_avg"] or away_form["for_avg"] else 23.0
-        spread_edge = (home_form["margin"] - away_form["margin"]) + 2.5  # home field ~2.5 pts
+        spread_edge = home_form["margin"] - away_form["margin"]
         edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.32 + (h2h_home_rate - 0.5) * 0.12 + (spread_edge / 60)
-        home_win_prob = _bounded_probability(0.50 + edge, 0.30, 0.76)
+        home_win_prob = _bounded_probability(0.50 + edge)
         winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
-        spread_conf = round(min(72, max(54, abs(spread_edge) * 3 + 54)), 1)
-        projected_total = round((home_form["for_avg"] + away_form["for_avg"] + home_form["against_avg"] + away_form["against_avg"]) / 2, 1) if home_form["for_avg"] else round(scoring_avg * 2, 1)
+        spread_conf = round(min(72, max(50, abs(spread_edge) * 3 + 50)), 1)
+        projected_total = round((home_form["for_avg"] + away_form["for_avg"] + home_form["against_avg"] + away_form["against_avg"]) / 2, 1)
         total_line = 45.5
         over_under = "Over" if projected_total >= total_line else "Under"
 
@@ -264,7 +300,7 @@ class AmericanFootballEngine:
         return [
             {"market": "Moneyline", "pick": "Home Win" if home_win_prob >= 0.5 else "Away Win", "confidence": round(winner_conf, 1), "edge_score": round(winner_conf, 1), "risk_level": _risk(winner_conf), "reasoning": reason, "engine_meta": {**meta, "market_logic": "Moneyline blends win form, point margin, H2H, and home-field edge."}},
             {"market": "Point Spread", "pick": spread_pick, "confidence": spread_conf, "edge_score": spread_conf, "risk_level": _risk(spread_conf), "reasoning": f"Spread follows projected point margin of {spread_edge:+.1f} with home-field adjustment.", "engine_meta": {**meta, "market_logic": "Spread uses recent scoring margin and home-field boost."}},
-            {"market": "Total Points", "pick": f"{over_under} {total_line}", "confidence": 57.0, "edge_score": 57.0, "risk_level": "Medium", "reasoning": f"Projected combined points {projected_total:.1f} vs line {total_line}.", "engine_meta": {**meta, "market_logic": "Total blends both teams' recent points for and allowed."}},
+            {"market": "Total Points", "pick": f"{over_under} {total_line}", "confidence": _separation_confidence(projected_total, total_line, 0.8), "edge_score": _separation_confidence(projected_total, total_line, 0.8), "risk_level": _risk(_separation_confidence(projected_total, total_line, 0.8)), "reasoning": f"Projected combined points {projected_total:.1f} vs line {total_line}.", "engine_meta": {**meta, "market_logic": "Total blends both teams' recent points for and allowed."}},
         ]
 
 
@@ -277,20 +313,22 @@ class HockeyEngine:
         away = tk.away
         home_form = tk.team_summary(home, 12)
         away_form = tk.team_summary(away, 12)
+        if not _require_both_sides(home_form, away_form):
+            return []
         h2h_home_rate = tk.h2h_win_rate()
         league_hint = tk.league_hint()
 
         goal_diff = home_form["margin"] - away_form["margin"]
-        edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.30 + goal_diff * 0.06 + (h2h_home_rate - 0.5) * 0.12 + 0.04
-        home_win_prob = _bounded_probability(0.50 + edge, 0.30, 0.76)
+        edge = (home_form["win_rate"] - away_form["win_rate"]) * 0.30 + goal_diff * 0.06 + (h2h_home_rate - 0.5) * 0.12
+        home_win_prob = _bounded_probability(0.50 + edge)
         winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
 
-        projected_goals = round((home_form["for_avg"] + away_form["for_avg"] + home_form["against_avg"] + away_form["against_avg"]) / 2, 1) if home_form["for_avg"] else 5.5
+        projected_goals = round((home_form["for_avg"] + away_form["for_avg"] + home_form["against_avg"] + away_form["against_avg"]) / 2, 1)
         total_line = 5.5
         over_under = "Over" if projected_goals >= total_line else "Under"
-        total_conf = round(min(68, max(54, abs(projected_goals - total_line) * 8 + 54)), 1)
+        total_conf = _separation_confidence(projected_goals, total_line, 8.0)
 
-        btts_prob = min(0.78, max(0.42, (home_form["for_avg"] / max(home_form["for_avg"] + 0.1, 1)) * 0.6 + 0.35)) if home_form["for_avg"] else 0.62
+        btts_prob = _bounded_probability((home_form["for_avg"] / max(home_form["for_avg"] + 0.1, 1)) * 0.6 + 0.35)
         btts_pick = "BTTS Yes" if btts_prob >= 0.55 else "BTTS No"
         btts_conf = round(max(btts_prob, 1 - btts_prob) * 100, 1)
 
@@ -302,7 +340,6 @@ class HockeyEngine:
                 {"label": "Away goal margin", "value": round(away_form["margin"], 2), "note": f"Last {away_form['games']} games"},
                 {"label": "Projected goals", "value": projected_goals, "note": "Estimated combined goals"},
                 {"label": "Head-to-head", "value": f"{h2h_home_rate:.0%} home-side", "note": "Direct matchup history"},
-                {"label": "Home ice edge", "value": "+4%", "note": "Standard home-ice advantage"},
             ],
             "probabilities": {"home_win": round(home_win_prob, 4), "away_win": round(1 - home_win_prob, 4)},
             "projection": {"projected_goals": projected_goals, "total_line": total_line},

@@ -69,18 +69,20 @@ class GenericSportEngine:
                 def team_stats(team: str):
                     games = played[(played["home_norm"] == team) | (played["away_norm"] == team)].tail(12)
                     if games.empty:
-                        return 0.50, 0.0
-                    wins, margin = 0, 0.0
+                        return 0.0, 0.0, 0.0
+                    wins, draws, margin = 0, 0, 0.0
                     for _, row in games.iterrows():
                         is_home = row["home_norm"] == team
                         gf = float(row["home_score"] if is_home else row["away_score"])
                         ga = float(row["away_score"] if is_home else row["home_score"])
                         wins += 1 if gf > ga else 0
+                        draws += 1 if gf == ga else 0
                         margin += gf - ga
-                    return wins / len(games), margin / len(games)
+                    n = len(games)
+                    return wins / n, margin / n, draws / n
 
-                home_wr, home_margin = team_stats(home)
-                away_wr, away_margin = team_stats(away)
+                home_wr, home_margin, home_dr = team_stats(home)
+                away_wr, away_margin, away_dr = team_stats(away)
                 team_rows = played[
                     (played["home_norm"].isin([home, away])) |
                     (played["away_norm"].isin([home, away]))
@@ -88,32 +90,41 @@ class GenericSportEngine:
                 if not team_rows.empty:
                     projected_total = round(float((team_rows["home_score"] + team_rows["away_score"]).mean()), 1)
 
-        edge = (home_wr - away_wr) + ((home_margin - away_margin) / 20) + 0.04
-        home_win_prob = max(0.28, min(0.78, 0.50 + edge / 2))
-        winner_conf = max(home_win_prob, 1 - home_win_prob) * 100
-        winner_pick = "Home Win" if home_win_prob >= 0.5 else "Away Win"
-        away_win_prob = 1 - home_win_prob
-
+        # Honesty gate: without completed matches for either side there is no
+        # evidence to publish — the old path fabricated league-average picks
+        # with a confidence cap to look safe. Publish nothing instead.
         if not has_data:
-            winner_conf = min(winner_conf, 50.0)
-            home_win_prob = 0.50
+            return []
 
-        note = (
-            f"{sport.replace('_', ' ').title()} model checks recent win rate, scoring margin, and home advantage."
-            if has_data else
-            f"No completed {sport.replace('_', ' ')} history in database — pick uses league-average defaults only. Not a reliable signal."
-        )
+        # Probabilities computed ONLY from completed matches: observed win and
+        # draw rates, normalized. No clamps, no invented home-venue boost, no
+        # league-average defaults.
+        raw_home, raw_away = home_wr, away_wr
+        raw_draw = (home_dr + away_dr) / 2
+        total = raw_home + raw_away + raw_draw
+        if total <= 0:
+            return []
+        home_win_prob = raw_home / total
+        away_win_prob = raw_away / total
+        draw_prob = raw_draw / total
+        winner_pick = "Home Win" if home_win_prob >= away_win_prob else "Away Win"
+        winner_conf = max(home_win_prob, away_win_prob) * 100
+        note = f"{sport.replace('_', ' ').title()} model uses only completed matches: observed win rate, draw rate, and scoring margin."
         meta = {
             "summary": note,
             "factors": [
                 {"label": "Home win-rate", "value": f"{home_wr:.0%}", "note": f"Last 12 completed matches for {home}"},
                 {"label": "Away win-rate", "value": f"{away_wr:.0%}", "note": f"Last 12 completed matches for {away}"},
+                {"label": "Draw rate (avg)", "value": f"{(home_dr + away_dr) / 2:.0%}", "note": "Observed drawn matches share, both sides"},
                 {"label": "Home scoring margin", "value": round(home_margin, 2), "note": "Average margin per game"},
                 {"label": "Away scoring margin", "value": round(away_margin, 2), "note": "Average margin per game"},
-                {"label": "Home advantage", "value": "+4%", "note": "Generic home-venue boost"},
             ],
-            "probabilities": {"home_win": round(home_win_prob, 4), "away_win": round(away_win_prob, 4)},
-            "market_logic": "Moneyline uses recent win-rate, scoring margin differential, and home advantage.",
+            "probabilities": {
+                "home_win": round(home_win_prob, 4),
+                "draw": round(draw_prob, 4),
+                "away_win": round(away_win_prob, 4),
+            },
+            "market_logic": "Moneyline uses observed win/draw rates from completed matches only; no defaults, no home-venue boost.",
         }
         items = [{
             "market": "Moneyline", "pick": winner_pick, "confidence": round(winner_conf, 1),
@@ -121,22 +132,26 @@ class GenericSportEngine:
             "reasoning": f"{note} Leans {winner_pick}: home {home_wr:.0%} win-rate, away {away_wr:.0%}, margin edge {home_margin - away_margin:.2f}.",
             "engine_meta": meta,
         }]
-        dc_prob = max(home_win_prob + 0.25, away_win_prob + 0.25)
-        dc_pick = "Home or Draw" if home_win_prob >= away_win_prob else "Away or Draw"
-        dc_conf = round(min(dc_prob, 0.82) * 100, 1)
-        if not has_data:
-            dc_conf = min(dc_conf, 50.0)
+        dc_options = {
+            "Home or Draw": home_win_prob + draw_prob,
+            "Away or Draw": away_win_prob + draw_prob,
+            "Home or Away": home_win_prob + away_win_prob,
+        }
+        dc_pick, dc_prob = max(dc_options.items(), key=lambda x: x[1])
+        dc_conf = round(dc_prob * 100, 1)
         items.append({
             "market": "Double Chance", "pick": dc_pick, "confidence": dc_conf,
             "edge_score": dc_conf, "risk_level": _risk(dc_conf),
-            "reasoning": f"Double chance covers the favourite plus draw outcome. {note}",
-            "engine_meta": {**meta, "market_logic": "Double chance reduces upset risk by covering two outcomes."},
+            "reasoning": f"Double chance computed from observed win and draw rates. {note}",
+            "engine_meta": {**meta, "market_logic": "Double chance sums normalized outcome probabilities; no bonuses applied."},
         })
         if projected_total:
             sport_lines = {"rugby": 40.5, "volleyball": 152.5, "handball": 52.5, "mma": 2.5, "motorsport": 2.5}
             line = sport_lines.get(sport, projected_total * 0.95)
             over_under = "Over" if projected_total > line else "Under"
-            total_conf = round(min(67.0, max(54.0, abs(projected_total - line) * 3 + 54.0)), 1)
+            # 50 = coin-flip baseline when the projection equals the line; it
+            # only rises with actual separation between projection and line.
+            total_conf = round(min(67.0, max(50.0, abs(projected_total - line) * 3 + 50.0)), 1)
             items.append({
                 "market": "Total Points", "pick": f"{over_under} {line}", "confidence": total_conf,
                 "edge_score": total_conf, "risk_level": _risk(total_conf),

@@ -1,4 +1,5 @@
 import re
+import unicodedata
 
 
 FOOTBALL_ALIASES = {
@@ -257,7 +258,16 @@ _SUFFIX_RE = re.compile(
 
 
 def _key(name: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9 ]+", " ", str(name).lower())
+    # Transliterate stroke letters FIRST — they do NOT decompose under NFD
+    # (ł is a distinct letter, not l + accent), so "Białystok" would otherwise
+    # become "bia ystok" instead of "bialystok" and never match its ASCII twin.
+    folded = str(name).translate(str.maketrans({
+        "ł": "l", "Ł": "L", "ø": "o", "Ø": "O", "đ": "d", "Đ": "D", "ß": "ss", "þ": "th", "æ": "ae", "œ": "oe",
+    }))
+    # Fold remaining diacritics (ć, é, ü, ...) via NFD combining-mark removal.
+    folded = unicodedata.normalize("NFKD", folded)
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", folded.lower())
     cleaned = re.sub(r"\\s+", " ", cleaned).strip()
     return cleaned
 
@@ -284,6 +294,8 @@ def normalize_team_name(name: str, sport: str = "soccer") -> str:
     stripped = _strip_suffixes(key)
     if stripped in aliases:
         return aliases[stripped]
-    if stripped != key and stripped:
-        return stripped.title() if sport == "soccer" else str(name).strip()
-    return str(name).strip()
+    # Always return the folded canonical form: returning the raw original
+    # (e.g. "Jagiellonia Białystok") kept diacritic variants as separate team
+    # identities, which is exactly what split the history across sources.
+    canonical = stripped if stripped else key
+    return canonical.title()

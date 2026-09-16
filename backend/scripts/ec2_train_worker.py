@@ -1,25 +1,24 @@
 """REEDS EC2 training worker (first AWS milestone).
 
 Primary training path: EC2 -> full OOF ensemble (train_oof.py) -> artifacts ->
-unique GitHub 'models-v*' release -> Render sync-models-safe (streamed GitHub ->
-Render disk, never materialized in Render RAM) -> Render model registry.
-Legacy direct upload (EC2_UPLOAD_STRATEGY=direct) posts straight to the Render
-upload endpoints and is kept only as an explicit opt-in fallback.
-Kaggle remains the legacy/fallback worker and is untouched.
+unique GitHub 'models-v*' release (artifact + sidecar JSON), then registers the
+artifact in the Aiven model registry with the existing activation safeguards
+(register_model). No model data is ever POSTed to the API. Kaggle is the
+legacy fallback worker.
 
 Commands:
   validate    Config + connectivity dry-run. Nothing is trained or uploaded.
   train       Train ONE sport in this process with the production OOF ensemble,
-              write the bundle + sidecar JSON, then publish + sync Render unless
+              write the bundle + sidecar JSON, then publish to GitHub unless
               --skip-upload is given.
-  upload      Publish an EXISTING artifact + matching sidecar to a GitHub
-              'models-v*' release and sync Render (no training). Set
-              EC2_UPLOAD_STRATEGY=direct for the legacy direct-upload path.
-              --verify deserializes and structurally checks the bundle first.
+  upload      Publish an EXISTING artifact + matching sidecar to a unique
+              GitHub 'models-v*' release, then register it in the model
+              registry (no training). --verify deserializes and structurally
+              checks the bundle first.
   run-all     Train every sport sequentially, each in its own child process so
               the OS reclaims memory completely between sports. Never concurrent.
 
-Secrets policy: every secret (DATABASE_URL, ADMIN_API_KEY, ...) is read ONLY
+Secrets policy: every secret (DATABASE_URL, GITHUB_TOKEN, ...) is read ONLY
 from environment variables. Values are never printed or written to logs; error
 messages reference variable NAMES only.
 
@@ -52,14 +51,17 @@ EXIT_CONFIG = 2
 EXIT_NETWORK = 3
 
 # Env variable NAMES that the worker requires per command. Never their values.
+# Publishing goes to GitHub releases; registration uses the local DB directly
+# (no HTTP calls to any API instance).
 REQUIRED_ENV = {
     "train": ("DATABASE_URL",),
-    "upload": ("RENDER_URL", "ADMIN_API_KEY"),
-    "validate": ("DATABASE_URL", "RENDER_URL", "ADMIN_API_KEY"),
+    "upload": ("DATABASE_URL", "GITHUB_TOKEN"),
+    "validate": ("DATABASE_URL", "GITHUB_TOKEN"),
     "run-all": (),
 }
 
-# scikit-learn must stay in 1.6.x so uploaded bundles match Render's 1.6.0.
+# scikit-learn must stay in 1.6.x so published bundles match the pinned backend
+# runtime that deserializes them (backend/requirements.txt).
 SKLEARN_MIN = (1, 6)
 SKLEARN_MAX = (1, 7)
 
@@ -251,16 +253,8 @@ def _missing(vars_ref) -> list[str]:
 
 
 def _require_upload_env() -> list[str]:
-    """Env NAMES required to ship an artifact, by strategy (returned, never values).
-
-    github (default): GITHUB_TOKEN is needed to publish the release plus the
-    Render pair for /api/admin/sync-models-safe. direct (legacy): Render only.
-    """
-    strategy = os.environ.get("EC2_UPLOAD_STRATEGY", "github").strip().lower()
-    required = ["RENDER_URL", "ADMIN_API_KEY"]
-    if strategy != "direct":
-        required.insert(0, "GITHUB_TOKEN")
-    return [name for name in required if not os.environ.get(name, "").strip()]
+    """GitHub is the only publishing destination; no backend credentials needed."""
+    return _missing(("GITHUB_TOKEN",))
 
 
 def _redact(text) -> str:
@@ -289,69 +283,6 @@ def _setup_app_env() -> None:
     Path(os.environ["MODEL_DIR"]).mkdir(parents=True, exist_ok=True)
 
 
-def _render_base_url() -> str:
-    return os.environ["RENDER_URL"].rstrip("/")
-
-
-def _wait_for_render_ready(max_wait_seconds: int = 600) -> None:
-    """Never upload into a Render instance that is restarting."""
-    deadline = time.time() + max_wait_seconds
-    attempt = 0
-    while time.time() < deadline:
-        attempt += 1
-        try:
-            import requests
-            response = requests.get(f"{_render_base_url()}/ready", timeout=20)
-            if response.ok and response.json().get("ready") is True:
-                print(f"Render readiness confirmed (attempt {attempt})", flush=True)
-                return
-            print(f"Render not ready yet (HTTP {response.status_code}); waiting...", flush=True)
-        except Exception as exc:
-            print(f"Render readiness check failed; waiting... ({_redact(exc)})", flush=True)
-        time.sleep(min(5 + attempt, 20))
-    raise RuntimeError("Render did not become ready within 10 minutes")
-
-
-def _rewind_files(files) -> None:
-    if not isinstance(files, dict):
-        return
-    for value in files.values():
-        handle = value[1] if isinstance(value, tuple) and len(value) >= 2 else None
-        if hasattr(handle, "seek"):
-            handle.seek(0)
-
-
-def _post(path: str, *, timeout: int = 180, retries: int = 12, **kwargs):
-    """POST to Render with restart tolerance and safe multipart retries.
-
-    Raises RuntimeError with a clear message on failure; never prints secrets.
-    """
-    import requests
-    headers = {"X-Admin-Key": os.environ["ADMIN_API_KEY"]}
-    headers.update(kwargs.pop("headers", {}))
-    files = kwargs.get("files")
-    last_response = None
-    for attempt in range(1, retries + 1):
-        try:
-            _rewind_files(files)
-            response = requests.post(f"{_render_base_url()}{path}", headers=headers, timeout=timeout, **kwargs)
-            last_response = response
-            if response.ok:
-                return response
-            if response.status_code not in {502, 503, 504}:
-                raise RuntimeError(f"{path} returned HTTP {response.status_code}: {response.text[:500]}")
-            print(f"{path}: transient HTTP {response.status_code}; retry {attempt}/{retries}", flush=True)
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            print(f"{path}: transient request error; retry {attempt}/{retries}: {_redact(exc)}", flush=True)
-        if attempt < retries:
-            time.sleep(min(10 * attempt, 60))
-    detail = last_response.text[:500] if last_response is not None else "no response"
-    status = last_response.status_code if last_response is not None else "request-error"
-    raise RuntimeError(f"{path} failed after {retries} retries: HTTP {status}: {detail}")
-
-
 def _read_sidecar(artifact: Path) -> dict:
     sidecar = artifact.with_suffix(".json")
     if not sidecar.is_file():
@@ -377,12 +308,11 @@ def _publish_github_release(artifact: Path, sidecar: Path, sport: str) -> str:
     """Publish the artifact (.joblib) + sidecar (.json) to a unique GitHub release.
 
     Tag format 'models-v<UTC-timestamp>-<sport>' is unique per publish, which is
-    what sync-models-safe / bootstrap expect ('models-v*'). The release is
-    created first and deleted again if either asset upload fails so a broken
-    release never becomes 'releases[0]' for /api/admin/sync-models-safe. Raises
-    RuntimeError on any failure so a failed publish can never be mistaken for a
-    successful Render sync. The token is only ever sent as a header; it is never
-    logged.
+    what model_bootstrap.py expects ('models-v*') when restoring missing
+    artifacts on startup. The release is created first and deleted again if
+    either asset upload fails so a broken release never becomes the newest
+    models-v* release. Raises RuntimeError on any failure. The token is only
+    ever sent as a header; it is never logged.
     """
     import requests
     repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS").strip() or "zagzy8776/REEDS"
@@ -435,51 +365,13 @@ def _publish_github_release(artifact: Path, sidecar: Path, sport: str) -> str:
     return tag
 
 
-def _upload_direct(artifact: Path, sport: str, model_type: str, accuracy: float, sample_size: int) -> None:
-    """Legacy opt-in strategy (EC2_UPLOAD_STRATEGY=direct): stream to Render's endpoints."""
-    _wait_for_render_ready()
-
-    with artifact.open("rb") as handle:
-        response = _post(
-            "/api/admin/upload-model",
-            timeout=300,
-            retries=12,
-            files={"model": (artifact.name, handle, "application/octet-stream")},
-            data={
-                "sport": sport,
-                "model_type": model_type,
-                "accuracy": str(accuracy),
-                "sample_size": str(sample_size),
-            },
-        )
-    print(f"[upload] upload-model: {response.json()}", flush=True)
-
-    sidecar = artifact.with_suffix(".json")
-    if not sidecar.is_file():
-        return
-    metadata_payload = dict(_read_sidecar(artifact))
-    metadata_payload["sport"] = sport
-    metadata_payload["filename"] = artifact.name
-    import io
-    with io.BytesIO(json.dumps(metadata_payload).encode("utf-8")) as buffer:
-        payload = _post(
-            "/api/admin/upload-model-metadata",
-            timeout=60,
-            retries=3,
-            files={"metadata": (artifact.name.replace(".joblib", ".json"), buffer, "application/json")},
-            data={"sport": sport},
-        )
-    print(f"[upload] upload-model-metadata: {payload.json()}", flush=True)
-
-
 def _upload_artifact(artifact: Path, sport: str | None) -> None:
-    """Ship one artifact + sidecar to production.
+    """Publish one artifact + sidecar to a unique GitHub 'models-v*' release.
 
-    Default (EC2_UPLOAD_STRATEGY=github): publish the artifact + sidecar to a
-    unique GitHub 'models-v*' release, then ask Render to sync-models-safe. The
-    53 MiB payload is streamed GitHub -> Render disk and is never materialized
-    in Render RAM. Legacy (EC2_UPLOAD_STRATEGY=direct) streams straight to the
-    Render upload endpoints.
+    The API instance is never contacted: model_bootstrap.py restores missing
+    artifacts from these releases on startup and model_registry.py repairs
+    registry paths against the local model directory. Raises RuntimeError on
+    any failure so a failed publish is never mistaken for success.
     """
     artifact = artifact.resolve()
     if not artifact.is_file() or artifact.stat().st_size <= 0:
@@ -487,7 +379,7 @@ def _upload_artifact(artifact: Path, sport: str | None) -> None:
     size_mb = artifact.stat().st_size / (1024 * 1024)
     print(f"[upload] artifact={artifact.name} size={size_mb:.1f} MiB", flush=True)
     if size_mb > 90:
-        print("[upload] WARNING: artifact is near the 100 MiB upload cap; prefer EC2_UPLOAD_STRATEGY=github", flush=True)
+        print("[upload] WARNING: artifact is large; GitHub release assets allow up to 2 GiB", flush=True)
 
     meta = _read_sidecar(artifact)
     target_sport = str(sport or meta.get("sport") or "").strip().lower()
@@ -495,29 +387,40 @@ def _upload_artifact(artifact: Path, sport: str | None) -> None:
         raise RuntimeError("Could not determine sport for upload (pass --sport or provide sidecar 'sport')")
     accuracy = float(meta.get("accuracy", 0.0) or 0.0)
     sample_size = int(meta.get("sample_size", 0) or 0)
-    model_type = str(meta.get("model_type") or "+".join(meta.get("model_types") or []) or "uploaded")[:120]
     if not 0.0 <= accuracy <= 1.0:
         raise RuntimeError(f"Invalid accuracy in sidecar: {accuracy}")
     if sample_size <= 0:
         raise RuntimeError(f"Invalid sample_size in sidecar: {sample_size}")
 
-    strategy = os.environ.get("EC2_UPLOAD_STRATEGY", "github").strip().lower()
-    if strategy == "direct":
-        _upload_direct(artifact, target_sport, model_type, accuracy, sample_size)
-        return
-    if strategy != "github":
-        raise RuntimeError(f"Unknown EC2_UPLOAD_STRATEGY={strategy!r}; use 'github' (default) or 'direct'")
-
     sidecar = artifact.with_suffix(".json")
     tag = _publish_github_release(artifact, sidecar, target_sport)
     print(f"[upload] published GitHub release {tag}", flush=True)
 
-    _wait_for_render_ready()
-    sync = _post("/api/admin/sync-models-safe", timeout=600, retries=12)
-    sync_body = sync.json()
-    if str(sync_body.get("status")) != "success":
-        raise RuntimeError(f"Render sync-models-safe did not succeed: status={sync_body.get('status')!r}")
-    print(f"[upload] sync-models-safe OK (release {tag}): {sync_body}", flush=True)
+
+def _register_published_model(artifact: Path, sport: str) -> None:
+    """Register a freshly published artifact in the model registry.
+
+    Runs on the instance that owns both the model directory and the Aiven
+    database, and goes through the existing register_model() safeguards
+    (minimum samples, accuracy bounds, conservative activation). The sidecar
+    written next to the artifact supplies model_type/accuracy/sample_size.
+    Raises RuntimeError on any failure; never POSTs anywhere.
+    """
+    from app.db.session import SessionLocal
+    from app.services.model_registry import register_model
+
+    artifact = artifact.resolve()
+    meta = _read_sidecar(artifact)
+    model_type = str(meta.get("model_type") or "uploaded")[:50]
+    accuracy = float(meta.get("accuracy", 0.0) or 0.0)
+    sample_size = int(meta.get("sample_size", 0) or 0)
+    db = SessionLocal()
+    try:
+        mv = register_model(db, sport, model_type, str(artifact), accuracy, sample_size)
+    finally:
+        db.close()
+    print(f"[registry] {sport}: registered {artifact.name} "
+          f"accuracy={accuracy:.2%} sample_size={sample_size:,} active={bool(mv.is_active)}", flush=True)
 
 
 def _write_sidecar(result: dict, artifact: Path) -> None:
@@ -583,8 +486,8 @@ def _verify_bundle(artifact: Path) -> None:
     """Deserialize an artifact locally and verify its structure before upload.
 
     Also verifies SHA-256 checksum if present in the sidecar. Raises RuntimeError
-    on any failure. Never modifies the artifact. Nothing is sent to Render unless
-    this passes.
+    on any failure. Never modifies the artifact. Callers requesting verification
+    must let this pass before publishing.
     """
     artifact = artifact.resolve()
     if not artifact.is_file() or artifact.stat().st_size <= 0:
@@ -626,7 +529,7 @@ def _cmd_validate(_args) -> int:
     _setup_app_env()
     print("== REEDS EC2 worker validation (dry-run; no training, no upload) ==")
     print(f"MODEL_DIR={Path(os.environ['MODEL_DIR'])}")
-    print(f"upload strategy: EC2_UPLOAD_STRATEGY={os.environ.get('EC2_UPLOAD_STRATEGY', 'github')}")
+    print(f"GITHUB_REPO={os.environ.get('GITHUB_REPO', 'zagzy8776/REEDS')}")
 
     try:
         import sklearn
@@ -637,7 +540,7 @@ def _cmd_validate(_args) -> int:
     locked = SKLEARN_MIN <= version < SKLEARN_MAX
     print(f"scikit-learn {sklearn.__version__} (lock range {'1.6.x' if locked else 'OUT OF RANGE'})")
     if not locked:
-        print("scikit-learn outside the 1.6.x lock; Render expects 1.6.0. Install backend/requirements.txt.", file=sys.stderr)
+        print("scikit-learn outside the 1.6.x lock pinned in backend/requirements.txt.", file=sys.stderr)
         return EXIT_CONFIG
 
     print("-- database connectivity --", flush=True)
@@ -665,32 +568,29 @@ def _cmd_validate(_args) -> int:
         print(f"Database check FAILED: {type(exc).__name__}: {_redact(exc)}", file=sys.stderr)
         return EXIT_NETWORK
 
-    print("-- Render connectivity --", flush=True)
+    print("-- GitHub releases connectivity --", flush=True)
     import requests
     try:
-        ready = requests.get(f"{_render_base_url()}/ready", timeout=20)
-        body = ready.json() if ready.ok else {}
-        print(f"GET /ready -> HTTP {ready.status_code}, ready={body.get('ready')}")
-        if not (ready.ok and body.get("ready") is True):
-            print("Render /ready did not report ready=True", file=sys.stderr)
+        repo = os.environ.get("GITHUB_REPO", "zagzy8776/REEDS").strip() or "zagzy8776/REEDS"
+        response = requests.get(
+            f"https://api.github.com/repos/{repo}/releases?per_page=30",
+            headers=_github_headers(),
+            timeout=20,
+        )
+        print(f"GET /repos/{repo}/releases -> HTTP {response.status_code}")
+        if response.status_code != 200:
+            print("GitHub releases check FAILED (check GITHUB_TOKEN and GITHUB_REPO).", file=sys.stderr)
             return EXIT_NETWORK
-    except Exception as exc:
-        print(f"Render /ready check FAILED: {_redact(exc)}", file=sys.stderr)
-        return EXIT_NETWORK
-
-    try:
-        status = requests.get(f"{_render_base_url()}/api/admin/training-status",
-                              headers={"X-Admin-Key": os.environ["ADMIN_API_KEY"]}, timeout=20)
-        print(f"GET /api/admin/training-status -> HTTP {status.status_code}")
-        if status.ok:
-            data = status.json()
-            print(f"  ready_to_train={data.get('ready_to_train')} soccer_completed={data.get('soccer_completed')}")
-            print(f"  active_models={[(m.get('sport'), round(float(m.get('accuracy', 0)) * 100, 1), m.get('rows')) for m in data.get('active_models', [])]}")
+        releases = [
+            release for release in response.json()
+            if str(release.get("tag_name", "")).startswith("models-v")
+        ]
+        if releases:
+            print(f"  newest models-v* release: {releases[0].get('tag_name')}")
         else:
-            print("Admin endpoint rejected the key (check ADMIN_API_KEY).", file=sys.stderr)
-            return EXIT_NETWORK
+            print("  no models-v* releases yet (expected on first publish)")
     except Exception as exc:
-        print(f"Render admin check FAILED: {_redact(exc)}", file=sys.stderr)
+        print(f"GitHub releases check FAILED: {_redact(exc)}", file=sys.stderr)
         return EXIT_NETWORK
 
     print("VALIDATION PASSED — ready to train on EC2.", flush=True)
@@ -846,6 +746,14 @@ def _train_sport(args, sport: str, min_rows: int) -> int:
         print(f"Artifact preserved locally: {artifact} — re-upload with: "
               f"python {SCRIPT_DIR / 'ec2_train_worker.py'} upload --sport {sport} --artifact {artifact}", file=sys.stderr)
         return EXIT_NETWORK
+
+    try:
+        _register_published_model(artifact, sport)
+    except Exception as exc:
+        print(f"REGISTRATION FAILED for {sport}: {type(exc).__name__}: {_redact(exc)}", file=sys.stderr)
+        print(f"Artifact published to GitHub but not registered; preserved locally: {artifact} — re-register with: "
+              f"python {SCRIPT_DIR / 'ec2_train_worker.py'} upload --sport {sport} --artifact {artifact}", file=sys.stderr)
+        return EXIT_NETWORK
     return EXIT_OK
 
 
@@ -884,7 +792,14 @@ def _cmd_upload(args) -> int:
     except Exception as exc:
         print(f"UPLOAD FAILED for {sport}: {type(exc).__name__}: {_redact(exc)}", file=sys.stderr)
         return EXIT_NETWORK
-    print(f"UPLOAD {sport} OK — model registered on Render.", flush=True)
+    try:
+        _register_published_model(artifact, sport)
+    except Exception as exc:
+        print(f"REGISTRATION FAILED for {sport}: {type(exc).__name__}: {_redact(exc)}", file=sys.stderr)
+        print(f"Artifact is on GitHub releases but not registered. Re-run: "
+              f"python {SCRIPT_DIR / 'ec2_train_worker.py'} upload --sport {sport} --artifact {artifact}", file=sys.stderr)
+        return EXIT_NETWORK
+    print(f"UPLOAD {sport} OK — published to GitHub releases and registered.", flush=True)
     return EXIT_OK
 
 
@@ -955,7 +870,7 @@ def _run_all_sports(args) -> int:
                 break
         # Extract upload line.
         for line in stdout.splitlines():
-            if "published GitHub release" in line or "sync-models-safe OK" in line:
+            if "published GitHub release" in line:
                 print(f"    {line.strip()}", flush=True)
                 break
     print(f"runner exit code: {EXIT_DATA if failed else EXIT_OK}", flush=True)
@@ -969,13 +884,13 @@ def _main(argv=None) -> int:
     p_validate = sub.add_parser("validate", help="Config + connectivity dry-run")
     p_validate.set_defaults(func=_cmd_validate)
 
-    p_train = sub.add_parser("train", help="Train one sport (full OOF ensemble) then upload")
+    p_train = sub.add_parser("train", help="Train one sport (full OOF ensemble) then publish to GitHub")
     p_train.add_argument("--sport", required=True)
-    p_train.add_argument("--skip-upload", action="store_true", help="Train and write artifacts only; do not contact Render")
+    p_train.add_argument("--skip-upload", action="store_true", help="Train and write artifacts only; do not publish")
     p_train.add_argument("--force", action="store_true", help="Override training lock (NOT recommended)")
     p_train.set_defaults(func=_cmd_train)
 
-    p_upload = sub.add_parser("upload", help="Publish an existing artifact + sidecar to GitHub and sync Render (no training)")
+    p_upload = sub.add_parser("upload", help="Publish an existing artifact + sidecar to GitHub releases (no training)")
     p_upload.add_argument("--sport", required=True)
     p_upload.add_argument("--artifact", required=True)
     p_upload.add_argument("--verify", action="store_true",

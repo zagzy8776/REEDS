@@ -130,13 +130,24 @@ def dataframe_from_db(db: Session, max_age_days: int | None = 180) -> pd.DataFra
         history["away_score"].notna()
     ].copy()
 
-    # Prevent duplicate historical matches across the two stores.
+    # Prevent duplicate historical matches across the two stores. Duplicate
+    # rows from different providers use different team spellings (e.g.
+    # "Jagiellonia Białystok" vs "Jagiellonia Bialystok") and different league
+    # labels, so dedup on NORMALIZED team names + date, not raw strings.
+    import unicodedata
+
+    def _fold(value) -> str:
+        folded = unicodedata.normalize("NFKD", str(value))
+        return "".join(ch for ch in folded if not unicodedata.combining(ch)).lower().strip()
+
+    history["home_norm"] = history["home_team"].map(_fold)
+    history["away_norm"] = history["away_team"].map(_fold)
     history["match_date"] = pd.to_datetime(
         history["match_date"], errors="coerce"
     )
     history = history.dropna(subset=["match_date"])
     history = history.drop_duplicates(
-        subset=["sport", "league", "match_date", "home_team", "away_team"],
+        subset=["sport", "match_date", "home_norm", "away_norm"],
         keep="last",
     )
 
@@ -260,10 +271,12 @@ def generate_today_predictions(db: Session) -> int:
                 try:
                     items = soccer_engine.predict_soccer(history, {"id": fx.id, "_db": db, "sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "league": fx.league, "home_odds": fx.home_odds, "draw_odds": fx.draw_odds, "away_odds": fx.away_odds})
                 except Exception:
-                    log.exception("LoyalEdge failed fixture %s — generic fallback", fx.id)
-                    items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "_db": db})
+                    log.exception("LoyalEdge failed fixture %s — skipping (no fabrication fallback)", fx.id)
+                    items = []
             elif fx.sport == "soccer":
-                items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "_db": db})
+                # No trained soccer model: publish nothing rather than a
+                # heuristic guess (historically the source of fake reads).
+                items = []
             else:
                 items = generic_engine.predict(history, {"sport": fx.sport, "home_team": fx.home_team, "away_team": fx.away_team, "match_date": fx.match_date, "_db": db})
             _backfill_fixture_odds(db, fx, items)
