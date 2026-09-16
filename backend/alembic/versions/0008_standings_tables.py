@@ -13,7 +13,30 @@ branch_labels = None
 depends_on = None
 
 
+def _ensure_baseline_compat() -> None:
+    """Handle production DBs whose alembic_version was created outside Alembic.
+
+    Production Aiven carries ``aiven_baseline_0001`` which matches no
+    revision file, so a plain ``alembic upgrade head`` fails with
+    "Can't locate revision". If we detect such an unknown version stamp,
+    point it at our parent revision (0007) first — the pre-0008 schema is
+    already what's live, so no data-table changes are involved.
+    Idempotent: a no-op when the stamp is already a known revision.
+    """
+    from alembic.migration import MigrationContext
+
+    conn = op.get_bind()
+    ctx = MigrationContext.configure(conn)
+    current = ctx.get_current_heads()
+    known = {"0001_prediction_integrity", "0002_user_predictions", "0003_live_events",
+             "0004_insider_signals", "0005_market_evidence", "0006_historical_bootstrap",
+             "0007_product_intelligence", "0008_standings_tables"}
+    if current and not (set(current) <= known):
+        op.execute("UPDATE alembic_version SET version_num='0007_product_intelligence'")
+
+
 def upgrade() -> None:
+    _ensure_baseline_compat()
     op.create_table(
         "standings",
         sa.Column("id", sa.Integer(), primary_key=True),
