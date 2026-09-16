@@ -78,6 +78,21 @@ class ESPNProvider(SportsDataProvider):
                 return s
         return None
 
+    @staticmethod
+    def _normalize_season(season: str | None) -> str | None:
+        """Reduce season labels like '2025-2026'/'2025/26' to the ESPN year param.
+
+        ESPN accepts a single year (e.g. ``?season=2025``); anything else
+        yields HTTP 400 and an empty table. We take the leading 4-digit
+        year so callers can keep REEDS-style season labels.
+        """
+        if not season:
+            return None
+        import re
+
+        m = re.search(r"(19|20)\d{2}", str(season))
+        return m.group(0) if m else None
+
     def get_standings(
         self,
         sport: str,
@@ -97,8 +112,9 @@ class ESPNProvider(SportsDataProvider):
 
         url = f"{self.STANDINGS_BASE}/{slug}/standings"
         params: dict = {}
-        if season:
-            params["season"] = season
+        season_param = self._normalize_season(season)
+        if season_param:
+            params["season"] = season_param
 
         try:
             resp = self.http.get(url, params=params, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=self.timeout)
