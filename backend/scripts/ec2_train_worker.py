@@ -45,6 +45,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = SCRIPT_DIR.parent
 REPO_ROOT = BACKEND_DIR.parent
 
+# Make `app.*` importable regardless of how the worker is launched (systemd,
+# cron, or a bare shell). Python only puts the SCRIPT's directory on sys.path,
+# not the backend root, so without this the app imports fail outside environments
+# that set PYTHONPATH explicitly.
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 EXIT_OK = 0
 EXIT_DATA = 1
 EXIT_CONFIG = 2

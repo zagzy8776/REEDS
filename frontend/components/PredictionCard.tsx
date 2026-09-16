@@ -54,6 +54,10 @@ export function PredictionCard({ p }: PredictionCardProps) {
     Boolean(p.analysis?.cold_start || p.engine_meta?.cold_start) ||
     p.analysis?.data_depth === "cold_start" ||
     p.engine_meta?.data_depth === "cold_start";
+  const marketImplied = p.engine_meta?.read_type === "market_implied";
+  const depth = p.engine_meta?.data_depth as
+    | { home_history?: number; away_history?: number; minimum_for_model_read?: number }
+    | undefined;
   const reasoning = String(p.reasoning || "").trim() || "REEDS analysed the available match information.";
 
   return (
@@ -70,14 +74,22 @@ export function PredictionCard({ p }: PredictionCardProps) {
         </div>
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Pill>{verdictTitle(p.verdict)}</Pill>
+        {marketImplied ? <Pill tone="amber">Market-implied</Pill> : <Pill>{verdictTitle(p.verdict)}</Pill>}
         <Pill tone={riskTone(risk)}>{risk === "unknown" ? "Risk not rated" : `${risk} risk`}</Pill>
         {p.is_published === false && <Pill tone="amber">Early / draft</Pill>}
+        {marketImplied && <Pill tone="amber">No team history</Pill>}
+        {!marketImplied && depth && typeof depth.home_history === "number" && typeof depth.away_history === "number" && (
+          <Pill tone="blue">{`history ${depth.home_history}–${depth.away} (min ${depth.minimum_for_model_read ?? 3})`}</Pill>
+        )}
         {cold && <Pill tone="red">Thin data</Pill>}
         {p.result !== "pending" && <Pill tone={p.result === "won" ? "green" : "red"}>{p.result}</Pill>}
       </div>
       <div className="mt-4">
-        <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-400/70">REEDS leans</p>
+        {marketImplied ? (
+          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-amber-400/70">Market-implied — no model read</p>
+        ) : (
+          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-400/70">REEDS leans</p>
+        )}
         <p className="mt-1 text-sm leading-relaxed text-slate-300">{reasoning}</p>
       </div>
       <div className="mt-4">
